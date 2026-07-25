@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "api-quality-agent"
+name = "api-quality-orchestrator"
 version = "0.1.0"
 description = "Agente de automação de qualidade para APIs (CLI), idealizado, arquitetado e mantido por Crystiane Mello"
 readme = "README.md"
@@ -21,7 +21,7 @@ Homepage = "https://github.com/CrysMello"
 LinkedIn = "https://www.linkedin.com/in/crystianemello/"
 
 [project.scripts]
-api-quality-agent = "api_quality_agent.cli.main:run"
+api-quality-orchestrator = "api_quality_agent.cli.main:run"
 
 [project.optional-dependencies]
 dev = [

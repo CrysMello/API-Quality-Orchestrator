@@ -12,7 +12,7 @@ def test_help_exits_with_zero_and_prints_usage(capsys):
         main(["--help"])
     assert exc_info.value.code == 0
     captured = capsys.readouterr()
-    assert "api-quality-agent" in captured.out
+    assert "api-quality-orchestrator" in captured.out
 
 
 def test_version_exits_with_zero_and_prints_version(capsys):

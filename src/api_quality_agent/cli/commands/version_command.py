@@ -9,5 +9,5 @@ def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") 
 
 
 def _handle_version(_args: argparse.Namespace) -> int:
-    print(f"API Quality Agent {__version__}")
+    print(f"API Quality Orchestrator {__version__}")
     return 0

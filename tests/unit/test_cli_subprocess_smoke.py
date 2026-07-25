@@ -55,7 +55,7 @@ def test_version_subcommand_exits_zero():
 
     assert result.returncode == 0
     assert __version__ in result.stdout
-    assert "API Quality Agent" in result.stdout
+    assert "API Quality Orchestrator" in result.stdout
 
 
 def test_generate_help_exits_zero_and_documents_flags():

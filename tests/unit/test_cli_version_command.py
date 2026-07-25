@@ -8,7 +8,7 @@ def test_version_command_prints_version_and_succeeds(capsys):
     assert exit_code == 0
     captured = capsys.readouterr()
     assert __version__ in captured.out
-    assert "API Quality Agent" in captured.out
+    assert "API Quality Orchestrator" in captured.out
 
 
 def test_version_flag_on_root_parser_exits_zero(capsys):

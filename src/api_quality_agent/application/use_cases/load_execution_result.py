@@ -17,6 +17,6 @@ class LoadExecutionResultUseCase:
         if latest_path is None:
             raise ResourceNotFoundError(
                 "Nenhum resultado de execução foi encontrado.\n\n"
-                "Execute primeiro:\n  api-quality-agent run"
+                "Execute primeiro:\n  api-quality-orchestrator run"
             )
         return self._execution_result_reader.read(path=latest_path)

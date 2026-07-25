@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "Se você utilizar este projeto, por favor cite-o conforme abaixo."
-title: "API Quality Agent"
+title: "API Quality Orchestrator"
 version: "0.1.0"
 license: MIT
 authors:

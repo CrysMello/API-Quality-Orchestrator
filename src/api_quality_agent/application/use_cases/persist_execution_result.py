@@ -7,7 +7,7 @@ from api_quality_agent.ports.outbound import ExecutionResultRepository
 
 # "1.0" (sem schema_version/workspace no arquivo), "1.1" (schema_version +
 # workspace, aditivo) e "1.2" (test_failures, aditivo) são as versões que
-# api-quality-agent report sabe ler — ver JsonExecutionResultReader. Mudanças
+# api-quality-orchestrator report sabe ler — ver JsonExecutionResultReader. Mudanças
 # de schema são sempre aditivas; nenhum campo existente é removido ou
 # renomeado.
 EXECUTION_RESULT_SCHEMA_VERSION = "1.2"
@@ -56,7 +56,7 @@ def _serialize(
 ) -> dict[str, Any]:
     # Serialização explícita e estruturada: nunca stdout/stderr brutos, nunca
     # a Collection completa — só os campos já expostos pelo domínio, usados
-    # como entrada oficial de `api-quality-agent report`. collection_id/
+    # como entrada oficial de `api-quality-orchestrator report`. collection_id/
     # workspace_* ficam None quando a execução veio de um arquivo local
     # (run --file) — não há Workspace/Collection do Postman envolvidos.
     infrastructure_failure = result.infrastructure_failure

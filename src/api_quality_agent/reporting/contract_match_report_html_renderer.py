@@ -29,7 +29,7 @@ def render_contract_match_report_html(report: ContractMatchReport) -> str:
 </head>
 <body>
 <header>
-  <p class="brand">API Quality Agent</p>
+  <p class="brand">API Quality Orchestrator</p>
   <h1>Contract Match Report</h1>
   <p class="source">Contrato: {escape(report.source_file)}</p>
 </header>

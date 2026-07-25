@@ -17,7 +17,7 @@ from api_quality_agent.cli.commands import (
 from api_quality_agent.cli.exit_codes import resolve_exit_code
 from api_quality_agent.domain.exceptions import ApiQualityAgentError
 
-PROG_NAME = "api-quality-agent"
+PROG_NAME = "api-quality-orchestrator"
 
 
 def build_parser() -> argparse.ArgumentParser:

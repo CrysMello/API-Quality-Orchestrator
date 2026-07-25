@@ -70,7 +70,7 @@ class ReportExecutionSection:
     test_failures: tuple[ReportTestFailure, ...]
     infrastructure_failure: ReportInfrastructureFailure | None
     # Só preenchidos quando o relatório vem de um result.json persistido
-    # (api-quality-agent report) — o ExecutionResult "ao vivo" do fluxo
+    # (api-quality-orchestrator report) — o ExecutionResult "ao vivo" do fluxo
     # generate/update/run nunca teve início/fim absolutos, só duration.
     started_at: datetime | None = None
     finished_at: datetime | None = None

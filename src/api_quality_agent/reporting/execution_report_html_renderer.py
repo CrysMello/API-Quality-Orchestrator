@@ -13,7 +13,7 @@ _STATUS_ICONS = {"passed": "✓", "failed": "✗", "infrastructure_failure": "�
 
 def render_execution_report_html(report: Report, *, source_path: str, schema_version: str) -> str:
     # Renderer dedicado ao relatório produzido a partir de um result.json
-    # (api-quality-agent report) — layout com cards/barra de progresso,
+    # (api-quality-orchestrator report) — layout com cards/barra de progresso,
     # diferente do render_report_html() genérico usado por generate/update.
     # Reaproveita o mesmo Report/ReportExecutionSection do ReportEngine;
     # todo texto vindo do result.json passa por escape() antes de entrar no
@@ -30,12 +30,12 @@ def render_execution_report_html(report: Report, *, source_path: str, schema_ver
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title} — API Quality Agent</title>
+<title>{title} — API Quality Orchestrator</title>
 <style>{_CSS}</style>
 </head>
 <body>
 <header>
-  <p class="brand">API Quality Agent</p>
+  <p class="brand">API Quality Orchestrator</p>
   <h1>Execution Report</h1>
   <p class="status status-{status}"><span aria-hidden="true">{_STATUS_ICONS[status]}</span> {_STATUS_LABELS[status]}</p>
   <ul class="header-meta">

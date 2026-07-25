@@ -88,7 +88,7 @@ def test_report_without_input_and_no_results_reports_resource_not_found(tmp_path
 
     assert exit_code == RESOURCE_NOT_FOUND
     err = capsys.readouterr().err
-    assert "api-quality-agent run" in err
+    assert "api-quality-orchestrator run" in err
 
 
 # --- Validação de entrada ----------------------------------------------------------------

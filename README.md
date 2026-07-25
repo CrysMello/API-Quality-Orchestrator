@@ -1,4 +1,4 @@
-# API Quality Agent
+# API Quality Orchestrator
 
 Agente de automação de qualidade para APIs, executado por linha de comando. Analisa contratos (JSON, OpenAPI/Swagger, Collections Postman), gera schemas e testes, e pode se conectar opcionalmente ao Postman para atualizar Collections de forma controlada.
 
@@ -43,107 +43,107 @@ pip install -e ".[dev]"
 
 ### Instalação e configuração
 
-Depois de instalado (`pip install -e ".[dev]"`), o executável `api-quality-agent` fica disponível no ambiente (registrado via `[project.scripts]`). A API Key do Postman é lida da variável de ambiente `POSTMAN_API_KEY` — nunca de um arquivo, argumento de linha de comando ou de qualquer valor persistido em disco:
+Depois de instalado (`pip install -e ".[dev]"`), o executável `api-quality-orchestrator` fica disponível no ambiente (registrado via `[project.scripts]`). A API Key do Postman é lida da variável de ambiente `POSTMAN_API_KEY` — nunca de um arquivo, argumento de linha de comando ou de qualquer valor persistido em disco:
 
 ```bash
 export POSTMAN_API_KEY="sua-chave-aqui"        # Windows (PowerShell): $env:POSTMAN_API_KEY = "sua-chave-aqui"
-api-quality-agent config show                  # confirma que a chave está configurada (mascarada)
-api-quality-agent doctor                       # verifica pré-requisitos locais
+api-quality-orchestrator config show                  # confirma que a chave está configurada (mascarada)
+api-quality-orchestrator doctor                       # verifica pré-requisitos locais
 ```
 
 ### Uso pela linha de comando
 
 ```bash
-api-quality-agent --help
-api-quality-agent --version
-api-quality-agent version
+api-quality-orchestrator --help
+api-quality-orchestrator --version
+api-quality-orchestrator version
 
 # Lista os Workspaces disponíveis para a API Key configurada
-api-quality-agent workspace list
+api-quality-orchestrator workspace list
 
 # Seleciona o Workspace ativo, por ID, por nome, pelo índice mostrado por
 # `workspace list`, ou interativamente (mesmas regras de generate, abaixo)
-api-quality-agent workspace select --workspace-id <id>
-api-quality-agent workspace select --workspace-name "Meu Workspace"
-api-quality-agent workspace select 1
-api-quality-agent workspace select
+api-quality-orchestrator workspace select --workspace-id <id>
+api-quality-orchestrator workspace select --workspace-name "Meu Workspace"
+api-quality-orchestrator workspace select 1
+api-quality-orchestrator workspace select
 
 # Lista as Collections do Workspace ativo
-api-quality-agent list
+api-quality-orchestrator list
 
 # Gera e aplica os testes em uma Collection específica, por ID...
-api-quality-agent generate --collection-id 31333303-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+api-quality-orchestrator generate --collection-id 31333303-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 
 # ...ou por nome (deve ser único no Workspace; se houver mais de uma Collection
 # com esse nome, o comando lista os IDs e pede para usar --collection-id)...
-api-quality-agent generate --collection-name "Fake Store API Collection"
+api-quality-orchestrator generate --collection-name "Fake Store API Collection"
 
 # ...ou pelo índice mostrado por `list`...
-api-quality-agent generate 2
+api-quality-orchestrator generate 2
 
 # ...ou interativamente, escolhendo a partir da listagem exibida no terminal
-api-quality-agent generate
+api-quality-orchestrator generate
 
 # Pula a confirmação final (útil em scripts/automação)
-api-quality-agent generate --collection-id <id> --yes
+api-quality-orchestrator generate --collection-id <id> --yes
 
 # Gera os testes a partir de uma Collection exportada localmente (Postman >
 # Collection > Export), sem conectar à API do Postman e sem precisar de
 # POSTMAN_API_KEY — útil quando você só tem o arquivo, ou quer gerar os
 # scripts offline para colar manualmente depois
-api-quality-agent generate --file local/collections/minha_collection_exportada.json
+api-quality-orchestrator generate --file local/collections/minha_collection_exportada.json
 
 # Gera uma Collection Postman completa (com os testes já embutidos) a partir
 # de uma especificação OpenAPI/Swagger local — também sem POSTMAN_API_KEY
-api-quality-agent generate --openapi-file local/specs/minha_api.json
+api-quality-orchestrator generate --openapi-file local/specs/minha_api.json
 
 # Usa um contrato declarado numa planilha Excel como fonte de schema, em vez
 # de inferir de Examples salvos — combinável com a seleção online normal...
-api-quality-agent generate --collection-id <id> --contract-file local/contratos/contrato.xlsx
+api-quality-orchestrator generate --collection-id <id> --contract-file local/contratos/contrato.xlsx
 # ...ou com --file (totalmente offline, sem POSTMAN_API_KEY)
-api-quality-agent generate --file local/collections/minha_collection_exportada.json --contract-file local/contratos/contrato.xlsx
+api-quality-orchestrator generate --file local/collections/minha_collection_exportada.json --contract-file local/contratos/contrato.xlsx
 
 # Depois de revisar os arquivos gerados em artifacts/.../scripts/, aplica a
 # atualização na Collection remota do Postman (mesma seleção por ID/nome/
 # índice/interativa de generate)
-api-quality-agent update --collection-id <id>
-api-quality-agent update -n "Fake Store API Collection"
-api-quality-agent update 2
-api-quality-agent update
-api-quality-agent update --collection-id <id> --yes
+api-quality-orchestrator update --collection-id <id>
+api-quality-orchestrator update -n "Fake Store API Collection"
+api-quality-orchestrator update 2
+api-quality-orchestrator update
+api-quality-orchestrator update --collection-id <id> --yes
 
 # Executa a Collection via Newman (mesma seleção por ID/nome/índice/interativa)
-api-quality-agent run --collection-id <id>
-api-quality-agent run -n "Fake Store API Collection"
-api-quality-agent run 2
-api-quality-agent run
+api-quality-orchestrator run --collection-id <id>
+api-quality-orchestrator run -n "Fake Store API Collection"
+api-quality-orchestrator run 2
+api-quality-orchestrator run
 
 # Configura o caminho do executável do Newman quando ele não está resolvível
 # direto pelo PATH (comum no Windows — "newman" no PATH pode apontar para um
 # .ps1 que o subprocess do Python não executa diretamente; use o .cmd)
-api-quality-agent run -c <id> --newman-executable "C:\Users\voce\AppData\Roaming\npm\newman.cmd"
+api-quality-orchestrator run -c <id> --newman-executable "C:\Users\voce\AppData\Roaming\npm\newman.cmd"
 # ...ou, se preferir configurar uma vez por sessão do terminal:
 # $env:NEWMAN_EXECUTABLE="C:\Users\voce\AppData\Roaming\npm\newman.cmd"
 
 # Executa uma Collection local via Newman, sem conectar à API do Postman
-api-quality-agent run --file local/collections/minha_collection_exportada.json
+api-quality-orchestrator run --file local/collections/minha_collection_exportada.json
 
 # Usa um Environment do Postman na execução (funciona em run e run --file)
-api-quality-agent run --collection-id <id> --environment local/environments/producao.json
+api-quality-orchestrator run --collection-id <id> --environment local/environments/producao.json
 
 # Gera um relatório HTML a partir do result.json mais recente em artifacts/
 # (não precisa de POSTMAN_API_KEY nem executa o Newman de novo)
-api-quality-agent report
+api-quality-orchestrator report
 
 # ...ou de um result.json específico
-api-quality-agent report --input artifacts/run_20260720_103512123456/result.json
+api-quality-orchestrator report --input artifacts/run_20260720_103512123456/result.json
 
 # Escolhe onde salvar (diretório ou caminho de arquivo)
-api-quality-agent report --output artifacts/reports
-api-quality-agent report --output meu_relatorio.html
+api-quality-orchestrator report --output artifacts/reports
+api-quality-orchestrator report --output meu_relatorio.html
 
 # Substitui um relatório já existente (por padrão, report nunca sobrescreve)
-api-quality-agent report --overwrite
+api-quality-orchestrator report --overwrite
 ```
 
 Em `workspace select`, `generate`, `update` e `run`, apenas uma forma de seleção pode ser usada por vez (ID, nome, índice ou, em `generate`/`run`, `--file`); combiná-las é rejeitado antes de qualquer chamada de rede. Sem `--yes` (em `generate`/`update`), sempre pedem confirmação antes de agir; qualquer resposta que não seja um "sim" reconhecido (incluindo Ctrl+C ou EOF, em qualquer prompt) cancela a operação sem alterar nada, com código de saída 9. Em `generate`/`update`/`run`, a seleção de Collection é sempre temporária (nunca sobrescreve a seleção ativa); já `workspace select`, ao ser confirmado, persiste o novo Workspace em `~/.api-quality-agent/selection.json` — e se o Workspace escolhido for diferente do anterior, a Collection ativa é limpa (pertencia ao contexto anterior).
@@ -174,9 +174,9 @@ Se a gravação falhar (ex.: disco cheio), isso nunca muda o resultado da execu�
 **`report` nunca executa o Newman de novo nem acessa o Postman — ele só lê um `result.json` já persistido pelo `run`.** Fluxo completo:
 
 ```
-api-quality-agent run     →  artifacts/run_<timestamp>/result.json
+api-quality-orchestrator run     →  artifacts/run_<timestamp>/result.json
                            ↓
-api-quality-agent report  →  artifacts/run_<timestamp>/report.html
+api-quality-orchestrator report  →  artifacts/run_<timestamp>/report.html
 ```
 
 Sem `--input`, usa o `result.json` mais recente encontrado em `artifacts/**/result.json` (por data de modificação) e avisa qual escolheu ("Using latest execution result: ..."). Sem `--output`, o relatório fica ao lado do `result.json` de origem; `--output` aceita um diretório (nome do arquivo vira `report_<timestamp>.html`, reaproveitando o timestamp do próprio `result.json`) ou um caminho de arquivo completo. Por padrão `report` nunca sobrescreve um relatório existente — precisa de `--overwrite` explícito.
@@ -189,21 +189,21 @@ O `result.json` schema `1.0` (sem `workspace`/`schema_version`) continua legíve
 
 **`generate` nunca altera a Collection remota — só `update` faz isso.** O fluxo recomendado é:
 
-1. `api-quality-agent generate -c <collection-id>` — gera os scripts em `artifacts/.../scripts/` para revisão local; nada muda no Postman.
+1. `api-quality-orchestrator generate -c <collection-id>` — gera os scripts em `artifacts/.../scripts/` para revisão local; nada muda no Postman.
 2. Revise os arquivos `.js` gerados.
-3. `api-quality-agent update -c <collection-id>` — **gera os testes de novo**, a partir do estado *atual* da Collection no Postman (não lê os arquivos gerados no passo 1), mostra um preview (requests analisadas/alteradas/sem alteração, testes gerados, avisos), pede confirmação (padrão **negativo** — Enter vazio cancela, diferente de `generate`/`workspace select`), cria um backup local antes do upload e só então atualiza a Collection remota. Se a Collection tiver mudado entre os passos 1 e 3, o resultado do `update` reflete o estado novo — o preview do passo 1 pode não corresponder mais exatamente ao que será aplicado.
+3. `api-quality-orchestrator update -c <collection-id>` — **gera os testes de novo**, a partir do estado *atual* da Collection no Postman (não lê os arquivos gerados no passo 1), mostra um preview (requests analisadas/alteradas/sem alteração, testes gerados, avisos), pede confirmação (padrão **negativo** — Enter vazio cancela, diferente de `generate`/`workspace select`), cria um backup local antes do upload e só então atualiza a Collection remota. Se a Collection tiver mudado entre os passos 1 e 3, o resultado do `update` reflete o estado novo — o preview do passo 1 pode não corresponder mais exatamente ao que será aplicado.
 
-Os scripts de exemplo antigos em `local/` (ex.: `select_collection_and_generate.py`, com `COLLECTION_ID` editado manualmente no código) não são mais necessários — `api-quality-agent workspace select` + `generate` + `update` os substituem.
+Os scripts de exemplo antigos em `local/` (ex.: `select_collection_and_generate.py`, com `COLLECTION_ID` editado manualmente no código) não são mais necessários — `api-quality-orchestrator workspace select` + `generate` + `update` os substituem.
 
 ### Modo Offline
 
 Três dos quatro comandos que produzem/executam testes funcionam inteiramente com arquivos locais, sem `POSTMAN_API_KEY` e sem nenhuma chamada de rede:
 
 ```bash
-api-quality-agent generate --file collection.json         # gera os scripts a partir de uma Collection Postman
-api-quality-agent generate --openapi-file openapi.json    # gera Collection + scripts a partir de uma spec OpenAPI/Swagger
-api-quality-agent run --file collection.json              # executa a Collection via Newman
-api-quality-agent report                                  # gera o relatório (já é local por natureza)
+api-quality-orchestrator generate --file collection.json         # gera os scripts a partir de uma Collection Postman
+api-quality-orchestrator generate --openapi-file openapi.json    # gera Collection + scripts a partir de uma spec OpenAPI/Swagger
+api-quality-orchestrator run --file collection.json              # executa a Collection via Newman
+api-quality-orchestrator report                                  # gera o relatório (já é local por natureza)
 ```
 
 `run --file` reaproveita o parâmetro `local_collection_path` que o `RunCollectionUseCase` já tinha internamente — nenhuma abstração nova, nenhuma duplicação da lógica de execução: o Newman roda direto sobre o arquivo informado, e o resultado é persistido em `result.json` normalmente (com `workspace`/`collection.id` como `null`, já que não há Workspace/Collection do Postman envolvidos — `report` já lida com isso mostrando "N/A"). `report` nunca dependeu do Postman para começo de conversa, então não precisou de nenhuma mudança — o mesmo comando lê `result.json` de execuções online e offline sem distinção.
@@ -217,8 +217,8 @@ api-quality-agent report                                  # gera o relatório (j
 Times que mantêm o contrato de cada endpoint numa planilha (campo, formato, tamanho, obrigatoriedade — schema **declarado**, não inferido de um Example salvo) podem usar esse contrato como fonte de schema para `generate`, em vez de depender de haver um "Example Response" salvo no Postman:
 
 ```bash
-api-quality-agent generate --collection-id <id> --contract-file contrato.xlsx
-api-quality-agent generate --file collection.json --contract-file contrato.xlsx   # totalmente offline
+api-quality-orchestrator generate --collection-id <id> --contract-file contrato.xlsx
+api-quality-orchestrator generate --file collection.json --contract-file contrato.xlsx   # totalmente offline
 ```
 
 Como funciona, por dentro: `ExcelContractParser` lê a planilha (seções de Header/Path Param/Query Param/Body/Resposta por status HTTP, reconstruindo a árvore de objeto/array pela coluna `Sequencial`) e `ExcelContractValidator` verifica consistência (sequencial duplicado/órfão, tipo desconhecido, array sem filhos, path param não-obrigatório) — tudo sem conhecer a Collection. Cada endpoint declarado é pareado com uma request real da Collection por **método + path canônico** (`CanonicalEndpointNormalizer` + `ContractEndpointMatcher`): `{id}`, `:id` e `{{id}}` são tratados como equivalentes (o nome do parâmetro não importa, só a posição), e a variável de infraestrutura (`{{baseUrl}}`) nunca é confundida com parâmetro de path porque a canonização usa sempre o array `path` do Postman, nunca o `raw` completo.
@@ -231,12 +231,12 @@ Endpoints pareados usam o schema declarado; **endpoints sem contrato pareado con
 # Prefixo fixo de path presente só nas requests da Collection (ex.: de um
 # gateway), ausente do path declarado no contrato — removido só por
 # correspondência exata de segmentos no início do path
-api-quality-agent generate --collection-id <id> --contract-file contrato.xlsx --collection-path-prefix /api
+api-quality-orchestrator generate --collection-id <id> --contract-file contrato.xlsx --collection-path-prefix /api
 
 # Falha o comando (exit code 1) se algum endpoint ficar sem contrato
 # correspondente (UNMATCHED) ou com correspondência ambígua (AMBIGUOUS) —
 # útil em CI; o relatório ainda é gerado e persistido antes da falha
-api-quality-agent generate --collection-id <id> --contract-file contrato.xlsx --strict-contract-match
+api-quality-orchestrator generate --collection-id <id> --contract-file contrato.xlsx --strict-contract-match
 ```
 
 **Escopo desta primeira versão** (decisões deliberadas, documentadas para transparência, não débito técnico):
