@@ -40,6 +40,15 @@ def _valid_payload_1_1(**overrides) -> dict:
     return payload
 
 
+def _valid_payload_1_2(**overrides) -> dict:
+    payload = _valid_payload_1_1(schema_version="1.2")
+    payload["test_failures"] = [
+        {"request_name": "Criar pet", "test_name": "Status 201", "error_message": "boom"},
+    ]
+    payload.update(overrides)
+    return payload
+
+
 def _valid_payload_1_0() -> dict:
     # Schema 1.0: sem schema_version e sem workspace no arquivo.
     return {
@@ -78,6 +87,23 @@ def test_read_schema_1_1_populates_workspace(tmp_path):
     assert record.started_at == datetime(2026, 7, 20, 10, 35, 12, tzinfo=timezone.utc)
     assert record.finished_at == datetime(2026, 7, 20, 10, 35, 46, tzinfo=timezone.utc)
     assert record.source_path == str(path)
+    assert record.test_failures == ()
+
+
+# --- Leitura: schema 1.2 ----------------------------------------------------------------
+
+
+def test_read_schema_1_2_populates_test_failures(tmp_path):
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_2())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.schema_version == "1.2"
+    assert len(record.test_failures) == 1
+    assert record.test_failures[0].request_name == "Criar pet"
+    assert record.test_failures[0].test_name == "Status 201"
+    assert record.test_failures[0].error_message == "boom"
 
 
 # --- Leitura: schema 1.0 (retrocompatibilidade) ----------------------------------------------------------------

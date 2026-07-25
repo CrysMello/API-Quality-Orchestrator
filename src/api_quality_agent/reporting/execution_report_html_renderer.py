@@ -122,6 +122,20 @@ def _render_failures(execution: ReportExecutionSection) -> str:
             f"{_e(execution.infrastructure_failure.failure_type)} — "
             f"{_e(execution.infrastructure_failure.message)}</p></section>"
         )
+    if execution.test_failures:
+        rows = "".join(
+            "<tr>"
+            f"<td>{_e(failure.request_name or '')}</td>"
+            f"<td>{_e(failure.test_name)}</td>"
+            f"<td>{_e(failure.error_message)}</td>"
+            "</tr>"
+            for failure in execution.test_failures
+        )
+        return (
+            '<section aria-label="Falhas"><h2>Falhas</h2>'
+            "<table><thead><tr><th>Request</th><th>Teste</th><th>Mensagem</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table></section>"
+        )
     if not execution.failed_assertions:
         return '<section aria-label="Falhas"><h2>Falhas</h2><p>Nenhuma falha encontrada.</p></section>'
     return (

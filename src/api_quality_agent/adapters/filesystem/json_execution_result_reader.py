@@ -13,14 +13,16 @@ from api_quality_agent.domain.models import (
     ExecutionResultRecord,
     InfrastructureFailure,
     InfrastructureFailureType,
+    TestFailure,
 )
 
 DEFAULT_EXECUTION_RESULTS_BASE_PATH = Path("artifacts")
 
 # "1.0" nunca teve schema_version no arquivo (assumido implicitamente) nem
-# workspace; "1.1" adiciona os dois de forma aditiva. Qualquer outra versão
-# é recusada — nunca interpretada parcialmente.
-_SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1"})
+# workspace; "1.1" adiciona workspace; "1.2" adiciona test_failures. Cada
+# versão é aditiva sobre a anterior. Qualquer outra versão é recusada — nunca
+# interpretada parcialmente.
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1", "1.2"})
 _DEFAULT_SCHEMA_VERSION = "1.0"
 
 
@@ -81,6 +83,17 @@ def _deserialize(payload: dict[str, Any], *, schema_version: str, source_path: s
                 message=infrastructure_failure_payload["message"],
             )
 
+        # "test_failures" só existe a partir do schema 1.2 — ausente em 1.0/
+        # 1.1, tratado como lista vazia, nunca inventado.
+        test_failures = tuple(
+            TestFailure(
+                request_name=failure["request_name"],
+                test_name=failure["test_name"],
+                error_message=failure["error_message"],
+            )
+            for failure in payload.get("test_failures") or []
+        )
+
         return ExecutionResultRecord(
             source_path=source_path,
             schema_version=schema_version,
@@ -96,6 +109,7 @@ def _deserialize(payload: dict[str, Any], *, schema_version: str, source_path: s
             failed_assertions=int(summary["failed"]),
             success=success,
             infrastructure_failure=infrastructure_failure,
+            test_failures=test_failures,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise InvalidExecutionResultError(

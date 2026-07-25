@@ -63,7 +63,7 @@ def test_persisted_json_has_expected_structure():
     assert location.path == "artifacts/run_fake/result.json"
     payload = json.loads(repository.captured_content)
     assert payload == {
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "execution": {
             "started_at": _STARTED_AT.isoformat(),
             "finished_at": _FINISHED_AT.isoformat(),
@@ -77,6 +77,9 @@ def test_persisted_json_has_expected_structure():
             "passed": 309,
             "failed": 3,
         },
+        "test_failures": [
+            {"request_name": "Criar pet", "test_name": "Status 201", "error_message": "boom"},
+        ],
         "success": True,
         "infrastructure_failure": None,
     }
@@ -168,6 +171,7 @@ def test_persisted_json_never_contains_the_full_collection_document():
         "workspace",
         "collection",
         "summary",
+        "test_failures",
         "success",
         "infrastructure_failure",
     }

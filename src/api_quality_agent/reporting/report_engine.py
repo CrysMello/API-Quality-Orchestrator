@@ -325,10 +325,14 @@ def _build_execution_section_from_record(record: ExecutionResultRecord) -> Repor
         total_requests=record.total_requests,
         total_assertions=record.total_assertions,
         failed_assertions=record.failed_assertions,
-        # result.json só guarda contagens agregadas, nunca o detalhamento
-        # por request/teste (isso nunca foi persistido) — não há como
-        # reconstruir a tabela de falhas individuais sem inventar dados.
-        test_failures=(),
+        test_failures=tuple(
+            ReportTestFailure(
+                request_name=failure.request_name,
+                test_name=failure.test_name,
+                error_message=failure.error_message,
+            )
+            for failure in record.test_failures
+        ),
         infrastructure_failure=infrastructure_failure,
         started_at=record.started_at,
         finished_at=record.finished_at,

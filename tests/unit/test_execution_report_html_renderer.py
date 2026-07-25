@@ -23,6 +23,7 @@ def _record(**overrides) -> ExecutionResultRecord:
         failed_assertions=3,
         success=False,
         infrastructure_failure=None,
+        test_failures=(),
     )
     defaults.update(overrides)
     return ExecutionResultRecord(**defaults)

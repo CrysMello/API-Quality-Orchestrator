@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from api_quality_agent.domain.models.infrastructure_failure import InfrastructureFailure
+from api_quality_agent.domain.models.test_failure import TestFailure
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class ExecutionResultRecord:
     failed_assertions: int
     success: bool
     infrastructure_failure: InfrastructureFailure | None
+    test_failures: tuple[TestFailure, ...]
 
     @property
     def passed_assertions(self) -> int:
