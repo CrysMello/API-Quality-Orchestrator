@@ -3,6 +3,10 @@ import json
 from api_quality_agent.adapters.filesystem import LocalArtifactRepository
 from api_quality_agent.application.orchestration import AgentOrchestrator
 from api_quality_agent.application.use_cases import GenerateTestsFromDocumentUseCase
+from api_quality_agent.application.use_cases.generate_tests_from_document import (
+    _MAX_SLUG_LENGTH,
+    _slugify,
+)
 from api_quality_agent.domain.models import ExecutionMode
 from api_quality_agent.domain.services import (
     ApiAnalysisEngine,
@@ -136,3 +140,38 @@ def test_no_network_dependency_is_required():
 
     signature = inspect.signature(GenerateTestsFromDocumentUseCase.__init__)
     assert set(signature.parameters) == {"self", "orchestrator", "artifact_repository", "id_factory", "clock"}
+
+
+# --- _slugify: nomes de arquivo longos (limite MAX_PATH do Windows) ------------------
+
+
+def test_slugify_within_limit_is_unchanged():
+    value = "POST /pets"
+
+    assert _slugify(value) == "POST_pets"
+
+
+def test_slugify_above_limit_is_truncated_with_hash():
+    value = "GET " + "/".join(f"segmento-longo-{i}" for i in range(10))
+    sanitized_full = value.replace(" ", "_").replace("/", "_")
+
+    result = _slugify(value)
+    prefix, _, hash_suffix = result.rpartition("_")
+
+    assert len(result) <= _MAX_SLUG_LENGTH
+    assert sanitized_full.startswith(prefix)
+    assert len(hash_suffix) == 8
+
+
+def test_slugify_truncation_is_deterministic():
+    value = "POST " + "x" * 200
+
+    assert _slugify(value) == _slugify(value)
+
+
+def test_slugify_avoids_collision_for_same_long_prefix():
+    prefix = "x" * 200
+    value_a = f"{prefix}-a"
+    value_b = f"{prefix}-b"
+
+    assert _slugify(value_a) != _slugify(value_b)

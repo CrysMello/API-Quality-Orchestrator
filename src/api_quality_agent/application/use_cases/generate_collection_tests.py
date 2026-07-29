@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from collections.abc import Callable
@@ -24,6 +25,15 @@ from api_quality_agent.domain.models import (
 from api_quality_agent.ports.outbound import ArtifactRepository, CollectionRepository
 
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
+
+# Endpoints com paths longos/aninhados podem gerar nomes de arquivo que,
+# somados ao caminho completo em artifacts/, ultrapassam o limite de 260
+# caracteres do Windows (MAX_PATH), causando FileNotFoundError ao salvar.
+# 40 caracteres deixa margem para prefixos de diretório longos (ex.: projeto
+# sincronizado via OneDrive) + 3 UUIDs de workspace/collection/execution
+# (37 caracteres cada) + "scripts\" + hash + extensão ".js" sem estourar 260.
+_MAX_FILENAME_LENGTH = 40
+_FILENAME_HASH_LENGTH = 8
 
 
 class GenerateCollectionTestsUseCase:
@@ -147,8 +157,13 @@ class GenerateCollectionTestsUseCase:
 
 
 def _sanitize_filename(value: str) -> str:
-    sanitized = _UNSAFE_FILENAME_CHARS.sub("_", value).strip("_")
-    return sanitized or "endpoint"
+    sanitized = _UNSAFE_FILENAME_CHARS.sub("_", value).strip("_") or "endpoint"
+    if len(sanitized) <= _MAX_FILENAME_LENGTH:
+        return sanitized
+
+    digest = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()[:_FILENAME_HASH_LENGTH]
+    truncated_length = _MAX_FILENAME_LENGTH - _FILENAME_HASH_LENGTH - 1
+    return f"{sanitized[:truncated_length]}_{digest}"
 
 
 def _serialize_diff(diff: DiffResult) -> dict[str, Any]:

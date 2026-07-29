@@ -9,6 +9,10 @@ from api_quality_agent.application.use_cases import (
     GetCurrentWorkspaceUseCase,
     ResolveCollectionUseCase,
 )
+from api_quality_agent.application.use_cases.generate_collection_tests import (
+    _MAX_FILENAME_LENGTH,
+    _sanitize_filename,
+)
 from api_quality_agent.domain.exceptions import InputError, ResourceNotFoundError
 from api_quality_agent.domain.models import ActiveSelection, CollectionRef
 from api_quality_agent.domain.services import (
@@ -408,3 +412,38 @@ def test_generated_scripts_are_identical_across_two_executions():
     second_script = second.endpoint_outcomes[0].generated_script.script
     assert first_script == second_script
     assert first.diff.entries == second.diff.entries
+
+
+# --- _sanitize_filename: nomes de arquivo longos (limite MAX_PATH do Windows) --------
+
+
+def test_sanitize_filename_within_limit_is_unchanged():
+    value = "POST /pets"
+
+    assert _sanitize_filename(value) == "POST_pets"
+
+
+def test_sanitize_filename_above_limit_is_truncated_with_hash():
+    value = "GET " + "/".join(f"segmento-longo-{i}" for i in range(10))
+    sanitized_full = value.replace(" ", "_").replace("/", "_")
+
+    result = _sanitize_filename(value)
+    prefix, _, hash_suffix = result.rpartition("_")
+
+    assert len(result) <= _MAX_FILENAME_LENGTH
+    assert sanitized_full.startswith(prefix)
+    assert len(hash_suffix) == 8
+
+
+def test_sanitize_filename_truncation_is_deterministic():
+    value = "POST " + "x" * 200
+
+    assert _sanitize_filename(value) == _sanitize_filename(value)
+
+
+def test_sanitize_filename_avoids_collision_for_same_long_prefix():
+    prefix = "x" * 200
+    value_a = f"{prefix}-a"
+    value_b = f"{prefix}-b"
+
+    assert _sanitize_filename(value_a) != _sanitize_filename(value_b)
