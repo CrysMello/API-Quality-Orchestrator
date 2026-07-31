@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "api-quality-orchestrator"
 version = "0.1.0"
-description = "Agente de automação de qualidade para APIs (CLI), idealizado, arquitetado e mantido por Crystiane Mello"
+description = "Orquestrador de automação de qualidade para APIs (CLI), idealizado, arquitetado e mantido por Crystiane Mello"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }

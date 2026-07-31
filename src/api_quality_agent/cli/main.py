@@ -23,7 +23,7 @@ PROG_NAME = "api-quality-orchestrator"
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROG_NAME,
-        description="Agente de automação de qualidade para APIs.",
+        description="Orquestrador de automação de qualidade para APIs.",
     )
     parser.add_argument(
         "--version",
