@@ -424,3 +424,91 @@ def test_unknown_collection_item_generates_warning_and_is_skipped():
 
     assert len(result.endpoints) == 1
     assert any(w.code == "UNKNOWN_ITEM_SKIPPED" for w in result.warnings)
+
+
+# --- analyze_collection_requests expõe o NormalizedRequest já calculado -----
+# (necessário para geradores standalone, ex.: Playwright, que precisam
+# montar a própria requisição HTTP — ver AnalyzedCollectionRequest)
+
+
+def _pets_collection_document() -> object:
+    return _parse_collection(
+        [
+            {
+                "name": "Criar pet",
+                "id": "req-1",
+                "request": {
+                    "method": "POST",
+                    "url": {
+                        "raw": "https://api.exemplo.com/pets?ativo=true",
+                        "protocol": "https",
+                        "host": ["api", "exemplo", "com"],
+                        "path": ["pets"],
+                        "query": [{"key": "ativo", "value": "true"}],
+                    },
+                    "header": [{"key": "Content-Type", "value": "application/json"}],
+                    "body": {"mode": "raw", "raw": '{"name": "Rex"}'},
+                },
+            }
+        ]
+    )
+
+
+def test_analyze_collection_requests_exposes_normalized_request():
+    document = _pets_collection_document()
+
+    analyzed = ApiAnalysisEngine().analyze_collection_requests(document)
+
+    assert len(analyzed) == 1
+    entry = analyzed[0]
+
+    # raw_request continua presente e correto (comportamento anterior mantido).
+    assert entry.raw_request.name == "Criar pet"
+    assert entry.raw_request.item_id == "req-1"
+
+    # analysis continua consistente com o raw_request.
+    assert entry.analysis.method == "POST"
+
+    # normalized_request é o dado novo: método, URL, headers, body e
+    # parâmetros de query, prontos para montar a requisição HTTP sozinho.
+    normalized = entry.normalized_request
+    assert normalized.method == "POST"
+    assert normalized.url.raw == "https://api.exemplo.com/pets?ativo=true"
+    assert normalized.url.path == ("pets",)
+    assert [(q.key, q.value) for q in normalized.url.query_parameters] == [("ativo", "true")]
+    assert [(h.key, h.value) for h in normalized.headers] == [
+        ("Content-Type", "application/json")
+    ]
+    assert normalized.body.has_content is True
+    assert normalized.body.text_content == '{"name": "Rex"}'
+
+
+def test_analyze_collection_requests_normalizes_exactly_once():
+    # PostmanRequestNormalizer.normalize é a única fonte do NormalizedRequest
+    # — se analyze_collection_requests normalizasse de novo, o resultado
+    # deixaria de ser identidade-consistente com o que analyze_collection já
+    # usa internamente para produzir `analysis`. Comparar os dois confirma
+    # que não há uma segunda passada de normalização.
+    document = _pets_collection_document()
+
+    analyzed = ApiAnalysisEngine().analyze_collection_requests(document)
+    analysis_only = ApiAnalysisEngine().analyze_collection(document)
+
+    assert analyzed[0].analysis == analysis_only.endpoints[0]
+
+
+def test_analyze_collection_requests_normalized_request_matches_raw_request_order():
+    # Duas requests: a ordem de raw_request/normalized_request/analysis deve
+    # ser sempre a mesma (mesma travessia usada por analyze_collection).
+    document = _parse_collection(
+        [
+            {"name": "R1", "id": "r1", "request": {"method": "GET", "url": "https://x/a"}},
+            {"name": "R2", "id": "r2", "request": {"method": "POST", "url": "https://x/b"}},
+        ]
+    )
+
+    analyzed = ApiAnalysisEngine().analyze_collection_requests(document)
+
+    assert [entry.raw_request.item_id for entry in analyzed] == ["r1", "r2"]
+    assert [entry.normalized_request.method for entry in analyzed] == ["GET", "POST"]
+    assert [entry.analysis.method for entry in analyzed] == ["GET", "POST"]
