@@ -1,11 +1,13 @@
 """Caracterização do inventário de comandos/flags da CLI, exatamente como
-registrados hoje em `cli.main.build_parser()` — antes da Fase 2 do plano
-Playwright (`--target` em `generate`) e da Fase 8 (`--engine`/
-`--playwright-dir` em `run`).
+registrados hoje em `cli.main.build_parser()`.
 
-Se este teste quebrar durante essas fases, é a mudança esperada — atualize-o
-conscientemente. Fora delas, é regressão real (comando/flag removido ou
-renomeado sem querer).
+`--target` em `generate` foi adicionado deliberadamente na Parte 04 do plano
+Playwright (Bloco 2) — a asserção de `generate` já reflete esse estado.
+`run` ainda vai ganhar `--engine`/`--playwright-dir` na Fase 8, o que exigirá
+uma atualização consciente análoga.
+
+Se este teste quebrar fora de uma dessas mudanças planejadas, é regressão
+real (comando/flag removido ou renomeado sem querer).
 """
 
 import argparse
@@ -65,6 +67,7 @@ def test_generate_command_flags_are_unchanged() -> None:
         "--strict-contract-match",
         "-y",
         "--yes",
+        "--target",
     }
 
 

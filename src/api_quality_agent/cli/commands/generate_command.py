@@ -1,10 +1,26 @@
 import argparse
+from collections.abc import Callable
 
 from api_quality_agent.application.orchestration import CollectionGenerationResult
 from api_quality_agent.cli import bootstrap, collection_selection
 from api_quality_agent.cli.exit_codes import OPERATION_CANCELLED, SUCCESS
 from api_quality_agent.cli.interactive import OperationCancelled, confirm
-from api_quality_agent.domain.exceptions import InputError
+from api_quality_agent.domain.exceptions import InputError, PlaywrightGenerationNotImplementedError
+
+# Destinos aceitos por --target (Parte 04 do plano de ação Playwright).
+# "postman" é o default: preserva 100% o comportamento anterior à
+# existência desta flag para quem não a usa.
+_TARGET_POSTMAN = "postman"
+_TARGET_PLAYWRIGHT = "playwright"
+_TARGET_ALL = "all"
+_TARGET_CHOICES = (_TARGET_POSTMAN, _TARGET_PLAYWRIGHT, _TARGET_ALL)
+
+_PLAYWRIGHT_NOT_IMPLEMENTED_MESSAGE = (
+    "PLAYWRIGHT_GENERATION_NOT_IMPLEMENTED: a geração de testes Playwright "
+    "ainda não está implementada nesta versão (contratos e modelos já "
+    "existem em generators/playwright/, ver Bloco 2 em diante do plano de "
+    "ação Playwright). --target postman continua disponível normalmente."
+)
 
 
 def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
@@ -76,7 +92,38 @@ def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") 
         action="store_true",
         help="Não solicitar confirmação final.",
     )
+    parser.add_argument(
+        "--target",
+        dest="target",
+        default=_TARGET_POSTMAN,
+        choices=_TARGET_CHOICES,
+        help=(
+            'Destino da geração: "postman" (padrão — comportamento atual, '
+            'inalterado), "playwright" (ainda não implementado nesta '
+            'versão) ou "all" (os dois).'
+        ),
+    )
     parser.set_defaults(handler=_handle_generate)
+
+
+def _generate_for_target(
+    target: str, generate_postman: Callable[[], CollectionGenerationResult]
+) -> CollectionGenerationResult:
+    # Ponto único de roteamento entre os dois geradores, reaproveitado
+    # pelos três caminhos de entrada (online, --file, --openapi-file).
+    if target == _TARGET_PLAYWRIGHT:
+        # playwright não chama postman: nem tentamos gerar via Postman.
+        raise PlaywrightGenerationNotImplementedError(_PLAYWRIGHT_NOT_IMPLEMENTED_MESSAGE)
+
+    result = generate_postman()
+
+    if target == _TARGET_ALL:
+        # all prepara a chamada dos dois: Postman já rodou de verdade
+        # (artefatos salvos normalmente); Playwright ainda é um stub
+        # controlado — falha depois, não antes, do lado que já funciona.
+        raise PlaywrightGenerationNotImplementedError(_PLAYWRIGHT_NOT_IMPLEMENTED_MESSAGE)
+
+    return result
 
 
 def _handle_generate(args: argparse.Namespace) -> int:
@@ -118,15 +165,17 @@ def _handle_generate(args: argparse.Namespace) -> int:
     # resolvida acima (por ID, nome, índice ou interativamente) — isso é
     # sempre uma seleção temporária (ResolveCollectionUseCase nunca
     # persiste), nunca altera a seleção ativa salva em disco.
-    if args.contract_file is not None:
-        result = context.generate_with_contract_use_case.execute_online(
-            contract_file=args.contract_file,
-            collection_id=selected.id,
-            collection_path_prefix=args.collection_path_prefix,
-            strict_contract_match=args.strict_contract_match,
-        )
-    else:
-        result = context.generate_use_case.execute(collection_id=selected.id)
+    def _generate_postman() -> CollectionGenerationResult:
+        if args.contract_file is not None:
+            return context.generate_with_contract_use_case.execute_online(
+                contract_file=args.contract_file,
+                collection_id=selected.id,
+                collection_path_prefix=args.collection_path_prefix,
+                strict_contract_match=args.strict_contract_match,
+            )
+        return context.generate_use_case.execute(collection_id=selected.id)
+
+    result = _generate_for_target(args.target, _generate_postman)
 
     _print_generation_summary(result)
     return SUCCESS
@@ -150,15 +199,18 @@ def _handle_generate_from_file(args: argparse.Namespace) -> int:
         return OPERATION_CANCELLED
 
     print("Gerando testes (modo local, sem conexão com a API do Postman)...")
-    if args.contract_file is not None:
-        result = context.generate_with_contract_use_case.execute_offline(
-            contract_file=args.contract_file,
-            document=document,
-            collection_path_prefix=args.collection_path_prefix,
-            strict_contract_match=args.strict_contract_match,
-        )
-    else:
-        result = context.generate_from_file_use_case.execute(document=document)
+
+    def _generate_postman() -> CollectionGenerationResult:
+        if args.contract_file is not None:
+            return context.generate_with_contract_use_case.execute_offline(
+                contract_file=args.contract_file,
+                document=document,
+                collection_path_prefix=args.collection_path_prefix,
+                strict_contract_match=args.strict_contract_match,
+            )
+        return context.generate_from_file_use_case.execute(document=document)
+
+    result = _generate_for_target(args.target, _generate_postman)
 
     _print_generation_summary(result)
     return SUCCESS
@@ -182,7 +234,11 @@ def _handle_generate_from_openapi_file(args: argparse.Namespace) -> int:
         return OPERATION_CANCELLED
 
     print("Gerando Collection e testes a partir da especificação OpenAPI (modo local)...")
-    result = context.generate_from_openapi_use_case.execute(specification=specification)
+
+    def _generate_postman() -> CollectionGenerationResult:
+        return context.generate_from_openapi_use_case.execute(specification=specification)
+
+    result = _generate_for_target(args.target, _generate_postman)
 
     _print_generation_summary(result)
     return SUCCESS
