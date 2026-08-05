@@ -1,0 +1,21 @@
+{
+  "entries": [
+    {
+      "change_type": "added",
+      "category": "script",
+      "target": "request:Criar pet > script:test",
+      "risk": "low",
+      "description": "Script 'test' adicionado em 'request:Criar pet'."
+    },
+    {
+      "change_type": "added",
+      "category": "script",
+      "target": "request:Listar pets > script:test",
+      "risk": "low",
+      "description": "Script 'test' adicionado em 'request:Listar pets'."
+    }
+  ],
+  "has_changes": true,
+  "has_removals": false,
+  "has_high_risk_changes": false
+}

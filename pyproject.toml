@@ -29,6 +29,7 @@ dev = [
     "mypy>=1.10",
     "types-PyYAML>=6.0",
     "types-openpyxl>=3.1",
+    "ruff>=0.16",
 ]
 
 [tool.setuptools.packages.find]
@@ -41,3 +42,34 @@ testpaths = ["tests"]
 python_version = "3.12"
 mypy_path = "src"
 explicit_package_bases = true
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# Política inicial (2026-08-04, formalização do ruff como ferramenta oficial
+# do projeto): mantém o conjunto de regras padrão do ruff, mas ignora o que
+# já era comum no código antes de existir lint automatizado — nenhuma dessas
+# regras foi corrigida nesta etapa (fora de escopo da baseline; ver
+# tests/characterization/README.md). F401/F841 (imports/variáveis não
+# usados) são os melhores candidatos a uma limpeza futura rápida, por não
+# serem só estilo. Remover itens desta lista conforme o código for ajustado.
+ignore = [
+    "I001",    # unsorted-imports
+    "ISC004",  # implicit-string-concatenation-in-collection-literal
+    "F401",    # unused-import
+    "RUF100",  # unused-noqa
+    "C408",    # unnecessary-collection-call
+    "DTZ005",  # call-datetime-now-without-tzinfo
+    "BLE001",  # blind-except
+    "PLW1510", # subprocess-run-without-check
+    "UP037",   # quoted-annotation
+    "SIM118",  # in-dict-keys
+    "DTZ001",  # call-datetime-without-tzinfo
+    "DTZ007",  # call-datetime-strptime-without-zone
+    "F841",    # unused-variable
+    "PIE810",  # multiple-starts-ends-with
+    "RUF023",  # unsorted-dunder-slots
+    "RUF059",  # unused-unpacked-variable
+    "UP017",   # datetime-timezone-utc
+]
