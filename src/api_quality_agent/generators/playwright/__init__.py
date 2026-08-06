@@ -6,6 +6,8 @@ from api_quality_agent.generators.playwright.endpoint_file_naming import (
     FILE_NAME_COLLISION_RESOLVED,
     ResolvedEndpointFileNames,
     endpoint_source_to_file_name,
+    endpoint_source_to_slug,
+    is_parameterized_segment,
     resolve_endpoint_file_names,
 )
 from api_quality_agent.generators.playwright.endpoint_test_generator import EndpointTestGenerator
@@ -15,6 +17,10 @@ from api_quality_agent.generators.playwright.generated_test_suite import Generat
 from api_quality_agent.generators.playwright.placeholder_endpoint_test_generator import (
     PlaceholderEndpointTestGenerator,
 )
+from api_quality_agent.generators.playwright.playwright_endpoint_test_generator import (
+    ENDPOINT_NOT_SUPPORTED_YET,
+    PlaywrightEndpointTestGenerator,
+)
 from api_quality_agent.generators.playwright.playwright_generation_warning import (
     PlaywrightGenerationWarning,
 )
@@ -23,6 +29,7 @@ from api_quality_agent.generators.playwright.playwright_test_suite_builder impor
 )
 
 __all__ = [
+    "ENDPOINT_NOT_SUPPORTED_YET",
     "FILE_NAME_COLLISION_RESOLVED",
     "AssertionPrecision",
     "DefaultPlaywrightTestSuiteBuilder",
@@ -31,9 +38,12 @@ __all__ = [
     "GeneratedFile",
     "GeneratedTestSuite",
     "PlaceholderEndpointTestGenerator",
+    "PlaywrightEndpointTestGenerator",
     "PlaywrightGenerationWarning",
     "PlaywrightTestSuiteBuilder",
     "ResolvedEndpointFileNames",
     "endpoint_source_to_file_name",
+    "endpoint_source_to_slug",
+    "is_parameterized_segment",
     "resolve_endpoint_file_names",
 ]

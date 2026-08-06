@@ -48,7 +48,7 @@ from api_quality_agent.domain.services import (
 from api_quality_agent.generators import PostmanTestGenerator
 from api_quality_agent.generators.playwright import (
     DefaultPlaywrightTestSuiteBuilder,
-    PlaceholderEndpointTestGenerator,
+    PlaywrightEndpointTestGenerator,
 )
 from api_quality_agent.parsers import (
     ExcelContractParser,
@@ -113,14 +113,17 @@ def _build_playwright_use_case(
 ) -> GeneratePlaywrightTestSuiteUseCase:
     # Composição paralela a _build_orchestrator(), para o caminho Playwright
     # (Parte 06) — pipeline independente, nunca participa do merge/diff
-    # Postman. PlaceholderEndpointTestGenerator/DefaultPlaywrightTestSuite
-    # Builder são as implementações atuais dos contratos da Parte 03;
-    # conteúdo completo das asserções fica para uma etapa futura.
+    # Postman. PlaywrightEndpointTestGenerator (Parte 07) gera um cenário
+    # positivo real para GET simples e cai no PlaceholderEndpointTestGenerator
+    # (com warning) para o que ainda não é suportado; DefaultPlaywrightTest
+    # SuiteBuilder é a implementação atual do contrato de suíte (Parte 03) —
+    # conteúdo avançado (asserções, negativos, variáveis) fica para etapas
+    # futuras.
     return GeneratePlaywrightTestSuiteUseCase(
         ApiAnalysisEngine(),
         InferenceSchemaProvider(SchemaInferenceEngine()),
         TestStrategyEngine(),
-        PlaceholderEndpointTestGenerator(),
+        PlaywrightEndpointTestGenerator(),
         DefaultPlaywrightTestSuiteBuilder(),
         artifact_repository,
     )

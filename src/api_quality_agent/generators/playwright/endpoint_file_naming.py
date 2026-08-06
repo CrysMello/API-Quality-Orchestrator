@@ -37,6 +37,14 @@ def _sanitize_segment(segment: str) -> str:
     return _INVALID_SEGMENT_CHARS.sub("_", _snake_case(segment)).strip("_")
 
 
+def is_parameterized_segment(segment: str) -> bool:
+    # Reaproveitado fora deste módulo (ex.: PlaywrightEndpointTestGenerator,
+    # Parte 07) para decidir se uma URL tem parâmetro de path ainda não
+    # resolvido — mesmo reconhecimento de :nome/{nome}/{{nome}} usado aqui
+    # para nomear arquivos.
+    return bool(_COLON_PARAMETER.match(segment) or _BRACE_PARAMETER.match(segment))
+
+
 def _segment_to_slug_part(segment: str) -> str:
     colon_match = _COLON_PARAMETER.match(segment)
     if colon_match:
@@ -49,10 +57,11 @@ def _segment_to_slug_part(segment: str) -> str:
     return _sanitize_segment(segment)
 
 
-def endpoint_source_to_file_name(endpoint_source: str) -> str:
+def endpoint_source_to_slug(endpoint_source: str) -> str:
     # Determinístico e puro: mesmo endpoint_source produz sempre o mesmo
-    # nome (nenhuma aleatoriedade, nenhum estado externo). Não resolve
-    # colisões entre múltiplos endpoints — ver resolve_endpoint_file_names.
+    # slug (nenhuma aleatoriedade, nenhum estado externo). Reaproveitado
+    # tanto no nome do arquivo (endpoint_source_to_file_name) quanto no
+    # nome da função de teste (PlaywrightEndpointTestGenerator, Parte 07).
     method, _, raw_path = endpoint_source.strip().partition(" ")
     method_part = _sanitize_segment(method) or "unknown"
 
@@ -63,13 +72,18 @@ def endpoint_source_to_file_name(endpoint_source: str) -> str:
     ]
 
     raw_slug = "_".join([method_part, *path_parts])
-    slug = sanitize_filename_component(
+    return sanitize_filename_component(
         raw_slug,
         max_length=_MAX_ENDPOINT_SLUG_LENGTH,
         hash_length=_ENDPOINT_SLUG_HASH_LENGTH,
         fallback=_FALLBACK_SLUG,
     )
-    return f"test_{slug}.py"
+
+
+def endpoint_source_to_file_name(endpoint_source: str) -> str:
+    # Não resolve colisões entre múltiplos endpoints — ver
+    # resolve_endpoint_file_names.
+    return f"test_{endpoint_source_to_slug(endpoint_source)}.py"
 
 
 def _apply_collision_suffix(file_name: str, index: int) -> str:
