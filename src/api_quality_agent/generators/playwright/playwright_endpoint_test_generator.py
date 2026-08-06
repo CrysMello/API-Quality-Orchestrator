@@ -2,6 +2,7 @@ import json
 from dataclasses import replace
 
 from api_quality_agent.domain.models import AuthType, NormalizedRequest, NormalizedUrl, TestStrategy
+from api_quality_agent.generators.playwright.base_url import derive_base_url
 from api_quality_agent.generators.playwright.endpoint_file_naming import (
     endpoint_source_to_file_name,
     endpoint_source_to_slug,
@@ -121,4 +122,5 @@ def _generate_positive_success_test(
         content=content,
         scenario_names=("success",),
         warnings=(),
+        base_url=derive_base_url(request.url),
     )

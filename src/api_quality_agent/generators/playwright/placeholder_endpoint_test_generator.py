@@ -1,4 +1,5 @@
 from api_quality_agent.domain.models import NormalizedRequest, TestStrategy
+from api_quality_agent.generators.playwright.base_url import derive_base_url
 from api_quality_agent.generators.playwright.endpoint_file_naming import (
     endpoint_source_to_file_name,
 )
@@ -21,6 +22,7 @@ class PlaceholderEndpointTestGenerator:
             content=_render_placeholder_content(strategy, request),
             scenario_names=(),
             warnings=(),
+            base_url=derive_base_url(request.url),
         )
 
 

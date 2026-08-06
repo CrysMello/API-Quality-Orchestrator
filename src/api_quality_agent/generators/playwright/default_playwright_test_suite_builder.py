@@ -13,11 +13,10 @@ _ENDPOINTS_DIR = "endpoints"
 _CONFTEST_FILE_NAME = "conftest.py"
 _MANIFEST_FILE_NAME = "generation-manifest.json"
 
-_CONFTEST_PLACEHOLDER_CONTENT = (
-    '"""conftest.py gerado — fixtures reais (ex.: api_request_context, '
-    "resolução de variáveis/segredos) ainda não implementadas (ver plano "
-    'de ação Playwright)."""\n'
-)
+# Pode ser sobrescrito em tempo de execução sem regenerar a suíte (ex.:
+# apontar para staging/produção em CI) — nunca uma credencial, só a URL
+# base. Nome escolhido para não colidir com variáveis de ambiente comuns.
+_BASE_URL_ENV_VAR = "PLAYWRIGHT_BASE_URL"
 
 
 class DefaultPlaywrightTestSuiteBuilder:
@@ -42,7 +41,7 @@ class DefaultPlaywrightTestSuiteBuilder:
         )
 
         conftest_file = GeneratedFile(
-            relative_path=_CONFTEST_FILE_NAME, content=_CONFTEST_PLACEHOLDER_CONTENT
+            relative_path=_CONFTEST_FILE_NAME, content=_render_conftest(endpoint_tests)
         )
         manifest_file = GeneratedFile(
             relative_path=_MANIFEST_FILE_NAME,
@@ -57,6 +56,48 @@ class DefaultPlaywrightTestSuiteBuilder:
             files=(conftest_file, *endpoint_files, manifest_file),
             warnings=warnings,
         )
+
+
+def _resolve_suite_base_url(endpoint_tests: Sequence[GeneratedEndpointTest]) -> str:
+    # Primeiro base_url determinável, na ordem dos endpoints — nunca
+    # inventado (ver base_url.py). Coleções com hosts diferentes por
+    # endpoint não são totalmente cobertas por um único api_context; isso
+    # é uma limitação conhecida, não escondida (o valor pode sempre ser
+    # sobrescrito via PLAYWRIGHT_BASE_URL sem regenerar a suíte).
+    for endpoint_test in endpoint_tests:
+        if endpoint_test.base_url:
+            return endpoint_test.base_url
+    return ""
+
+
+def _render_conftest(endpoint_tests: Sequence[GeneratedEndpointTest]) -> str:
+    default_base_url = _resolve_suite_base_url(endpoint_tests)
+
+    return (
+        '"""conftest.py gerado automaticamente — fixture compartilhada '
+        "para os testes de API desta suíte (Playwright APIRequestContext, "
+        'sem browser/page)."""\n'
+        "\n"
+        "import os\n"
+        "from collections.abc import Iterator\n"
+        "\n"
+        "import pytest\n"
+        "from playwright.sync_api import APIRequestContext, sync_playwright\n"
+        "\n"
+        f'_BASE_URL_ENV_VAR = "{_BASE_URL_ENV_VAR}"\n'
+        f"_DEFAULT_BASE_URL = {json.dumps(default_base_url)}\n"
+        "\n"
+        "\n"
+        "@pytest.fixture\n"
+        "def api_context() -> Iterator[APIRequestContext]:\n"
+        "    base_url = os.environ.get(_BASE_URL_ENV_VAR, _DEFAULT_BASE_URL)\n"
+        "    with sync_playwright() as playwright:\n"
+        "        request_context = playwright.request.new_context(base_url=base_url)\n"
+        "        try:\n"
+        "            yield request_context\n"
+        "        finally:\n"
+        "            request_context.dispose()\n"
+    )
 
 
 def _render_manifest(

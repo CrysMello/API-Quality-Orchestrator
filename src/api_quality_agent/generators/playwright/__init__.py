@@ -1,4 +1,5 @@
 from api_quality_agent.generators.playwright.assertion_precision import AssertionPrecision
+from api_quality_agent.generators.playwright.base_url import derive_base_url
 from api_quality_agent.generators.playwright.default_playwright_test_suite_builder import (
     DefaultPlaywrightTestSuiteBuilder,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "PlaywrightGenerationWarning",
     "PlaywrightTestSuiteBuilder",
     "ResolvedEndpointFileNames",
+    "derive_base_url",
     "endpoint_source_to_file_name",
     "endpoint_source_to_slug",
     "is_parameterized_segment",
