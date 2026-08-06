@@ -8,6 +8,7 @@ from api_quality_agent.domain.models import (
     ExecutionMode,
     GeneratedArtifact,
     PostmanCollectionDocument,
+    PostmanEnvironment,
 )
 from api_quality_agent.domain.services import ApiAnalysisEngine, TestStrategyEngine
 from api_quality_agent.generators.playwright import (
@@ -67,6 +68,7 @@ class GeneratePlaywrightTestSuiteUseCase:
         workspace_name: str | None = None,
         collection_id: str | None = None,
         collection_name: str | None = None,
+        environment: PostmanEnvironment | None = None,
     ) -> PlaywrightGenerationResult:
         create_kwargs: dict[str, Any] = {}
         if self._id_factory is not None:
@@ -84,7 +86,7 @@ class GeneratePlaywrightTestSuiteUseCase:
             **create_kwargs,
         )
 
-        endpoint_tests = self._generate_endpoint_tests(document)
+        endpoint_tests = self._generate_endpoint_tests(document, environment)
         suite = self._suite_builder.build(endpoint_tests, execution_context)
         self._persist(suite, execution_context, document, collection_id)
 
@@ -94,7 +96,9 @@ class GeneratePlaywrightTestSuiteUseCase:
         )
 
     def _generate_endpoint_tests(
-        self, document: PostmanCollectionDocument
+        self,
+        document: PostmanCollectionDocument,
+        environment: PostmanEnvironment | None,
     ) -> list[GeneratedEndpointTest]:
         analyzed_requests = self._analysis_engine.analyze_collection_requests(document)
 
@@ -106,7 +110,7 @@ class GeneratePlaywrightTestSuiteUseCase:
             )
             endpoint_tests.append(
                 self._endpoint_test_generator.generate_endpoint(
-                    strategy, analyzed.normalized_request
+                    strategy, analyzed.normalized_request, environment
                 )
             )
         return endpoint_tests

@@ -10,6 +10,7 @@ from api_quality_agent.cli import bootstrap, collection_selection
 from api_quality_agent.cli.exit_codes import OPERATION_CANCELLED, SUCCESS
 from api_quality_agent.cli.interactive import OperationCancelled, confirm
 from api_quality_agent.domain.exceptions import InputError
+from api_quality_agent.domain.models import PostmanEnvironment
 
 # Destinos aceitos por --target (Parte 04 do plano de ação Playwright).
 # "postman" é o default: preserva 100% o comportamento anterior à
@@ -101,6 +102,19 @@ def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") 
             '"all" (os dois).'
         ),
     )
+    parser.add_argument(
+        "-e",
+        "--environment",
+        dest="environment",
+        default=None,
+        metavar="ENVIRONMENT_JSON",
+        help=(
+            "Arquivo de Environment do Postman a usar na geração (mesmo "
+            "formato aceito por 'run -e'). Disponibilizado ao gerador "
+            "Playwright; nenhum valor do Environment é embutido no código "
+            "gerado nesta versão."
+        ),
+    )
     parser.set_defaults(handler=_handle_generate)
 
 
@@ -131,6 +145,21 @@ def _generate_for_target(
     return _GenerationOutcome(postman_result=postman_result, playwright_result=playwright_result)
 
 
+def _load_environment(
+    context: "bootstrap.CliContext | bootstrap.OfflineCliContext",
+    environment_path: str | None,
+) -> PostmanEnvironment | None:
+    # Validado/interpretado uma única vez por invocação, independente do
+    # --target escolhido (Parte 09) — dá erro claro sobre o arquivo em si
+    # mesmo quando o target atual não chega a consumi-lo. Nunca busca o
+    # Environment remotamente: só arquivo local, via o mesmo InputResolver
+    # já usado para -f/--openapi-file.
+    if environment_path is None:
+        return None
+    resolved = context.input_resolver.resolve_from_file(environment_path)
+    return context.environment_parser.parse(resolved)
+
+
 def _handle_generate(args: argparse.Namespace) -> int:
     collection_selection.validate_selection_arguments(args, extra_fields=("file", "openapi_file"))
     if args.contract_file is not None and args.openapi_file is not None:
@@ -148,6 +177,7 @@ def _handle_generate(args: argparse.Namespace) -> int:
 
     context = bootstrap.build_context()
     workspace_ref = bootstrap.resolve_active_workspace(context)
+    environment = _load_environment(context, args.environment)
 
     try:
         selected = collection_selection.select_collection(context, workspace_ref.id, args)
@@ -190,6 +220,7 @@ def _handle_generate(args: argparse.Namespace) -> int:
             workspace_name=workspace_ref.name,
             collection_id=selected.id,
             collection_name=selected.name,
+            environment=environment,
         )
 
     outcome = _generate_for_target(args.target, _generate_postman, _generate_playwright)
@@ -203,6 +234,7 @@ def _handle_generate_from_file(args: argparse.Namespace) -> int:
 
     resolved_input = context.input_resolver.resolve_from_file(args.file)
     document = context.collection_parser.parse(resolved_input)
+    environment = _load_environment(context, args.environment)
 
     print(f"Arquivo: {args.file}")
     print(f"Collection: {document.name}\n")
@@ -228,7 +260,9 @@ def _handle_generate_from_file(args: argparse.Namespace) -> int:
         return context.generate_from_file_use_case.execute(document=document)
 
     def _generate_playwright() -> PlaywrightGenerationResult:
-        return context.generate_playwright_use_case.execute(document=document)
+        return context.generate_playwright_use_case.execute(
+            document=document, environment=environment
+        )
 
     outcome = _generate_for_target(args.target, _generate_postman, _generate_playwright)
 
@@ -241,6 +275,7 @@ def _handle_generate_from_openapi_file(args: argparse.Namespace) -> int:
 
     resolved_input = context.input_resolver.resolve_from_file(args.openapi_file)
     specification = context.openapi_parser.parse(resolved_input)
+    environment = _load_environment(context, args.environment)
 
     print(f"Arquivo: {args.openapi_file}")
     print(f"Especificação: {specification.title or specification.spec_type.value}\n")
@@ -262,7 +297,9 @@ def _handle_generate_from_openapi_file(args: argparse.Namespace) -> int:
         # Mesma conversão pura usada por generate_from_openapi_use_case,
         # sem acionar a geração/persistência do lado Postman.
         playwright_document = context.openapi_collection_converter.convert(specification)
-        return context.generate_playwright_use_case.execute(document=playwright_document)
+        return context.generate_playwright_use_case.execute(
+            document=playwright_document, environment=environment
+        )
 
     outcome = _generate_for_target(args.target, _generate_postman, _generate_playwright)
 

@@ -1,7 +1,13 @@
 import json
 from dataclasses import replace
 
-from api_quality_agent.domain.models import AuthType, NormalizedRequest, NormalizedUrl, TestStrategy
+from api_quality_agent.domain.models import (
+    AuthType,
+    NormalizedRequest,
+    NormalizedUrl,
+    PostmanEnvironment,
+    TestStrategy,
+)
 from api_quality_agent.generators.playwright.base_url import derive_base_url
 from api_quality_agent.generators.playwright.endpoint_file_naming import (
     endpoint_source_to_file_name,
@@ -73,13 +79,16 @@ class PlaywrightEndpointTestGenerator:
         self._fallback_generator = fallback_generator or PlaceholderEndpointTestGenerator()
 
     def generate_endpoint(
-        self, strategy: TestStrategy, request: NormalizedRequest
+        self,
+        strategy: TestStrategy,
+        request: NormalizedRequest,
+        environment: PostmanEnvironment | None = None,
     ) -> GeneratedEndpointTest:
         reason = _unsupported_reason(request)
         if reason is None:
             return _generate_positive_success_test(strategy, request)
 
-        fallback = self._fallback_generator.generate_endpoint(strategy, request)
+        fallback = self._fallback_generator.generate_endpoint(strategy, request, environment)
         warning = PlaywrightGenerationWarning(
             code=ENDPOINT_NOT_SUPPORTED_YET,
             message=f"Geração real ainda não suportada para este endpoint: {reason}.",

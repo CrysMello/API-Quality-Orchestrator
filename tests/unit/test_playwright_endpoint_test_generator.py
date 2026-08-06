@@ -32,7 +32,7 @@ def _analyzed(request: dict):
     return analyzed.analysis, analyzed.normalized_request
 
 
-def _generate(request: dict):
+def _generate(request: dict, environment=None):
     strategy_source, normalized_request = _analyzed(request)
     from api_quality_agent.domain.models import TestStrategy
 
@@ -43,7 +43,9 @@ def _generate(request: dict):
         negative_cases=(),
         warnings=(),
     )
-    return PlaywrightEndpointTestGenerator().generate_endpoint(strategy, normalized_request)
+    return PlaywrightEndpointTestGenerator().generate_endpoint(
+        strategy, normalized_request, environment
+    )
 
 
 # --- Caso simples suportado: GET, sem body, sem auth, sem variáveis --------
@@ -201,3 +203,69 @@ def test_fallback_suggested_file_name_still_uses_deterministic_naming():
     )
 
     assert generated.suggested_file_name == "test_post_users.py"
+
+
+# --- Parte 09: environment aceito, nunca vaza segredo no conteúdo ---------
+
+
+def test_accepts_an_environment_without_using_its_values_yet():
+    from api_quality_agent.domain.models import EnvironmentVariable, PostmanEnvironment
+
+    environment = PostmanEnvironment(
+        name="QA",
+        variables=(
+            EnvironmentVariable(
+                key="apiKey", value="segredo-super-secreto", is_secret=True, enabled=True
+            ),
+        ),
+    )
+
+    generated = _generate(
+        {"request": {"method": "GET", "url": "https://api.exemplo.com/users"}}, environment
+    )
+
+    assert "def test_get_users_success(api_context):" in generated.content
+    assert "segredo-super-secreto" not in generated.content
+    assert "apiKey" not in generated.content
+
+
+def test_environment_never_leaks_into_the_fallback_content_either():
+    from api_quality_agent.domain.models import EnvironmentVariable, PostmanEnvironment
+
+    environment = PostmanEnvironment(
+        name="QA",
+        variables=(
+            EnvironmentVariable(
+                key="token", value="outro-segredo-456", is_secret=True, enabled=True
+            ),
+        ),
+    )
+
+    generated = _generate(
+        {"request": {"method": "POST", "url": "https://api.exemplo.com/users"}}, environment
+    )
+
+    assert "outro-segredo-456" not in generated.content
+    assert "token" not in generated.content
+    assert len(generated.warnings) == 1  # ainda cai no fallback normalmente
+
+
+def test_generate_endpoint_still_works_without_an_environment_argument():
+    # Compatibilidade: chamar generate_endpoint com só (strategy, request),
+    # sem o terceiro argumento, continua funcionando (default None).
+    strategy_source, normalized_request = _analyzed(
+        {"request": {"method": "GET", "url": "https://api.exemplo.com/users"}}
+    )
+    from api_quality_agent.domain.models import TestStrategy
+
+    strategy = TestStrategy(
+        endpoint_source=strategy_source.source,
+        assertions=(),
+        variable_extractions=(),
+        negative_cases=(),
+        warnings=(),
+    )
+
+    generated = PlaywrightEndpointTestGenerator().generate_endpoint(strategy, normalized_request)
+
+    assert "def test_get_users_success(api_context):" in generated.content

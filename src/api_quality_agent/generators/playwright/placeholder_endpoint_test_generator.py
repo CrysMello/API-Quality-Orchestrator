@@ -1,4 +1,4 @@
-from api_quality_agent.domain.models import NormalizedRequest, TestStrategy
+from api_quality_agent.domain.models import NormalizedRequest, PostmanEnvironment, TestStrategy
 from api_quality_agent.generators.playwright.base_url import derive_base_url
 from api_quality_agent.generators.playwright.endpoint_file_naming import (
     endpoint_source_to_file_name,
@@ -13,8 +13,14 @@ class PlaceholderEndpointTestGenerator:
     # estrutura física e a persistência da suíte (Parte 06). O conteúdo
     # real (asserções por AssertionType, cenários negativos, extração de
     # variáveis) é escopo de uma etapa futura, deliberadamente fora daqui.
+    # `environment` (Parte 09) é aceito para satisfazer o contrato, mas
+    # ainda não é usado — nenhum valor de Environment aparece no
+    # placeholder.
     def generate_endpoint(
-        self, strategy: TestStrategy, request: NormalizedRequest
+        self,
+        strategy: TestStrategy,
+        request: NormalizedRequest,
+        environment: PostmanEnvironment | None = None,
     ) -> GeneratedEndpointTest:
         return GeneratedEndpointTest(
             endpoint_source=strategy.endpoint_source,

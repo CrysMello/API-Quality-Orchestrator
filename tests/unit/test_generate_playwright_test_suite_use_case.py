@@ -147,3 +147,58 @@ def test_generated_manifest_reflects_the_correct_execution_id(tmp_path):
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert payload["execution_id"] == "exec-manifest"
     assert payload["endpoints_analyzed"] == 2
+
+
+# --- Parte 09: environment disponibilizado ao gerador ----------------------
+
+
+class _SpyEndpointTestGenerator:
+    # Não gera nada real — só registra o que recebeu, para provar que
+    # GeneratePlaywrightTestSuiteUseCase de fato repassa o environment
+    # para cada chamada de generate_endpoint (Parte 09, "disponibilizar
+    # ao gerador").
+    def __init__(self):
+        self.received_environments = []
+
+    def generate_endpoint(self, strategy, request, environment=None):
+        self.received_environments.append(environment)
+        return PlaceholderEndpointTestGenerator().generate_endpoint(strategy, request, environment)
+
+
+def test_execute_passes_the_environment_to_every_generate_endpoint_call(tmp_path):
+    from api_quality_agent.domain.models import EnvironmentVariable, PostmanEnvironment
+
+    environment = PostmanEnvironment(
+        name="QA",
+        variables=(EnvironmentVariable(key="baseUrl", value="x", is_secret=False, enabled=True),),
+    )
+    spy = _SpyEndpointTestGenerator()
+    use_case = GeneratePlaywrightTestSuiteUseCase(
+        ApiAnalysisEngine(),
+        InferenceSchemaProvider(SchemaInferenceEngine()),
+        TestStrategyEngine(),
+        spy,
+        DefaultPlaywrightTestSuiteBuilder(),
+        LocalArtifactRepository(tmp_path / "artifacts"),
+    )
+
+    use_case.execute(document=_two_endpoints_document(), environment=environment)
+
+    assert len(spy.received_environments) == 2
+    assert all(received is environment for received in spy.received_environments)
+
+
+def test_execute_passes_none_when_no_environment_is_given(tmp_path):
+    spy = _SpyEndpointTestGenerator()
+    use_case = GeneratePlaywrightTestSuiteUseCase(
+        ApiAnalysisEngine(),
+        InferenceSchemaProvider(SchemaInferenceEngine()),
+        TestStrategyEngine(),
+        spy,
+        DefaultPlaywrightTestSuiteBuilder(),
+        LocalArtifactRepository(tmp_path / "artifacts"),
+    )
+
+    use_case.execute(document=_two_endpoints_document())
+
+    assert spy.received_environments == [None, None]

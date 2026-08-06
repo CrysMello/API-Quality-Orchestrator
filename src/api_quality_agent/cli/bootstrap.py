@@ -56,6 +56,7 @@ from api_quality_agent.parsers import (
     OpenApiParser,
     PostmanCollectionParser,
     PostmanCollectionSerializer,
+    PostmanEnvironmentParser,
 )
 from api_quality_agent.ports.outbound import (
     ArtifactRepository,
@@ -95,6 +96,12 @@ class CliContext:
     excel_contract_parser: ExcelContractParser
     generate_with_contract_use_case: GenerateTestsWithContractUseCase
     generate_playwright_use_case: GeneratePlaywrightTestSuiteUseCase
+    # input_resolver/environment_parser (Parte 09): usados só para
+    # ler/validar um -e/--environment do generate no modo online — nenhuma
+    # etapa existente antes desta precisava ler o Environment localmente
+    # (run só repassa o caminho para o Newman).
+    input_resolver: InputResolver
+    environment_parser: PostmanEnvironmentParser
 
 
 def _build_orchestrator() -> AgentOrchestrator:
@@ -210,6 +217,8 @@ def build_context(
         excel_contract_parser=ExcelContractParser(),
         generate_with_contract_use_case=generate_with_contract_use_case,
         generate_playwright_use_case=_build_playwright_use_case(effective_artifact_repository),
+        input_resolver=InputResolver(),
+        environment_parser=PostmanEnvironmentParser(),
     )
 
 
@@ -243,6 +252,8 @@ class OfflineCliContext:
     # — necessário quando --target playwright é usado com --openapi-file
     # (ver generate_command.py): a conversão é pura, sem efeito colateral.
     openapi_collection_converter: OpenApiCollectionConverter
+    # Parte 09: valida/interpreta um -e/--environment opcional do generate.
+    environment_parser: PostmanEnvironmentParser
 
 
 def build_offline_context(
@@ -277,6 +288,7 @@ def build_offline_context(
         ),
         generate_playwright_use_case=_build_playwright_use_case(effective_artifact_repository),
         openapi_collection_converter=OpenApiCollectionConverter(),
+        environment_parser=PostmanEnvironmentParser(),
     )
 
 

@@ -12,6 +12,7 @@ from api_quality_agent.parsers.openapi_collection_converter import OpenApiCollec
 from api_quality_agent.parsers.openapi_parser import OpenApiParser
 from api_quality_agent.parsers.postman_collection_parser import PostmanCollectionParser
 from api_quality_agent.parsers.postman_collection_serializer import PostmanCollectionSerializer
+from api_quality_agent.parsers.postman_environment_parser import PostmanEnvironmentParser
 from api_quality_agent.parsers.reference_resolver import ReferenceResolver
 
 __all__ = [
@@ -24,6 +25,7 @@ __all__ = [
     "OpenApiParser",
     "PostmanCollectionParser",
     "PostmanCollectionSerializer",
+    "PostmanEnvironmentParser",
     "RawContractRow",
     "ReferenceResolver",
 ]
