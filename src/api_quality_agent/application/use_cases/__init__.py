@@ -12,6 +12,9 @@ from api_quality_agent.application.use_cases.get_current_collection import (
 from api_quality_agent.application.use_cases.get_current_workspace import (
     GetCurrentWorkspaceUseCase,
 )
+from api_quality_agent.application.use_cases.generate_playwright_test_suite import (
+    GeneratePlaywrightTestSuiteUseCase,
+)
 from api_quality_agent.application.use_cases.generate_tests_from_document import (
     GenerateTestsFromDocumentUseCase,
 )
@@ -54,6 +57,7 @@ __all__ = [
     "EffectiveConfiguration",
     "GenerateCollectionFromOpenApiUseCase",
     "GenerateCollectionTestsUseCase",
+    "GeneratePlaywrightTestSuiteUseCase",
     "GenerateTestsFromDocumentUseCase",
     "GenerateTestsWithContractUseCase",
     "GetCurrentCollectionUseCase",

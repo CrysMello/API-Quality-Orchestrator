@@ -48,11 +48,3 @@ class BackupIntegrityError(BackupError):
 
 class BaselineAlreadyExistsError(ApiQualityAgentError):
     pass
-
-
-class PlaywrightGenerationNotImplementedError(ApiQualityAgentError):
-    # Stub controlado (plano de ação Playwright, Parte 04): `--target
-    # playwright`/`--target all` já roteiam corretamente para o caminho
-    # Playwright, mas nenhum EndpointTestGenerator/PlaywrightTestSuiteBuilder
-    # concreto existe ainda (só os contratos, ver generators/playwright/).
-    pass

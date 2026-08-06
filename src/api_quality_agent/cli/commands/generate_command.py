@@ -1,11 +1,15 @@
 import argparse
 from collections.abc import Callable
+from dataclasses import dataclass
 
-from api_quality_agent.application.orchestration import CollectionGenerationResult
+from api_quality_agent.application.orchestration import (
+    CollectionGenerationResult,
+    PlaywrightGenerationResult,
+)
 from api_quality_agent.cli import bootstrap, collection_selection
 from api_quality_agent.cli.exit_codes import OPERATION_CANCELLED, SUCCESS
 from api_quality_agent.cli.interactive import OperationCancelled, confirm
-from api_quality_agent.domain.exceptions import InputError, PlaywrightGenerationNotImplementedError
+from api_quality_agent.domain.exceptions import InputError
 
 # Destinos aceitos por --target (Parte 04 do plano de ação Playwright).
 # "postman" é o default: preserva 100% o comportamento anterior à
@@ -14,13 +18,6 @@ _TARGET_POSTMAN = "postman"
 _TARGET_PLAYWRIGHT = "playwright"
 _TARGET_ALL = "all"
 _TARGET_CHOICES = (_TARGET_POSTMAN, _TARGET_PLAYWRIGHT, _TARGET_ALL)
-
-_PLAYWRIGHT_NOT_IMPLEMENTED_MESSAGE = (
-    "PLAYWRIGHT_GENERATION_NOT_IMPLEMENTED: a geração de testes Playwright "
-    "ainda não está implementada nesta versão (contratos e modelos já "
-    "existem em generators/playwright/, ver Bloco 2 em diante do plano de "
-    "ação Playwright). --target postman continua disponível normalmente."
-)
 
 
 def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
@@ -99,31 +96,39 @@ def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") 
         choices=_TARGET_CHOICES,
         help=(
             'Destino da geração: "postman" (padrão — comportamento atual, '
-            'inalterado), "playwright" (ainda não implementado nesta '
-            'versão) ou "all" (os dois).'
+            'inalterado), "playwright" (estrutura da suíte já persistida; '
+            "conteúdo completo das asserções ainda não implementado) ou "
+            '"all" (os dois).'
         ),
     )
     parser.set_defaults(handler=_handle_generate)
 
 
+@dataclass(frozen=True)
+class _GenerationOutcome:
+    # postman_result/playwright_result ficam None quando o --target
+    # correspondente não foi solicitado — nunca "vazios por engano": a
+    # ausência é sempre porque aquele lado não foi chamado.
+    postman_result: CollectionGenerationResult | None
+    playwright_result: PlaywrightGenerationResult | None
+
+
 def _generate_for_target(
-    target: str, generate_postman: Callable[[], CollectionGenerationResult]
-) -> CollectionGenerationResult:
-    # Ponto único de roteamento entre os dois geradores, reaproveitado
-    # pelos três caminhos de entrada (online, --file, --openapi-file).
-    if target == _TARGET_PLAYWRIGHT:
-        # playwright não chama postman: nem tentamos gerar via Postman.
-        raise PlaywrightGenerationNotImplementedError(_PLAYWRIGHT_NOT_IMPLEMENTED_MESSAGE)
-
-    result = generate_postman()
-
-    if target == _TARGET_ALL:
-        # all prepara a chamada dos dois: Postman já rodou de verdade
-        # (artefatos salvos normalmente); Playwright ainda é um stub
-        # controlado — falha depois, não antes, do lado que já funciona.
-        raise PlaywrightGenerationNotImplementedError(_PLAYWRIGHT_NOT_IMPLEMENTED_MESSAGE)
-
-    return result
+    target: str,
+    generate_postman: Callable[[], CollectionGenerationResult],
+    generate_playwright: Callable[[], PlaywrightGenerationResult],
+) -> _GenerationOutcome:
+    # Ponto único de roteamento entre os dois geradores, reaproveitado pelos
+    # três caminhos de entrada (online, --file, --openapi-file). Cada lado
+    # só é chamado (e só cria seus próprios artefatos/diretórios) quando o
+    # target pedido realmente o inclui — postman nunca chama playwright e
+    # vice-versa (Parte 04); "all" chama os dois, cada um isolado no seu
+    # próprio execution_id (Parte 06).
+    postman_result = generate_postman() if target in (_TARGET_POSTMAN, _TARGET_ALL) else None
+    playwright_result = (
+        generate_playwright() if target in (_TARGET_PLAYWRIGHT, _TARGET_ALL) else None
+    )
+    return _GenerationOutcome(postman_result=postman_result, playwright_result=playwright_result)
 
 
 def _handle_generate(args: argparse.Namespace) -> int:
@@ -175,9 +180,21 @@ def _handle_generate(args: argparse.Namespace) -> int:
             )
         return context.generate_use_case.execute(collection_id=selected.id)
 
-    result = _generate_for_target(args.target, _generate_postman)
+    def _generate_playwright() -> PlaywrightGenerationResult:
+        # Busca o documento separadamente (só quando de fato solicitado):
+        # é uma leitura, não aciona nenhuma geração/merge Postman.
+        document = context.collection_repository.get(selected.id)
+        return context.generate_playwright_use_case.execute(
+            document=document,
+            workspace_id=workspace_ref.id,
+            workspace_name=workspace_ref.name,
+            collection_id=selected.id,
+            collection_name=selected.name,
+        )
 
-    _print_generation_summary(result)
+    outcome = _generate_for_target(args.target, _generate_postman, _generate_playwright)
+
+    _print_generation_summary(outcome)
     return SUCCESS
 
 
@@ -210,9 +227,12 @@ def _handle_generate_from_file(args: argparse.Namespace) -> int:
             )
         return context.generate_from_file_use_case.execute(document=document)
 
-    result = _generate_for_target(args.target, _generate_postman)
+    def _generate_playwright() -> PlaywrightGenerationResult:
+        return context.generate_playwright_use_case.execute(document=document)
 
-    _print_generation_summary(result)
+    outcome = _generate_for_target(args.target, _generate_postman, _generate_playwright)
+
+    _print_generation_summary(outcome)
     return SUCCESS
 
 
@@ -238,19 +258,44 @@ def _handle_generate_from_openapi_file(args: argparse.Namespace) -> int:
     def _generate_postman() -> CollectionGenerationResult:
         return context.generate_from_openapi_use_case.execute(specification=specification)
 
-    result = _generate_for_target(args.target, _generate_postman)
+    def _generate_playwright() -> PlaywrightGenerationResult:
+        # Mesma conversão pura usada por generate_from_openapi_use_case,
+        # sem acionar a geração/persistência do lado Postman.
+        playwright_document = context.openapi_collection_converter.convert(specification)
+        return context.generate_playwright_use_case.execute(document=playwright_document)
 
-    _print_generation_summary(result)
+    outcome = _generate_for_target(args.target, _generate_postman, _generate_playwright)
+
+    _print_generation_summary(outcome)
     return SUCCESS
 
 
-def _print_generation_summary(result: CollectionGenerationResult) -> None:
+def _print_generation_summary(outcome: _GenerationOutcome) -> None:
     print("Processo concluído com sucesso.\n")
-    print(f"Endpoints processados: {len(result.endpoint_outcomes)}")
+    if outcome.postman_result is not None:
+        _print_postman_summary(outcome.postman_result)
+    if outcome.playwright_result is not None:
+        if outcome.postman_result is not None:
+            print()
+        _print_playwright_summary(outcome.playwright_result)
+
+
+def _print_postman_summary(result: CollectionGenerationResult) -> None:
+    print("Postman:")
+    print(f"  Endpoints processados: {len(result.endpoint_outcomes)}")
     failed_outcomes = [outcome for outcome in result.endpoint_outcomes if outcome.error is not None]
     if failed_outcomes:
-        print(f"  Com falha: {len(failed_outcomes)}")
-    print(f"Diff possui mudanças: {result.diff.has_changes}")
-    print(f"Artefatos salvos: {len(result.artifact_locations)}")
+        print(f"    Com falha: {len(failed_outcomes)}")
+    print(f"  Diff possui mudanças: {result.diff.has_changes}")
+    print(f"  Artefatos salvos: {len(result.artifact_locations)}")
     for location in result.artifact_locations:
-        print(f"  - {location.path}")
+        print(f"    - {location.path}")
+
+
+def _print_playwright_summary(result: PlaywrightGenerationResult) -> None:
+    print("Playwright:")
+    print(f"  Arquivos gerados: {len(result.generated_file_paths)}")
+    for relative_path in result.generated_file_paths:
+        print(f"    - {relative_path}")
+    if result.warning_count:
+        print(f"  Warnings: {result.warning_count}")

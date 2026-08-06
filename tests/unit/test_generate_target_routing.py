@@ -1,8 +1,12 @@
-"""Parte 04 do plano de ação Playwright: roteamento de `generate --target
-{postman,playwright,all}`. Usa o caminho `--file` (offline, sem rede) para
-exercitar o `cli.main.main(...)` real de ponta a ponta sem precisar de um
-servidor Postman simulado — o roteamento em si é agnóstico da origem do
-documento (mesmo helper `_generate_for_target` nos três caminhos).
+"""Roteamento de `generate --target {postman,playwright,all}` (Parte 04),
+atualizado na Parte 06 quando o lado Playwright deixou de ser um stub que
+falha (`PLAYWRIGHT_GENERATION_NOT_IMPLEMENTED`) e passou a gerar/persistir
+a estrutura real da suíte (ainda com conteúdo de endpoint mínimo/placeholder).
+
+Usa o caminho `--file` (offline, sem rede) para exercitar o
+`cli.main.main(...)` real de ponta a ponta — o roteamento em si é agnóstico
+da origem do documento (mesmo helper `_generate_for_target` nos três
+caminhos).
 """
 
 import json
@@ -10,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from api_quality_agent.cli.exit_codes import FUNCTIONAL_FAILURE, SUCCESS
+from api_quality_agent.cli.exit_codes import SUCCESS
 from api_quality_agent.cli.main import main
 
 
@@ -48,6 +52,7 @@ def test_default_target_behaves_exactly_like_postman(tmp_path, monkeypatch, caps
     assert exit_code == SUCCESS
     assert "Processo concluído com sucesso." in capsys.readouterr().out
     assert any((tmp_path / "artifacts").rglob("*.js"))
+    assert not any((tmp_path / "artifacts").rglob("conftest.py"))
 
 
 def test_explicit_target_postman_behaves_the_same_as_default(tmp_path, monkeypatch, capsys):
@@ -59,9 +64,10 @@ def test_explicit_target_postman_behaves_the_same_as_default(tmp_path, monkeypat
     assert exit_code == SUCCESS
     assert "Processo concluído com sucesso." in capsys.readouterr().out
     assert any((tmp_path / "artifacts").rglob("*.js"))
+    assert not any((tmp_path / "artifacts").rglob("conftest.py"))
 
 
-def test_target_playwright_returns_not_implemented_and_never_touches_postman(
+def test_target_playwright_generates_the_suite_without_touching_postman(
     tmp_path, monkeypatch, capsys
 ):
     monkeypatch.chdir(tmp_path)
@@ -69,23 +75,28 @@ def test_target_playwright_returns_not_implemented_and_never_touches_postman(
 
     exit_code = main(["generate", "--file", str(fixture), "-y", "--target", "playwright"])
 
-    assert exit_code == FUNCTIONAL_FAILURE
-    assert "PLAYWRIGHT_GENERATION_NOT_IMPLEMENTED" in capsys.readouterr().err
-    # playwright não chama postman: nenhum artefato Postman foi salvo.
-    assert not (tmp_path / "artifacts").exists()
+    assert exit_code == SUCCESS
+    out = capsys.readouterr().out
+    assert "Processo concluído com sucesso." in out
+    assert "Playwright:" in out
+    assert "Postman:" not in out
+    # playwright não chama postman: nenhum .js foi gerado.
+    assert not any((tmp_path / "artifacts").rglob("*.js"))
+    assert any((tmp_path / "artifacts").rglob("conftest.py"))
 
 
-def test_target_all_runs_postman_then_fails_on_the_playwright_stub(tmp_path, monkeypatch, capsys):
+def test_target_all_generates_both(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     fixture = _write_offline_collection(tmp_path)
 
     exit_code = main(["generate", "--file", str(fixture), "-y", "--target", "all"])
 
-    assert exit_code == FUNCTIONAL_FAILURE
-    assert "PLAYWRIGHT_GENERATION_NOT_IMPLEMENTED" in capsys.readouterr().err
-    # all prepara a chamada dos dois: o lado Postman já funciona e salvou
-    # artefatos normalmente, mesmo com a falha (esperada) do lado Playwright.
+    assert exit_code == SUCCESS
+    out = capsys.readouterr().out
+    assert "Postman:" in out
+    assert "Playwright:" in out
     assert any((tmp_path / "artifacts").rglob("*.js"))
+    assert any((tmp_path / "artifacts").rglob("conftest.py"))
 
 
 def test_invalid_target_value_is_rejected(tmp_path, monkeypatch, capsys):

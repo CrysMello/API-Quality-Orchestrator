@@ -20,6 +20,7 @@ from api_quality_agent.application.orchestration import AgentOrchestrator
 from api_quality_agent.application.use_cases import (
     GenerateCollectionFromOpenApiUseCase,
     GenerateCollectionTestsUseCase,
+    GeneratePlaywrightTestSuiteUseCase,
     GenerateTestsFromDocumentUseCase,
     GenerateTestsWithContractUseCase,
     GetCurrentWorkspaceUseCase,
@@ -39,11 +40,16 @@ from api_quality_agent.domain.services import (
     ApiAnalysisEngine,
     CollectionSelectionService,
     DiffEngine,
+    InferenceSchemaProvider,
     ManagedBlockMerger,
     SchemaInferenceEngine,
     TestStrategyEngine,
 )
 from api_quality_agent.generators import PostmanTestGenerator
+from api_quality_agent.generators.playwright import (
+    DefaultPlaywrightTestSuiteBuilder,
+    PlaceholderEndpointTestGenerator,
+)
 from api_quality_agent.parsers import (
     ExcelContractParser,
     OpenApiCollectionConverter,
@@ -88,6 +94,7 @@ class CliContext:
     persist_execution_result_use_case: PersistExecutionResultUseCase
     excel_contract_parser: ExcelContractParser
     generate_with_contract_use_case: GenerateTestsWithContractUseCase
+    generate_playwright_use_case: GeneratePlaywrightTestSuiteUseCase
 
 
 def _build_orchestrator() -> AgentOrchestrator:
@@ -98,6 +105,24 @@ def _build_orchestrator() -> AgentOrchestrator:
         PostmanTestGenerator(),
         ManagedBlockMerger(),
         DiffEngine(),
+    )
+
+
+def _build_playwright_use_case(
+    artifact_repository: ArtifactRepository,
+) -> GeneratePlaywrightTestSuiteUseCase:
+    # Composição paralela a _build_orchestrator(), para o caminho Playwright
+    # (Parte 06) — pipeline independente, nunca participa do merge/diff
+    # Postman. PlaceholderEndpointTestGenerator/DefaultPlaywrightTestSuite
+    # Builder são as implementações atuais dos contratos da Parte 03;
+    # conteúdo completo das asserções fica para uma etapa futura.
+    return GeneratePlaywrightTestSuiteUseCase(
+        ApiAnalysisEngine(),
+        InferenceSchemaProvider(SchemaInferenceEngine()),
+        TestStrategyEngine(),
+        PlaceholderEndpointTestGenerator(),
+        DefaultPlaywrightTestSuiteBuilder(),
+        artifact_repository,
     )
 
 
@@ -181,6 +206,7 @@ def build_context(
         ),
         excel_contract_parser=ExcelContractParser(),
         generate_with_contract_use_case=generate_with_contract_use_case,
+        generate_playwright_use_case=_build_playwright_use_case(effective_artifact_repository),
     )
 
 
@@ -207,6 +233,13 @@ class OfflineCliContext:
     generate_from_openapi_use_case: GenerateCollectionFromOpenApiUseCase
     excel_contract_parser: ExcelContractParser
     generate_with_contract_use_case: GenerateTestsWithContractUseCase
+    generate_playwright_use_case: GeneratePlaywrightTestSuiteUseCase
+    # Exposto separadamente (não só encapsulado dentro de
+    # generate_from_openapi_use_case) para permitir converter a
+    # especificação numa Collection sintética sem acionar a geração Postman
+    # — necessário quando --target playwright é usado com --openapi-file
+    # (ver generate_command.py): a conversão é pura, sem efeito colateral.
+    openapi_collection_converter: OpenApiCollectionConverter
 
 
 def build_offline_context(
@@ -239,6 +272,8 @@ def build_offline_context(
             DiffEngine(),
             effective_artifact_repository,
         ),
+        generate_playwright_use_case=_build_playwright_use_case(effective_artifact_repository),
+        openapi_collection_converter=OpenApiCollectionConverter(),
     )
 
 
