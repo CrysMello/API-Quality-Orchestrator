@@ -4,6 +4,8 @@ Orquestrador de automação de qualidade para APIs, executado por linha de coman
 
 A estrutura segue arquitetura hexagonal: o domínio (`domain/`) não depende de formatos externos (Postman, OpenAPI) nem de integrações — parsers e adapters ficam nas bordas. Consulte o Software Architecture Document (SAD) para detalhes de arquitetura, requisitos e roadmap.
 
+Este projeto nasceu como um espaço para aplicar, na prática, o que venho estudando sobre arquitetura de software: arquitetura hexagonal, separação de camadas, casos de uso, portas e adaptadores, usando um problema real (automação de qualidade de APIs) como pretexto para consolidar esse aprendizado.
+
 ## Estado atual
 
 Já implementados (com testes automatizados — 984 testes, incluindo uma suíte de aceitação ponta a ponta em `tests/acceptance/`; mypy limpo):
