@@ -96,18 +96,26 @@ def test_generated_positive_content_is_syntactically_valid_python():
     ast.parse(generated.content)
 
 
-def test_content_never_leaks_query_string_secrets():
+def test_query_parameter_values_appear_structured_never_smashed_into_path_or_docstring():
+    # Até a Parte 09, nenhuma query aparecia no conteúdo gerado (não era
+    # processada). A partir da Parte 10 ela aparece de propósito — mas só
+    # de forma estruturada via params=; nunca colada na URL/path nem no
+    # campo "Endpoint:" da docstring (que é sempre só método+path,
+    # strategy.endpoint_source, nunca query string — ver
+    # _endpoint_source_label em api_analysis_engine.py).
     generated = _generate(
         {
             "request": {
                 "method": "GET",
-                "url": "https://api.exemplo.com/login?api_key=super-secreto-123",
+                "url": "https://api.exemplo.com/login?api_key=valor-da-collection",
             }
         }
     )
 
-    assert "super-secreto-123" not in generated.content
-    assert "api_key" not in generated.content
+    assert "Endpoint: GET /login\n" in generated.content
+    assert "?api_key=" not in generated.content
+    assert 'response = api_context.get("/login")' not in generated.content
+    assert '"api_key": "valor-da-collection",' in generated.content
 
 
 # --- Casos ainda não suportados: fallback + warning, nunca código enganoso ---
@@ -269,3 +277,174 @@ def test_generate_endpoint_still_works_without_an_environment_argument():
     generated = PlaywrightEndpointTestGenerator().generate_endpoint(strategy, normalized_request)
 
     assert "def test_get_users_success(api_context):" in generated.content
+
+
+# --- Parte 10: query parameters --------------------------------------------
+
+
+def _request_with_query(query: list[dict], *, raw_suffix: str = "") -> dict:
+    return {
+        "request": {
+            "method": "GET",
+            "url": {
+                "raw": f"https://api.exemplo.com/users{raw_suffix}",
+                "protocol": "https",
+                "host": ["api", "exemplo", "com"],
+                "path": ["users"],
+                "query": query,
+            },
+        }
+    }
+
+
+def test_no_query_parameters_keeps_the_single_line_call():
+    generated = _generate({"request": {"method": "GET", "url": "https://api.exemplo.com/users"}})
+
+    assert 'response = api_context.get("/users")' in generated.content
+    assert "params=" not in generated.content
+
+
+def test_a_single_query_parameter_uses_params_argument():
+    generated = _generate(
+        _request_with_query([{"key": "page", "value": "1"}], raw_suffix="?page=1")
+    )
+
+    assert (
+        "    response = api_context.get(\n"
+        '        "/users",\n'
+        "        params={\n"
+        '            "page": 1,\n'
+        "        },\n"
+        "    )\n"
+    ) in generated.content
+    ast.parse(generated.content)
+
+
+def test_multiple_query_parameters_preserve_order_exactly_like_the_spec_example():
+    generated = _generate(
+        _request_with_query(
+            [{"key": "page", "value": "1"}, {"key": "active", "value": "true"}],
+            raw_suffix="?page=1&active=true",
+        )
+    )
+
+    assert (
+        "    response = api_context.get(\n"
+        '        "/users",\n'
+        "        params={\n"
+        '            "page": 1,\n'
+        '            "active": True,\n'
+        "        },\n"
+        "    )\n"
+    ) in generated.content
+
+
+def test_empty_value_is_preserved_as_an_explicit_empty_string():
+    generated = _generate(
+        _request_with_query([{"key": "search", "value": ""}], raw_suffix="?search=")
+    )
+
+    assert '"search": "",' in generated.content
+
+
+def test_special_characters_do_not_break_the_generated_syntax():
+    generated = _generate(
+        _request_with_query(
+            [{"key": "q", "value": 'a "quoted" \\ value with acentuação'}],
+        )
+    )
+
+    ast.parse(generated.content)
+    assert 'acentuação' in generated.content
+
+
+def test_repeated_query_parameters_fall_back_with_a_specific_warning():
+    generated = _generate(
+        _request_with_query(
+            [{"key": "tag", "value": "a"}, {"key": "tag", "value": "b"}],
+            raw_suffix="?tag=a&tag=b",
+        )
+    )
+
+    assert "@pytest.mark.skip" in generated.content
+    assert "params=" not in generated.content
+    assert len(generated.warnings) == 1
+    assert "repetidos" in generated.warnings[0].message
+
+
+def test_disabled_query_parameter_is_never_generated():
+    generated = _generate(
+        _request_with_query(
+            [
+                {"key": "page", "value": "1"},
+                {"key": "debug", "value": "true", "disabled": True},
+            ],
+            raw_suffix="?page=1&debug=true",
+        )
+    )
+
+    assert '"debug"' not in generated.content
+    assert '"page": 1,' in generated.content
+
+
+def test_only_disabled_query_parameters_keeps_the_single_line_call():
+    generated = _generate(
+        _request_with_query(
+            [{"key": "debug", "value": "true", "disabled": True}], raw_suffix="?debug=true"
+        )
+    )
+
+    assert 'response = api_context.get("/users")' in generated.content
+    assert "params=" not in generated.content
+
+
+def test_query_parameter_with_unresolved_variable_falls_back_with_warning():
+    generated = _generate(
+        _request_with_query(
+            [{"key": "token", "value": "{{authToken}}"}], raw_suffix="?token={{authToken}}"
+        )
+    )
+
+    assert "@pytest.mark.skip" in generated.content
+    assert len(generated.warnings) == 1
+    assert "variáveis" in generated.warnings[0].message
+
+
+# --- Coerção de tipo: conservadora, nunca inventa dado ----------------------
+
+
+def test_numeric_value_becomes_a_python_int():
+    generated = _generate(_request_with_query([{"key": "page", "value": "42"}]))
+    assert '"page": 42,' in generated.content
+
+
+def test_negative_numeric_value_becomes_a_python_int():
+    generated = _generate(_request_with_query([{"key": "offset", "value": "-3"}]))
+    assert '"offset": -3,' in generated.content
+
+
+def test_boolean_literals_become_python_bool():
+    generated = _generate(
+        _request_with_query([{"key": "a", "value": "true"}, {"key": "b", "value": "false"}])
+    )
+    assert '"a": True,' in generated.content
+    assert '"b": False,' in generated.content
+
+
+def test_leading_zero_value_is_kept_as_string_not_coerced_to_int():
+    # "007" != str(int("007")) == "7" — representação original pode ser
+    # significativa (CEP, código), então não é convertida.
+    generated = _generate(_request_with_query([{"key": "zip", "value": "007"}]))
+    assert '"zip": "007",' in generated.content
+
+
+def test_non_numeric_non_boolean_value_stays_a_string():
+    generated = _generate(_request_with_query([{"key": "name", "value": "ana"}]))
+    assert '"name": "ana",' in generated.content
+
+
+def test_capitalized_true_is_not_coerced_and_stays_a_string():
+    # Só "true"/"false" minúsculos (convenção HTTP/JSON) viram bool — "True"
+    # capitalizado pode ser um valor de negócio real, não um booleano.
+    generated = _generate(_request_with_query([{"key": "flag", "value": "True"}]))
+    assert '"flag": "True",' in generated.content
