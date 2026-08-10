@@ -151,7 +151,13 @@ def test_request_with_body_falls_back_to_placeholder_with_warning():
     assert "body" in generated.warnings[0].message
 
 
-def test_request_with_auth_falls_back_to_placeholder_with_warning():
+def test_request_with_auth_literal_value_falls_back_to_placeholder_with_warning():
+    # Até a Parte 11, qualquer autenticação estruturada caía no fallback.
+    # A partir da Parte 12, Bearer/API Key/Basic passam a ser suportados
+    # quando o valor é uma referência de variável ({{...}}) — um valor
+    # literal hardcoded na Collection (como este) continua caindo no
+    # fallback, agora com o código específico AUTHENTICATION_VALUE_NOT_
+    # RESOLVED em vez do genérico ENDPOINT_NOT_SUPPORTED_YET.
     generated = _generate(
         {
             "request": {
@@ -164,7 +170,7 @@ def test_request_with_auth_falls_back_to_placeholder_with_warning():
 
     assert "@pytest.mark.skip" in generated.content
     assert len(generated.warnings) == 1
-    assert "autenticação" in generated.warnings[0].message
+    assert generated.warnings[0].code == "AUTHENTICATION_VALUE_NOT_RESOLVED"
     assert "abc123" not in generated.content
 
 
@@ -643,3 +649,223 @@ def test_endpoint_source_of_the_warning_matches_the_endpoint():
     )
 
     assert generated.warnings[0].endpoint == "GET /users"
+
+
+# --- Parte 12: autenticação ---------------------------------------------------
+
+
+def _request_with_auth(auth: dict) -> dict:
+    return {
+        "request": {
+            "method": "GET",
+            "url": "https://api.exemplo.com/users",
+            "auth": auth,
+        }
+    }
+
+
+def _bearer_auth(token_value: str) -> dict:
+    return {"type": "bearer", "bearer": [{"key": "token", "value": token_value}]}
+
+
+def _api_key_auth(key_name: str, value: str, location: str | None = None) -> dict:
+    entries = [{"key": "key", "value": key_name}, {"key": "value", "value": value}]
+    if location is not None:
+        entries.append({"key": "in", "value": location})
+    return {"type": "apikey", "apikey": entries}
+
+
+def _basic_auth(username: str, password: str) -> dict:
+    return {
+        "type": "basic",
+        "basic": [{"key": "username", "value": username}, {"key": "password", "value": password}],
+    }
+
+
+# --- Bearer -------------------------------------------------------------------
+
+
+def test_bearer_auth_uses_an_environment_variable():
+    generated = _generate(_request_with_auth(_bearer_auth("{{accessToken}}")))
+
+    assert 'token = os.environ.get("AQO_ACCESS_TOKEN")' in generated.content
+    assert 'assert token, "Variável de ambiente obrigatória AQO_ACCESS_TOKEN não definida."' in (
+        generated.content
+    )
+    assert '"Authorization": f"Bearer {token}",' in generated.content
+    assert "import os" in generated.content
+    assert generated.warnings == ()
+    ast.parse(generated.content)
+
+
+def test_bearer_auth_missing_token_param_is_not_supported():
+    generated = _generate(_request_with_auth({"type": "bearer", "bearer": []}))
+
+    assert "@pytest.mark.skip" in generated.content
+    assert generated.warnings[0].code == "AUTHENTICATION_NOT_SUPPORTED"
+
+
+def test_bearer_auth_with_literal_value_is_not_resolved():
+    generated = _generate(_request_with_auth(_bearer_auth("literal-hardcoded-token")))
+
+    assert "literal-hardcoded-token" not in generated.content
+    assert generated.warnings[0].code == "AUTHENTICATION_VALUE_NOT_RESOLVED"
+
+
+def test_bearer_auth_with_partial_variable_reference_is_not_resolved():
+    # "Bearer {{accessToken}}" não é uma referência PURA — só um valor
+    # {{...}} sozinho na string resolve.
+    generated = _generate(_request_with_auth(_bearer_auth("Bearer {{accessToken}}")))
+
+    assert generated.warnings[0].code == "AUTHENTICATION_VALUE_NOT_RESOLVED"
+
+
+# --- API Key --------------------------------------------------------------
+
+
+def test_api_key_in_header_is_inserted_in_the_correct_location():
+    generated = _generate(
+        _request_with_auth(_api_key_auth("X-API-Key", "{{apiKey}}", "header"))
+    )
+
+    assert 'api_key = os.environ.get("AQO_API_KEY")' in generated.content
+    assert '"X-API-Key": api_key,' in generated.content
+    assert "params={" not in generated.content
+    assert generated.warnings == ()
+    ast.parse(generated.content)
+
+
+def test_api_key_in_query_is_inserted_in_the_correct_location():
+    generated = _generate(_request_with_auth(_api_key_auth("api_key", "{{apiKey}}", "query")))
+
+    assert 'api_key = os.environ.get("AQO_API_KEY")' in generated.content
+    assert '"api_key": api_key,' in generated.content
+    assert "params={" in generated.content
+    assert "headers={" not in generated.content
+    ast.parse(generated.content)
+
+
+def test_api_key_without_explicit_location_defaults_to_header():
+    generated = _generate(_request_with_auth(_api_key_auth("X-API-Key", "{{apiKey}}")))
+
+    assert "headers={" in generated.content
+    assert "params={" not in generated.content
+
+
+def test_api_key_missing_value_is_not_supported():
+    generated = _generate(
+        _request_with_auth({"type": "apikey", "apikey": [{"key": "key", "value": "X-API-Key"}]})
+    )
+
+    assert generated.warnings[0].code == "AUTHENTICATION_NOT_SUPPORTED"
+
+
+def test_api_key_with_invalid_location_is_not_supported():
+    generated = _generate(
+        _request_with_auth(_api_key_auth("X-API-Key", "{{apiKey}}", "cookie"))
+    )
+
+    assert generated.warnings[0].code == "AUTHENTICATION_NOT_SUPPORTED"
+
+
+def test_api_key_variable_name_normalization_matches_the_spec_example():
+    generated = _generate(_request_with_auth(_api_key_auth("X-API-Key", "{{apiKey}}", "header")))
+
+    assert 'os.environ.get("AQO_API_KEY")' in generated.content
+
+
+# --- Basic Auth -----------------------------------------------------------
+
+
+def test_basic_auth_is_generated_only_when_complete():
+    generated = _generate(
+        _request_with_auth(_basic_auth("{{basicUsername}}", "{{basicPassword}}"))
+    )
+
+    assert 'username = os.environ.get("AQO_BASIC_USERNAME")' in generated.content
+    assert 'password = os.environ.get("AQO_BASIC_PASSWORD")' in generated.content
+    assert (
+        'credentials = base64.b64encode(f"{username}:{password}".encode()).decode()'
+        in generated.content
+    )
+    assert '"Authorization": f"Basic {credentials}",' in generated.content
+    assert "import base64" in generated.content
+    assert generated.warnings == ()
+    ast.parse(generated.content)
+
+
+def test_basic_auth_missing_password_is_not_supported():
+    generated = _generate(
+        _request_with_auth(
+            {"type": "basic", "basic": [{"key": "username", "value": "{{basicUsername}}"}]}
+        )
+    )
+
+    assert "@pytest.mark.skip" in generated.content
+    assert generated.warnings[0].code == "AUTHENTICATION_NOT_SUPPORTED"
+
+
+def test_basic_auth_with_literal_credentials_is_not_resolved():
+    generated = _generate(_request_with_auth(_basic_auth("admin", "hunter2")))
+
+    assert "hunter2" not in generated.content
+    assert "admin" not in generated.content
+    assert generated.warnings[0].code == "AUTHENTICATION_VALUE_NOT_RESOLVED"
+
+
+# --- Tipo não suportado / desconhecido -------------------------------------
+
+
+def test_unsupported_auth_type_produces_a_warning():
+    generated = _generate(
+        _request_with_auth({"type": "oauth2", "oauth2": [{"key": "accessToken", "value": "x"}]})
+    )
+
+    assert "@pytest.mark.skip" in generated.content
+    assert generated.warnings[0].code == "AUTHENTICATION_NOT_SUPPORTED"
+    assert "oauth2" in generated.warnings[0].message
+
+
+def test_other_recognized_but_unsupported_auth_types_all_produce_a_warning():
+    # Todos os demais tipos que o Postman reconhece e este projeto ainda
+    # não suporta (digest, awsv4, hawk, ntlm, edgegrid) — não só oauth2.
+    for auth_type in ("digest", "awsv4", "hawk", "ntlm", "edgegrid"):
+        generated = _generate(_request_with_auth({"type": auth_type, auth_type: []}))
+        assert generated.warnings[0].code == "AUTHENTICATION_NOT_SUPPORTED", auth_type
+        assert "@pytest.mark.skip" in generated.content, auth_type
+
+
+# --- Proteção contra duplicação de Authorization ---------------------------
+
+
+def test_manual_authorization_header_never_duplicates_the_auth_derived_one():
+    generated = _generate(
+        {
+            "request": {
+                "method": "GET",
+                "url": "https://api.exemplo.com/users",
+                "auth": _bearer_auth("{{accessToken}}"),
+                "header": [{"key": "Authorization", "value": "Bearer valor-manual-antigo"}],
+            }
+        }
+    )
+
+    assert generated.content.count('"Authorization"') == 1
+    assert '"Authorization": f"Bearer {token}",' in generated.content
+    assert "valor-manual-antigo" not in generated.content
+    # dois warnings: um por excluir o header manual (Parte 11), outro nenhum
+    # da autenticação (ela foi resolvida com sucesso) — só o primeiro.
+    codes = {warning.code for warning in generated.warnings}
+    assert "SENSITIVE_HEADER_OMITTED" in codes
+    ast.parse(generated.content)
+
+
+# --- Nunca inventa autenticação ausente ------------------------------------
+
+
+def test_no_auth_block_produces_no_preamble_and_no_authorization_header():
+    generated = _generate({"request": {"method": "GET", "url": "https://api.exemplo.com/users"}})
+
+    assert "Authorization" not in generated.content
+    assert "os.environ" not in generated.content
+    assert "sem autenticação" in generated.content

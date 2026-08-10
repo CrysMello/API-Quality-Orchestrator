@@ -61,6 +61,7 @@ from api_quality_agent.domain.models.negative_case_type import NegativeCaseType
 from api_quality_agent.domain.models.normalization_context import NormalizationContext
 from api_quality_agent.domain.models.normalization_warning import NormalizationWarning
 from api_quality_agent.domain.models.normalized_auth import NormalizedAuth
+from api_quality_agent.domain.models.normalized_auth_parameter import NormalizedAuthParameter
 from api_quality_agent.domain.models.normalized_body import NormalizedBody, NormalizedBodyField
 from api_quality_agent.domain.models.normalized_header import NormalizedHeader
 from api_quality_agent.domain.models.normalized_request import NormalizedRequest
@@ -167,6 +168,7 @@ __all__ = [
     "NormalizationContext",
     "NormalizationWarning",
     "NormalizedAuth",
+    "NormalizedAuthParameter",
     "NormalizedBody",
     "NormalizedBodyField",
     "NormalizedHeader",

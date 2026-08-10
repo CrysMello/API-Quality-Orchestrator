@@ -29,12 +29,15 @@ _FALLBACK_SLUG = "endpoint"
 FILE_NAME_COLLISION_RESOLVED = "FILE_NAME_COLLISION_RESOLVED"
 
 
-def _snake_case(name: str) -> str:
+def to_snake_case(name: str) -> str:
+    # Público: reaproveitado fora deste módulo (ex.: resolução de
+    # autenticação em playwright_endpoint_test_generator.py, Parte 12, para
+    # derivar nomes de variável de ambiente — apiKey -> api_key -> AQO_API_KEY).
     return _CAMEL_CASE_BOUNDARY.sub("_", name).lower()
 
 
 def _sanitize_segment(segment: str) -> str:
-    return _INVALID_SEGMENT_CHARS.sub("_", _snake_case(segment)).strip("_")
+    return _INVALID_SEGMENT_CHARS.sub("_", to_snake_case(segment)).strip("_")
 
 
 def is_parameterized_segment(segment: str) -> bool:

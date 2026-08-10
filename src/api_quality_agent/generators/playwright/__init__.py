@@ -10,6 +10,7 @@ from api_quality_agent.generators.playwright.endpoint_file_naming import (
     endpoint_source_to_slug,
     is_parameterized_segment,
     resolve_endpoint_file_names,
+    to_snake_case,
 )
 from api_quality_agent.generators.playwright.endpoint_test_generator import EndpointTestGenerator
 from api_quality_agent.generators.playwright.generated_endpoint_test import GeneratedEndpointTest
@@ -19,7 +20,13 @@ from api_quality_agent.generators.playwright.placeholder_endpoint_test_generator
     PlaceholderEndpointTestGenerator,
 )
 from api_quality_agent.generators.playwright.playwright_endpoint_test_generator import (
+    AUTHENTICATION_NOT_SUPPORTED,
+    AUTHENTICATION_VALUE_NOT_RESOLVED,
+    DUPLICATE_HEADER_IGNORED,
     ENDPOINT_NOT_SUPPORTED_YET,
+    HEADER_VALUE_NOT_RESOLVED,
+    RESERVED_HEADER_OMITTED,
+    SENSITIVE_HEADER_OMITTED,
     PlaywrightEndpointTestGenerator,
 )
 from api_quality_agent.generators.playwright.playwright_generation_warning import (
@@ -30,8 +37,14 @@ from api_quality_agent.generators.playwright.playwright_test_suite_builder impor
 )
 
 __all__ = [
+    "AUTHENTICATION_NOT_SUPPORTED",
+    "AUTHENTICATION_VALUE_NOT_RESOLVED",
+    "DUPLICATE_HEADER_IGNORED",
     "ENDPOINT_NOT_SUPPORTED_YET",
     "FILE_NAME_COLLISION_RESOLVED",
+    "HEADER_VALUE_NOT_RESOLVED",
+    "RESERVED_HEADER_OMITTED",
+    "SENSITIVE_HEADER_OMITTED",
     "AssertionPrecision",
     "DefaultPlaywrightTestSuiteBuilder",
     "EndpointTestGenerator",
@@ -48,4 +61,5 @@ __all__ = [
     "endpoint_source_to_slug",
     "is_parameterized_segment",
     "resolve_endpoint_file_names",
+    "to_snake_case",
 ]
