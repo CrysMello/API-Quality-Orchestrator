@@ -1,9 +1,10 @@
 import json
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from api_quality_agent.domain.models import (
     AuthType,
+    NormalizedHeader,
     NormalizedQueryParameter,
     NormalizedRequest,
     NormalizedUrl,
@@ -34,6 +35,20 @@ _INTEGER_PATTERN = re.compile(r"^-?\d+$")
 _BOOLEAN_LITERALS = {"true": True, "false": False}
 
 ENDPOINT_NOT_SUPPORTED_YET = "ENDPOINT_NOT_SUPPORTED_YET"
+
+# Nomes reservados (case-insensitive): nunca renderizados como header
+# genérico, mesmo quando presentes e habilitados no NormalizedRequest.
+# - authorization: sempre tratado como sensível (fora do escopo desta
+#   parte: "Autenticação completa"/"Geração de token").
+# - content-type: reservado para uma geração futura derivada do tipo de
+#   body ("Content-Type específico por tipo de body" — não implementado
+#   aqui) — evita duas fontes divergentes escrevendo o mesmo header.
+_RESERVED_HEADER_NAMES = frozenset({"authorization", "content-type"})
+
+HEADER_VALUE_NOT_RESOLVED = "HEADER_VALUE_NOT_RESOLVED"
+SENSITIVE_HEADER_OMITTED = "SENSITIVE_HEADER_OMITTED"
+RESERVED_HEADER_OMITTED = "RESERVED_HEADER_OMITTED"
+DUPLICATE_HEADER_IGNORED = "DUPLICATE_HEADER_IGNORED"
 
 
 def _single_line(text: str) -> str:
@@ -121,20 +136,137 @@ def _coerce_query_value(value: str) -> str | int | bool:
     return value
 
 
-def _render_get_call(path: str, params: dict[str, str | int | bool]) -> str:
-    if not params:
+@dataclass(frozen=True)
+class _HeaderResolution:
+    headers: dict[str, str]
+    warnings: tuple[PlaywrightGenerationWarning, ...]
+
+
+def _resolve_headers(
+    headers: tuple[NormalizedHeader, ...],
+    *,
+    endpoint_source: str,
+    environment: PostmanEnvironment | None,
+) -> _HeaderResolution:
+    # Só headers habilitados entram na consideração — os demais são
+    # ignorados sem gerar warning (desabilitado é uma decisão explícita já
+    # tomada na Collection, não uma omissão nossa a explicar).
+    enabled = [h for h in headers if not h.disabled and h.key]
+
+    resolved: dict[str, tuple[str, str]] = {}  # chave normalizada -> (nome original, valor)
+    warnings: list[PlaywrightGenerationWarning] = []
+
+    for header in enabled:
+        assert header.key is not None  # filtrado acima
+        key = header.key
+        lower_key = key.lower()
+        value = header.value or ""
+
+        if lower_key in _RESERVED_HEADER_NAMES:
+            code = SENSITIVE_HEADER_OMITTED if lower_key == "authorization" else RESERVED_HEADER_OMITTED
+            warnings.append(_header_warning(code, endpoint_source, key, _reserved_reason(lower_key)))
+            continue
+
+        if "{{" in key or "{{" in value:
+            warnings.append(
+                _header_warning(
+                    HEADER_VALUE_NOT_RESOLVED,
+                    endpoint_source,
+                    key,
+                    "nome ou valor contém uma variável não resolvida",
+                )
+            )
+            continue
+
+        if _matches_known_secret(value, environment):
+            warnings.append(
+                _header_warning(
+                    SENSITIVE_HEADER_OMITTED,
+                    endpoint_source,
+                    key,
+                    "valor corresponde a uma variável marcada como secreta no Environment",
+                )
+            )
+            continue
+
+        if lower_key in resolved:
+            # Case-insensitive: "Accept" e "accept" (ou dois "Accept"
+            # literais) são o mesmo header HTTP — mantém o último valor
+            # definido, avisa sobre o anterior descartado.
+            warnings.append(
+                _header_warning(
+                    DUPLICATE_HEADER_IGNORED,
+                    endpoint_source,
+                    key,
+                    "duplicado (diferença de caixa incluída); mantido o último valor definido",
+                )
+            )
+        resolved[lower_key] = (key, value)
+
+    ordered_headers = {original_key: value for original_key, value in resolved.values()}
+    return _HeaderResolution(headers=ordered_headers, warnings=tuple(warnings))
+
+
+def _reserved_reason(lower_key: str) -> str:
+    if lower_key == "authorization":
+        return "cabeçalhos de autenticação ainda não são gerados automaticamente"
+    return "reservado para uma geração futura derivada do tipo de body"
+
+
+def _matches_known_secret(value: str, environment: PostmanEnvironment | None) -> bool:
+    if not value or environment is None:
+        return False
+    return any(
+        variable.is_secret and variable.enabled and variable.value == value
+        for variable in environment.variables
+    )
+
+
+def _header_warning(
+    code: str, endpoint_source: str, header_key: str, reason: str
+) -> PlaywrightGenerationWarning:
+    # Nunca o valor do header — só o nome (já seguro, mesmo padrão de
+    # strategy.endpoint_source) — aparece na mensagem.
+    safe_key = _single_line(header_key)
+    return PlaywrightGenerationWarning(
+        code=code,
+        message=f"Header '{safe_key}' omitido: {reason}.",
+        endpoint=endpoint_source,
+        scenario=None,
+    )
+
+
+def _render_get_call(
+    path: str,
+    params: dict[str, str | int | bool],
+    headers: dict[str, str],
+) -> str:
+    if not params and not headers:
         return f"    response = api_context.get({_python_string_literal(path)})\n"
 
     lines = [
         "    response = api_context.get(\n",
         f"        {_python_string_literal(path)},\n",
-        "        params={\n",
     ]
-    for key, value in params.items():
-        lines.append(
-            f"            {_python_string_literal(key)}: {_render_python_literal(value)},\n"
-        )
-    lines.append("        },\n")
+    if params:
+        lines.append("        params={\n")
+        for key, value in params.items():
+            lines.append(
+                f"            {_python_string_literal(key)}: {_render_python_literal(value)},\n"
+            )
+        lines.append("        },\n")
+    if headers:
+        # Header específico do endpoint: tem precedência sobre um header
+        # de mesmo nome definido em _SHARED_HEADERS (conftest.py) —
+        # comportamento nativo do Playwright (headers por requisição
+        # sobrescrevem extra_http_headers do contexto), não algo que este
+        # código precisa mesclar manualmente.
+        lines.append("        headers={\n")
+        for key, value in headers.items():
+            lines.append(
+                f"            {_python_string_literal(key)}: {_python_string_literal(value)},\n"
+            )
+        lines.append("        },\n")
     lines.append("    )\n")
     return "".join(lines)
 
@@ -177,7 +309,7 @@ class PlaywrightEndpointTestGenerator:
     ) -> GeneratedEndpointTest:
         reason = _unsupported_reason(request)
         if reason is None:
-            return _generate_positive_success_test(strategy, request)
+            return _generate_positive_success_test(strategy, request, environment)
 
         fallback = self._fallback_generator.generate_endpoint(strategy, request, environment)
         warning = PlaywrightGenerationWarning(
@@ -190,12 +322,17 @@ class PlaywrightEndpointTestGenerator:
 
 
 def _generate_positive_success_test(
-    strategy: TestStrategy, request: NormalizedRequest
+    strategy: TestStrategy,
+    request: NormalizedRequest,
+    environment: PostmanEnvironment | None,
 ) -> GeneratedEndpointTest:
     slug = endpoint_source_to_slug(strategy.endpoint_source)
     function_name = f"test_{slug}_success"
     path = _relative_path(request.url)
     params = _build_query_params(request.url.query_parameters)
+    header_resolution = _resolve_headers(
+        request.headers, endpoint_source=strategy.endpoint_source, environment=environment
+    )
 
     safe_request_name = _single_line(request.name or strategy.endpoint_source)
     safe_endpoint_source = _single_line(strategy.endpoint_source)
@@ -212,7 +349,7 @@ def _generate_positive_success_test(
         "autenticação, sem variáveis não resolvidas)\n"
         '    """\n'
         "\n"
-        f"{_render_get_call(path, params)}"
+        f"{_render_get_call(path, params, header_resolution.headers)}"
         "\n"
         "    assert response is not None\n"
     )
@@ -222,6 +359,6 @@ def _generate_positive_success_test(
         suggested_file_name=endpoint_source_to_file_name(strategy.endpoint_source),
         content=content,
         scenario_names=("success",),
-        warnings=(),
+        warnings=header_resolution.warnings,
         base_url=derive_base_url(request.url),
     )

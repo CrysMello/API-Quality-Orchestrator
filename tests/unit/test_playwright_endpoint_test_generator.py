@@ -448,3 +448,198 @@ def test_capitalized_true_is_not_coerced_and_stays_a_string():
     # capitalizado pode ser um valor de negócio real, não um booleano.
     generated = _generate(_request_with_query([{"key": "flag", "value": "True"}]))
     assert '"flag": "True",' in generated.content
+
+
+# --- Parte 11: headers -------------------------------------------------------
+
+
+def _request_with_headers(headers: list[dict]) -> dict:
+    return {
+        "request": {
+            "method": "GET",
+            "url": "https://api.exemplo.com/users",
+            "header": headers,
+        }
+    }
+
+
+def test_no_headers_keeps_the_call_without_a_headers_argument():
+    generated = _generate({"request": {"method": "GET", "url": "https://api.exemplo.com/users"}})
+
+    assert 'response = api_context.get("/users")' in generated.content
+    assert "headers=" not in generated.content
+
+
+def test_simple_headers_match_the_spec_example():
+    generated = _generate(
+        _request_with_headers(
+            [
+                {"key": "Accept", "value": "application/json"},
+                {"key": "X-Correlation-Id", "value": "test-request"},
+            ]
+        )
+    )
+
+    assert (
+        "    response = api_context.get(\n"
+        '        "/users",\n'
+        "        headers={\n"
+        '            "Accept": "application/json",\n'
+        '            "X-Correlation-Id": "test-request",\n'
+        "        },\n"
+        "    )\n"
+    ) in generated.content
+    ast.parse(generated.content)
+    assert generated.warnings == ()
+
+
+def test_disabled_header_is_never_generated():
+    generated = _generate(
+        _request_with_headers(
+            [
+                {"key": "Accept", "value": "application/json"},
+                {"key": "X-Debug", "value": "on", "disabled": True},
+            ]
+        )
+    )
+
+    assert '"X-Debug"' not in generated.content
+    assert '"Accept": "application/json",' in generated.content
+    assert generated.warnings == ()  # desabilitado é decisão explícita, não gera warning
+
+
+def test_empty_header_value_is_preserved():
+    generated = _generate(_request_with_headers([{"key": "X-Trace", "value": ""}]))
+
+    assert '"X-Trace": "",' in generated.content
+
+
+def test_duplicate_header_same_case_keeps_the_last_value_with_warning():
+    generated = _generate(
+        _request_with_headers(
+            [
+                {"key": "X-Custom", "value": "first"},
+                {"key": "X-Custom", "value": "second"},
+            ]
+        )
+    )
+
+    assert '"X-Custom": "second",' in generated.content
+    assert generated.content.count('"X-Custom"') == 1
+    assert len(generated.warnings) == 1
+    assert generated.warnings[0].code == "DUPLICATE_HEADER_IGNORED"
+
+
+def test_conflicting_header_different_case_resolves_to_a_single_header():
+    generated = _generate(
+        _request_with_headers(
+            [
+                {"key": "Accept", "value": "application/xml"},
+                {"key": "accept", "value": "application/json"},
+            ]
+        )
+    )
+
+    # case-insensitive: as duas são o mesmo header HTTP — só uma sobrevive,
+    # com o último valor definido.
+    assert generated.content.lower().count('"accept"') == 1
+    assert '"application/json",' in generated.content
+    assert len(generated.warnings) == 1
+    assert generated.warnings[0].code == "DUPLICATE_HEADER_IGNORED"
+
+
+def test_sensitive_header_authorization_is_never_written_literally():
+    generated = _generate(
+        _request_with_headers([{"key": "Authorization", "value": "Bearer super-secreto-token"}])
+    )
+
+    assert "super-secreto-token" not in generated.content
+    assert "Authorization" not in generated.content
+    assert len(generated.warnings) == 1
+    assert generated.warnings[0].code == "SENSITIVE_HEADER_OMITTED"
+
+
+def test_sensitive_header_matching_environment_secret_is_omitted():
+    from api_quality_agent.domain.models import EnvironmentVariable, PostmanEnvironment
+
+    environment = PostmanEnvironment(
+        name="QA",
+        variables=(
+            EnvironmentVariable(
+                key="apiKey", value="valor-secreto-do-environment", is_secret=True, enabled=True
+            ),
+        ),
+    )
+
+    generated = _generate(
+        _request_with_headers([{"key": "X-Api-Key", "value": "valor-secreto-do-environment"}]),
+        environment,
+    )
+
+    assert "valor-secreto-do-environment" not in generated.content
+    assert len(generated.warnings) == 1
+    assert generated.warnings[0].code == "SENSITIVE_HEADER_OMITTED"
+
+
+def test_content_type_header_is_reserved_and_omitted():
+    generated = _generate(
+        _request_with_headers([{"key": "Content-Type", "value": "application/json"}])
+    )
+
+    assert "Content-Type" not in generated.content
+    assert len(generated.warnings) == 1
+    assert generated.warnings[0].code == "RESERVED_HEADER_OMITTED"
+
+
+def test_header_with_unresolved_variable_is_omitted_with_warning():
+    generated = _generate(
+        _request_with_headers([{"key": "X-Tenant", "value": "{{tenantId}}"}])
+    )
+
+    assert "headers=" not in generated.content
+    assert len(generated.warnings) == 1
+    assert generated.warnings[0].code == "HEADER_VALUE_NOT_RESOLVED"
+
+
+def test_headers_and_query_params_can_coexist_in_the_same_call():
+    generated = _generate(
+        {
+            "request": {
+                "method": "GET",
+                "url": {
+                    "raw": "https://api.exemplo.com/users?page=1",
+                    "protocol": "https",
+                    "host": ["api", "exemplo", "com"],
+                    "path": ["users"],
+                    "query": [{"key": "page", "value": "1"}],
+                },
+                "header": [{"key": "Accept", "value": "application/json"}],
+            }
+        }
+    )
+
+    assert "params={" in generated.content
+    assert "headers={" in generated.content
+    ast.parse(generated.content)
+
+
+def test_header_order_is_deterministic_across_calls():
+    request = _request_with_headers(
+        [
+            {"key": "Accept", "value": "application/json"},
+            {"key": "X-Correlation-Id", "value": "abc"},
+        ]
+    )
+
+    first = _generate(request).content
+    second = _generate(request).content
+
+    assert first == second
+
+
+def test_endpoint_source_of_the_warning_matches_the_endpoint():
+    generated = _generate(
+        _request_with_headers([{"key": "Authorization", "value": "Bearer x"}])
+    )
+
+    assert generated.warnings[0].endpoint == "GET /users"
