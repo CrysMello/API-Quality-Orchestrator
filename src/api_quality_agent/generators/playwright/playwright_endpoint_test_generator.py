@@ -2,10 +2,14 @@ import json
 import re
 from dataclasses import dataclass, replace
 
+from typing import Any
+
 from api_quality_agent.domain.models import (
     AuthType,
+    BodyMode,
     NormalizedAuth,
     NormalizedAuthParameter,
+    NormalizedBody,
     NormalizedHeader,
     NormalizedQueryParameter,
     NormalizedRequest,
@@ -65,6 +69,33 @@ AUTHENTICATION_VALUE_NOT_RESOLVED = "AUTHENTICATION_VALUE_NOT_RESOLVED"
 _PURE_VARIABLE_REFERENCE = re.compile(r"^\{\{\s*([^{}]+?)\s*\}\}$")
 _ENV_VAR_PREFIX = "AQO_"
 
+# Parte 13 — método passa a incluir POST (além de GET), principalmente
+# para poder carregar um body JSON. PUT/PATCH/DELETE continuam fora do
+# escopo (nenhum exemplo/critério desta parte os menciona) — mesma
+# incrementalidade conservadora das partes anteriores.
+_SUPPORTED_METHODS = frozenset({"GET", "POST"})
+
+# Body: só RAW + Content-Type de JSON é suportado ("Detectar body JSON
+# pelo modo do request e pelo Content-Type"); qualquer outro modo
+# (form-data, urlencoded, graphql, file) ou RAW sem Content-Type de JSON
+# cai no fallback do endpoint inteiro — não dá pra montar uma requisição
+# de verdade sem saber representar o corpo que ela deveria carregar.
+BODY_NOT_SUPPORTED = "BODY_NOT_SUPPORTED"
+# JSON declarado (RAW + Content-Type de JSON) mas o texto não é um JSON
+# válido — nunca tentamos corrigir automaticamente; o endpoint inteiro
+# cai no fallback em vez de gerar um payload aparentemente correto.
+BODY_JSON_INVALID = "BODY_JSON_INVALID"
+
+
+def _is_json_content_type(content_type: str | None) -> bool:
+    # Mesmo critério já usado por TestStrategyEngine._is_json_content_type
+    # (domain/services/test_strategy_engine.py) — ignora parâmetros do
+    # cabeçalho (ex.: "; charset=utf-8").
+    if not content_type:
+        return False
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return media_type == "application/json" or media_type.endswith("+json")
+
 
 def _single_line(text: str) -> str:
     # Nunca deve poder fechar a docstring triple-quoted onde é embutido nem
@@ -81,21 +112,22 @@ class _UnsupportedReason:
 
 
 def _unsupported_reason(request: NormalizedRequest) -> _UnsupportedReason | None:
-    # Caso mais simples primeiro (Parte 07): GET, sem body, sem variáveis
-    # de path não resolvidas, com autenticação suportada (Parte 12) ou
-    # nenhuma. Qualquer coisa além disso ainda cai no fallback (placeholder
-    # + warning) — nunca um código enganoso que pareça testar algo que não
+    # Caso mais simples primeiro (Parte 07 em diante): GET ou POST (Parte
+    # 13), body ausente ou JSON válido, sem variáveis de path não
+    # resolvidas, com autenticação suportada (Parte 12) ou nenhuma.
+    # Qualquer coisa além disso ainda cai no fallback (placeholder +
+    # warning) — nunca um código enganoso que pareça testar algo que não
     # testa de verdade.
     method = (request.method or "").upper()
-    if method != "GET":
+    if method not in _SUPPORTED_METHODS:
         return _UnsupportedReason(
             ENDPOINT_NOT_SUPPORTED_YET,
             f"método {request.method or 'desconhecido'} ainda não suportado",
         )
-    if request.body.has_content:
-        return _UnsupportedReason(
-            ENDPOINT_NOT_SUPPORTED_YET, "requests com body ainda não são suportadas"
-        )
+
+    body_reason = _unsupported_body_reason(request.body)
+    if body_reason is not None:
+        return body_reason
 
     auth_resolution = _resolve_auth(request.auth)
     if not auth_resolution.supported:
@@ -111,6 +143,31 @@ def _unsupported_reason(request: NormalizedRequest) -> _UnsupportedReason | None
     query_reason = _unsupported_query_reason(request.url.query_parameters)
     if query_reason is not None:
         return _UnsupportedReason(ENDPOINT_NOT_SUPPORTED_YET, query_reason)
+
+    return None
+
+
+def _unsupported_body_reason(body: NormalizedBody) -> _UnsupportedReason | None:
+    # "Tratar body vazio": has_content já é False para RAW com texto vazio
+    # (ver PostmanRequestNormalizer._normalize_body) — nada a fazer aqui
+    # além de tratar como "sem body", igual a uma request sem body nenhum.
+    if not body.has_content:
+        return None
+
+    if body.mode is not BodyMode.RAW or not _is_json_content_type(body.content_type):
+        return _UnsupportedReason(
+            BODY_NOT_SUPPORTED,
+            "body não declarado como JSON (modo ou Content-Type) ainda não suportado",
+        )
+
+    try:
+        json.loads(body.text_content or "")
+    except json.JSONDecodeError:
+        # Nunca tenta corrigir automaticamente — só registra que não deu
+        # para confiar no conteúdo declarado como JSON.
+        return _UnsupportedReason(
+            BODY_JSON_INVALID, "body declarado como JSON mas o conteúdo não é um JSON válido"
+        )
 
     return None
 
@@ -284,21 +341,25 @@ def _header_warning(
     )
 
 
-def _render_get_call(
+def _render_http_call(
+    method: str,
     path: str,
     params: dict[str, str],
     headers: dict[str, str],
+    data: str | None,
 ) -> str:
-    # params/headers já chegam pré-renderizados como código Python (cada
-    # valor é ou um literal escapado — _python_string_literal/
-    # _render_python_literal — ou uma expressão de _resolve_auth, ex.:
-    # 'f"Bearer {token}"') — este ponto só monta o texto, nunca decide como
+    # params/headers/data já chegam pré-renderizados como código Python
+    # (cada valor é ou um literal escapado — _python_string_literal/
+    # _render_python_literal/_render_json_literal — ou uma expressão de
+    # _resolve_auth/_resolve_body, ex.: 'f"Bearer {token}"' ou
+    # "request_body") — este ponto só monta o texto, nunca decide como
     # cada valor deve ser representado.
-    if not params and not headers:
-        return f"    response = api_context.get({_python_string_literal(path)})\n"
+    call = f"api_context.{method}"
+    if not params and not headers and data is None:
+        return f"    response = {call}({_python_string_literal(path)})\n"
 
     lines = [
-        "    response = api_context.get(\n",
+        f"    response = {call}(\n",
         f"        {_python_string_literal(path)},\n",
     ]
     if params:
@@ -316,6 +377,11 @@ def _render_get_call(
         for key, value in headers.items():
             lines.append(f"            {_python_string_literal(key)}: {value},\n")
         lines.append("        },\n")
+    if data is not None:
+        # data=<dict Python> aciona a serialização JSON automática do
+        # Playwright (Content-Type: application/json), sem precisar setar
+        # o header manualmente nem serializar o texto aqui.
+        lines.append(f"        data={data},\n")
     lines.append("    )\n")
     return "".join(lines)
 
@@ -337,6 +403,79 @@ def _python_string_literal(value: str) -> str:
     # como texto legível no código gerado, em vez de \\uXXXX, mesma
     # convenção já usada no restante do projeto (ex.: manifesto JSON).
     return json.dumps(value, ensure_ascii=False)
+
+
+# --- Body JSON (Parte 13) ----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _BodyResolution:
+    # Linhas já formatadas para inserir no corpo da função, antes da
+    # chamada api_context.<método>(...) — a atribuição de request_body.
+    preamble_lines: tuple[str, ...]
+    # Expressão Python já pronta para o argumento data= — sempre o nome da
+    # variável local "request_body" quando há body, None quando não há
+    # (mesma convenção de valor pré-renderizado de headers/params/auth).
+    data_expression: str | None
+
+
+def _resolve_body(body: NormalizedBody) -> _BodyResolution:
+    if not body.has_content:
+        return _BodyResolution(preamble_lines=(), data_expression=None)
+
+    # Chegou aqui só depois de _unsupported_body_reason confirmar RAW +
+    # Content-Type de JSON + JSON válido — reanalisar aqui é puro e sem
+    # efeito colateral, mesmo padrão já usado por _resolve_auth.
+    parsed = json.loads(body.text_content or "")
+    rendered = _render_json_literal(parsed, "    ")
+    return _BodyResolution(
+        preamble_lines=(f"    request_body = {rendered}\n",),
+        data_expression="request_body",
+    )
+
+
+def _render_json_literal(value: Any, base_indent: str) -> str:
+    # value vem de json.loads: já preserva os tipos exatamente como
+    # "Implementar" pede — null->None, true/false->bool, number->int/float,
+    # string->str, object->dict (preserva ordem de inserção == ordem no
+    # JSON original), array->list. Este renderizador só converte cada valor
+    # Python já correto para o literal de código-fonte equivalente,
+    # formatado deterministicamente (mesma indentação sempre, mesma ordem).
+    if value is None:
+        return "None"
+    if isinstance(value, bool):
+        # bool antes de (int, float): bool é subclasse de int em Python.
+        return "True" if value else "False"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return _python_string_literal(value)
+    if isinstance(value, list):
+        return _render_json_list(value, base_indent)
+    if isinstance(value, dict):
+        return _render_json_dict(value, base_indent)
+    # Defensivo: json.loads nunca produz outro tipo além dos acima.
+    return _python_string_literal(str(value))
+
+
+def _render_json_dict(value: dict[str, Any], base_indent: str) -> str:
+    if not value:
+        return "{}"
+    child_indent = base_indent + "    "
+    lines = [
+        f"{child_indent}{_python_string_literal(key)}: "
+        f"{_render_json_literal(item, child_indent)},"
+        for key, item in value.items()
+    ]
+    return "{\n" + "\n".join(lines) + f"\n{base_indent}}}"
+
+
+def _render_json_list(value: list[Any], base_indent: str) -> str:
+    if not value:
+        return "[]"
+    child_indent = base_indent + "    "
+    lines = [f"{child_indent}{_render_json_literal(item, child_indent)}," for item in value]
+    return "[\n" + "\n".join(lines) + f"\n{base_indent}]"
 
 
 # --- Autenticação (Parte 12) -------------------------------------------------
@@ -575,6 +714,7 @@ def _generate_positive_success_test(
 ) -> GeneratedEndpointTest:
     slug = endpoint_source_to_slug(strategy.endpoint_source)
     function_name = f"test_{slug}_success"
+    method = (request.method or "get").lower()
     path = _relative_path(request.url)
     params = _build_query_params(request.url.query_parameters)
     header_resolution = _resolve_headers(
@@ -582,9 +722,10 @@ def _generate_positive_success_test(
     )
     # Já sabido "supported" (gate em _unsupported_reason); recomputado aqui
     # (puro, sem efeito colateral) para obter o preâmbulo/headers/params
-    # reais a renderizar — mesmo padrão de params/headers, que também são
-    # recalculados em vez de repassados da checagem de suporte.
+    # reais a renderizar — mesmo padrão já usado para headers/params, que
+    # também são recalculados em vez de repassados da checagem de suporte.
     auth_resolution = _resolve_auth(request.auth)
+    body_resolution = _resolve_body(request.body)
 
     # Auth tem precedência sobre um header/param regular de mesmo nome —
     # nunca colide com "Authorization"/"Content-Type" manuais (já excluídos
@@ -601,12 +742,16 @@ def _generate_positive_success_test(
         if request.auth.auth_type in _NO_AUTH_TYPES
         else "com autenticação suportada via variável de ambiente"
     )
+    body_origin_note = "com body JSON" if body_resolution.data_expression is not None else "sem body"
 
     imports_block = "".join(f"import {name}\n" for name in sorted(auth_resolution.extra_imports))
     if imports_block:
         imports_block += "\n\n"
 
-    preamble = "".join(auth_resolution.preamble_lines)
+    # Ordem: preâmbulo de autenticação (configuração da requisição) antes
+    # do preâmbulo de body (o que está sendo enviado) — ambos antes da
+    # chamada em si.
+    preamble = "".join(auth_resolution.preamble_lines) + "".join(body_resolution.preamble_lines)
     if preamble:
         preamble += "\n"
 
@@ -619,12 +764,12 @@ def _generate_positive_success_test(
         f"    Endpoint: {safe_endpoint_source}\n"
         "    Scenario: success\n"
         "    Category: positive\n"
-        f"    Origin: NormalizedRequest (GET simples, sem body, {auth_origin_note}, "
-        "sem variáveis não resolvidas)\n"
+        f"    Origin: NormalizedRequest ({request.method} simples, {body_origin_note}, "
+        f"{auth_origin_note}, sem variáveis não resolvidas)\n"
         '    """\n'
         "\n"
         f"{preamble}"
-        f"{_render_get_call(path, all_params, all_headers)}"
+        f"{_render_http_call(method, path, all_params, all_headers, body_resolution.data_expression)}"
         "\n"
         "    assert response is not None\n"
     )
