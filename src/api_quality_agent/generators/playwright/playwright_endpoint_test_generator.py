@@ -108,13 +108,22 @@ MULTIPART_FILE_NOT_RESOLVED = "MULTIPART_FILE_NOT_RESOLVED"
 EXPECTED_STATUS_NOT_DEFINED = "EXPECTED_STATUS_NOT_DEFINED"
 
 
+def _media_type_only(content_type: str) -> str:
+    # "application/json; charset=utf-8" -> "application/json" — separa o
+    # media type dos parâmetros (charset, boundary etc.) e normaliza caixa,
+    # reaproveitado tanto para decidir se um body é JSON (Parte 13) quanto
+    # para a asserção de Content-Type da resposta (Parte 17). Nunca compara
+    # a string completa do header (Parte 17, regra 5) — só esta parte.
+    return content_type.split(";", 1)[0].strip().lower()
+
+
 def _is_json_content_type(content_type: str | None) -> bool:
     # Mesmo critério já usado por TestStrategyEngine._is_json_content_type
-    # (domain/services/test_strategy_engine.py) — ignora parâmetros do
-    # cabeçalho (ex.: "; charset=utf-8").
+    # (domain/services/test_strategy_engine.py) — inclui variantes +json
+    # (ex.: "application/vnd.api+json"), não só o media type genérico.
     if not content_type:
         return False
-    media_type = content_type.split(";", 1)[0].strip().lower()
+    media_type = _media_type_only(content_type)
     return media_type == "application/json" or media_type.endswith("+json")
 
 
@@ -1027,6 +1036,62 @@ def _resolve_status_assertion(strategy: TestStrategy) -> _StatusAssertionResolut
     )
 
 
+# --- Content-Type (Parte 17) --------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _ContentTypeAssertionResolution:
+    # Linhas extras a inserir no corpo da função, depois da asserção de
+    # status — tupla vazia quando não há evidência ("Validar a existência
+    # do header somente quando houver expectativa de body/content-type";
+    # "não exigir Content-Type sem evidência" para respostas sem corpo,
+    # ex.: 204 documentado). Ausência de evidência aqui nunca gera warning
+    # (diferente de status, Parte 16): não ter Content-Type esperado é o
+    # caso normal para uma resposta sem corpo, não um caso degradado.
+    lines: tuple[str, ...]
+    # Linha de docstring registrando a origem da expectativa — string vazia
+    # quando não há evidência (nada a registrar).
+    docstring_note: str
+
+
+def _find_content_type_assertion(strategy: TestStrategy) -> AssertionDefinition | None:
+    return next(
+        (a for a in strategy.assertions if a.assertion_type is AssertionType.CONTENT_TYPE), None
+    )
+
+
+def _resolve_content_type_assertion(strategy: TestStrategy) -> _ContentTypeAssertionResolution:
+    assertion = _find_content_type_assertion(strategy)
+    if assertion is None:
+        return _ContentTypeAssertionResolution(lines=(), docstring_note="")
+
+    # Media type separado dos parâmetros (charset etc.) e normalizado em
+    # caixa baixa já na geração — a asserção nunca compara a string
+    # completa do header (regra 5: charset nunca causa falso negativo).
+    expected_media_type = _media_type_only(str(assertion.expected_value))
+    expected_literal = _python_string_literal(expected_media_type)
+    kind = "JSON" if _is_json_content_type(expected_media_type) else "não-JSON"
+
+    lines = (
+        # .get(..., "") em vez de .get(...) cru: um header ausente em
+        # runtime vira uma string vazia, que nunca bate com o media type
+        # esperado — falha limpa na asserção seguinte, nunca um
+        # AttributeError tentando chamar .split(...) em None.
+        '    content_type = response.headers.get("content-type", "")\n',
+        # response.headers do Playwright já normaliza o NOME do header para
+        # minúsculas (ver playwright._impl._network.RawHeaders) — "content-
+        # type" cobre qualquer caixa original ("Content-Type",
+        # "CONTENT-TYPE" etc.), satisfazendo a comparação case-insensitive
+        # do nome pedida na regra 2. O VALOR também é normalizado aqui
+        # (.lower()) antes de comparar.
+        f'    assert content_type.split(";")[0].strip().lower() == {expected_literal}\n',
+    )
+    docstring_note = (
+        f"    Content-Type: {expected_media_type} [{kind}] (origem: {assertion.origin})\n"
+    )
+    return _ContentTypeAssertionResolution(lines=lines, docstring_note=docstring_note)
+
+
 def _generate_positive_success_test(
     strategy: TestStrategy,
     request: NormalizedRequest,
@@ -1036,6 +1101,7 @@ def _generate_positive_success_test(
     function_name = f"test_{slug}_success"
     method = (request.method or "get").lower()
     status_resolution = _resolve_status_assertion(strategy)
+    content_type_resolution = _resolve_content_type_assertion(strategy)
 
     # Já sabido "supported" (gate em _unsupported_reason); recomputado aqui
     # (puro, sem efeito colateral) com uma sessão NOVA — mesmo padrão já
@@ -1114,12 +1180,14 @@ def _generate_positive_success_test(
         f"    Origin: NormalizedRequest ({request.method} simples, {body_origin_note}, "
         f"{auth_origin_note}, sem variáveis não resolvidas)\n"
         f"{status_resolution.docstring_note}"
+        f"{content_type_resolution.docstring_note}"
         '    """\n'
         "\n"
         f"{preamble}"
         f"{http_call}"
         "\n"
         f"{status_resolution.assertion_line}"
+        f"{''.join(content_type_resolution.lines)}"
     )
 
     warnings = header_resolution.warnings
