@@ -1,8 +1,9 @@
 """Parte 07 do plano de ação Playwright: ponta a ponta via CLI real
 (`generate --file --target playwright`) — confirma que o endpoint GET
 simples recebe o primeiro teste positivo real (não mais o placeholder), e
-que o endpoint ainda não suportado (POST) continua caindo no fallback com
-warning, nunca em código enganoso.
+que o endpoint ainda não suportado (DELETE — POST passou a ser suportado na
+Parte 13) continua caindo no fallback com warning, nunca em código
+enganoso.
 """
 
 import ast
@@ -33,9 +34,12 @@ def _write_offline_collection(tmp_path: Path) -> Path:
                         "request": {"method": "GET", "url": "https://api.exemplo.com/users"},
                     },
                     {
-                        "name": "Criar usuário",
+                        "name": "Remover usuário",
                         "id": "r2",
-                        "request": {"method": "POST", "url": "https://api.exemplo.com/users"},
+                        "request": {
+                            "method": "DELETE",
+                            "url": "https://api.exemplo.com/users/1",
+                        },
                     },
                 ],
             }
@@ -73,8 +77,8 @@ def test_unsupported_endpoint_still_falls_back_to_placeholder_with_valid_syntax(
 
     assert exit_code == SUCCESS
     endpoints_dir = next((tmp_path / "artifacts").rglob("endpoints"))
-    post_file = endpoints_dir / "test_post_users.py"
-    content = post_file.read_text(encoding="utf-8")
+    delete_file = endpoints_dir / "test_delete_users_1.py"
+    content = delete_file.read_text(encoding="utf-8")
 
     assert "@pytest.mark.skip" in content
     assert "response = api_context" not in content

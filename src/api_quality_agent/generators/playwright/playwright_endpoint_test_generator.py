@@ -75,16 +75,20 @@ _ENV_VAR_PREFIX = "AQO_"
 # incrementalidade conservadora das partes anteriores.
 _SUPPORTED_METHODS = frozenset({"GET", "POST"})
 
-# Body: só RAW + Content-Type de JSON é suportado ("Detectar body JSON
-# pelo modo do request e pelo Content-Type"); qualquer outro modo
-# (form-data, urlencoded, graphql, file) ou RAW sem Content-Type de JSON
-# cai no fallback do endpoint inteiro — não dá pra montar uma requisição
-# de verdade sem saber representar o corpo que ela deveria carregar.
+# Body: RAW + Content-Type de JSON (Parte 13) e multipart/form-data (Parte
+# 14) são suportados; qualquer outro modo (urlencoded, graphql, file) ou RAW
+# sem Content-Type de JSON cai no fallback do endpoint inteiro — não dá pra
+# montar uma requisição de verdade sem saber representar o corpo que ela
+# deveria carregar.
 BODY_NOT_SUPPORTED = "BODY_NOT_SUPPORTED"
 # JSON declarado (RAW + Content-Type de JSON) mas o texto não é um JSON
 # válido — nunca tentamos corrigir automaticamente; o endpoint inteiro
 # cai no fallback em vez de gerar um payload aparentemente correto.
 BODY_JSON_INVALID = "BODY_JSON_INVALID"
+# Multipart/form-data (Parte 14): um campo de arquivo sem "key" não tem
+# como virar uma variável de ambiente estável (AQO_UPLOAD_<NOME>) — o
+# endpoint inteiro cai no fallback, nunca um nome de campo "adivinhado".
+MULTIPART_FILE_NOT_RESOLVED = "MULTIPART_FILE_NOT_RESOLVED"
 
 
 def _is_json_content_type(content_type: str | None) -> bool:
@@ -113,11 +117,11 @@ class _UnsupportedReason:
 
 def _unsupported_reason(request: NormalizedRequest) -> _UnsupportedReason | None:
     # Caso mais simples primeiro (Parte 07 em diante): GET ou POST (Parte
-    # 13), body ausente ou JSON válido, sem variáveis de path não
-    # resolvidas, com autenticação suportada (Parte 12) ou nenhuma.
-    # Qualquer coisa além disso ainda cai no fallback (placeholder +
-    # warning) — nunca um código enganoso que pareça testar algo que não
-    # testa de verdade.
+    # 13), body ausente, JSON válido ou multipart/form-data resolvível
+    # (Parte 14), sem variáveis de path não resolvidas, com autenticação
+    # suportada (Parte 12) ou nenhuma. Qualquer coisa além disso ainda cai
+    # no fallback (placeholder + warning) — nunca um código enganoso que
+    # pareça testar algo que não testa de verdade.
     method = (request.method or "").upper()
     if method not in _SUPPORTED_METHODS:
         return _UnsupportedReason(
@@ -154,6 +158,9 @@ def _unsupported_body_reason(body: NormalizedBody) -> _UnsupportedReason | None:
     if not body.has_content:
         return None
 
+    if body.mode is BodyMode.FORMDATA:
+        return _unsupported_multipart_reason(body)
+
     if body.mode is not BodyMode.RAW or not _is_json_content_type(body.content_type):
         return _UnsupportedReason(
             BODY_NOT_SUPPORTED,
@@ -169,6 +176,22 @@ def _unsupported_body_reason(body: NormalizedBody) -> _UnsupportedReason | None:
             BODY_JSON_INVALID, "body declarado como JSON mas o conteúdo não é um JSON válido"
         )
 
+    return None
+
+
+def _unsupported_multipart_reason(body: NormalizedBody) -> _UnsupportedReason | None:
+    # Só campos habilitados são considerados — um campo de arquivo
+    # desabilitado nunca é renderizado (mesmo critério de query/headers),
+    # então sua ausência de "key" nunca impede a geração do endpoint.
+    for field in body.fields:
+        if field.disabled:
+            continue
+        if field.field_type == "file" and not field.key:
+            return _UnsupportedReason(
+                MULTIPART_FILE_NOT_RESOLVED,
+                "campo de arquivo sem nome (key) não pode ser referenciado por variável de "
+                "ambiente",
+            )
     return None
 
 
@@ -347,15 +370,18 @@ def _render_http_call(
     params: dict[str, str],
     headers: dict[str, str],
     data: str | None,
+    multipart: dict[str, str] | None = None,
 ) -> str:
-    # params/headers/data já chegam pré-renderizados como código Python
-    # (cada valor é ou um literal escapado — _python_string_literal/
+    # params/headers/data/multipart já chegam pré-renderizados como código
+    # Python (cada valor é ou um literal escapado — _python_string_literal/
     # _render_python_literal/_render_json_literal — ou uma expressão de
-    # _resolve_auth/_resolve_body, ex.: 'f"Bearer {token}"' ou
-    # "request_body") — este ponto só monta o texto, nunca decide como
-    # cada valor deve ser representado.
+    # _resolve_auth/_resolve_body, ex.: 'f"Bearer {token}"', "request_body"
+    # ou o texto multi-linha de um FilePayload) — este ponto só monta o
+    # texto, nunca decide como cada valor deve ser representado. data e
+    # multipart são mutuamente exclusivos (JSON vs multipart/form-data —
+    # nunca os dois ao mesmo tempo, ver _resolve_body).
     call = f"api_context.{method}"
-    if not params and not headers and data is None:
+    if not params and not headers and data is None and not multipart:
         return f"    response = {call}({_python_string_literal(path)})\n"
 
     lines = [
@@ -382,6 +408,15 @@ def _render_http_call(
         # Playwright (Content-Type: application/json), sem precisar setar
         # o header manualmente nem serializar o texto aqui.
         lines.append(f"        data={data},\n")
+    if multipart:
+        # multipart=<dict Python> aciona o encoding multipart/form-data
+        # automático do Playwright, boundary incluído — nunca escrito à
+        # mão aqui (ver _render_file_payload_dict para o formato de cada
+        # campo de arquivo).
+        lines.append("        multipart={\n")
+        for key, value in multipart.items():
+            lines.append(f"            {_python_string_literal(key)}: {value},\n")
+        lines.append("        },\n")
     lines.append("    )\n")
     return "".join(lines)
 
@@ -411,17 +446,32 @@ def _python_string_literal(value: str) -> str:
 @dataclass(frozen=True)
 class _BodyResolution:
     # Linhas já formatadas para inserir no corpo da função, antes da
-    # chamada api_context.<método>(...) — a atribuição de request_body.
+    # chamada api_context.<método>(...) — atribuição de request_body (JSON,
+    # Parte 13) e/ou leitura de variáveis de ambiente e arquivos (multipart,
+    # Parte 14).
     preamble_lines: tuple[str, ...]
     # Expressão Python já pronta para o argumento data= — sempre o nome da
-    # variável local "request_body" quando há body, None quando não há
+    # variável local "request_body" quando há body JSON, None quando não há
     # (mesma convenção de valor pré-renderizado de headers/params/auth).
-    data_expression: str | None
+    data_expression: str | None = None
+    # Dict chave -> expressão Python já pronta para o argumento multipart=
+    # (Parte 14) — cada valor é ou um literal escapado, ou o nome de uma
+    # variável local (campo textual com {{variável}} resolvida), ou o texto
+    # multi-linha de um FilePayload (campo de arquivo). None quando o body
+    # não é multipart/form-data.
+    multipart_fields: dict[str, str] | None = None
+    # Imports extras exigidos pelo preâmbulo acima (ex.: "pytest" para
+    # pytest.fail, "mimetypes" para adivinhar o Content-Type do arquivo) —
+    # union com auth_resolution.extra_imports em _generate_positive_success_test.
+    extra_imports: frozenset[str] = frozenset()
 
 
 def _resolve_body(body: NormalizedBody) -> _BodyResolution:
     if not body.has_content:
-        return _BodyResolution(preamble_lines=(), data_expression=None)
+        return _BodyResolution(preamble_lines=())
+
+    if body.mode is BodyMode.FORMDATA:
+        return _resolve_multipart_body(body)
 
     # Chegou aqui só depois de _unsupported_body_reason confirmar RAW +
     # Content-Type de JSON + JSON válido — reanalisar aqui é puro e sem
@@ -476,6 +526,129 @@ def _render_json_list(value: list[Any], base_indent: str) -> str:
     child_indent = base_indent + "    "
     lines = [f"{child_indent}{_render_json_literal(item, child_indent)}," for item in value]
     return "[\n" + "\n".join(lines) + f"\n{base_indent}]"
+
+
+# --- Multipart/form-data (Parte 14) ------------------------------------------
+
+# Campo de multipart pode ter espaço/símbolo no "key" (ex.: "Profile
+# Picture") — nunca usado cru como identificador Python nem como sufixo de
+# variável de ambiente.
+_INVALID_IDENTIFIER_CHARS = re.compile(r"[^a-z0-9_]+")
+
+
+def _sanitize_field_identifier(name: str) -> str:
+    # Mesmo alfabeto seguro usado por endpoint_file_naming._sanitize_segment
+    # (snake_case + só [a-z0-9_]) — reservas de nome quando sobra vazio (ex.:
+    # "key" só com símbolos) nunca deixam o identificador em branco.
+    #
+    # Limitação conhecida, deliberadamente não tratada (fora do escopo desta
+    # parte, sem exemplo/critério que peça isso): dois campos cujo "key" (ou
+    # variável) sanitiza para o mesmo slug (ex.: "Profile Picture" e
+    # "profile_picture") colidiriam no mesmo nome de variável local — o
+    # último declarado prevalece, sem aviso.
+    slug = _INVALID_IDENTIFIER_CHARS.sub("_", to_snake_case(name)).strip("_")
+    return slug or "field"
+
+
+def _multipart_file_env_var(field_key: str) -> str:
+    # Nunca deriva o env var do "src" declarado na Collection (normalmente
+    # um caminho local da máquina de quem criou a Collection, sem sentido
+    # em outra máquina/CI) — só do nome do campo, mesmo quando a Collection
+    # já trouxer um arquivo anexado ("Receber caminhos de arquivos por
+    # configuração ou variável de ambiente").
+    return f"{_ENV_VAR_PREFIX}UPLOAD_{_sanitize_field_identifier(field_key).upper()}"
+
+
+def _multipart_file_field_preamble(field_key: str, local_name: str) -> tuple[str, ...]:
+    env_var = _multipart_file_env_var(field_key)
+    # Só o nome do campo (já seguro para aparecer em mensagem, mesmo padrão
+    # de _header_warning) — nunca um caminho local — entra na mensagem de
+    # falha; concatenado (+) em vez de f-string aqui para não precisar
+    # escapar chaves do texto gerado.
+    message_literal = _python_string_literal(
+        f"Arquivo obrigatório não encontrado para o campo '{_single_line(field_key)}': "
+    )
+    return (
+        # "Validar existência do arquivo em runtime" + "Gerar mensagem clara
+        # quando o arquivo obrigatório estiver ausente": a variável de
+        # ambiente e o próprio arquivo só são checados quando o teste roda,
+        # nunca na geração — o mesmo teste gerado detecta tanto a variável
+        # não configurada quanto o caminho configurado mas inexistente.
+        *_env_var_lookup_lines(f"{local_name}_path", env_var),
+        f"    if not os.path.isfile({local_name}_path):\n",
+        f"        pytest.fail({message_literal} + {local_name}_path)\n",
+        f'    with open({local_name}_path, "rb") as {local_name}_fh:\n',
+        f"        {local_name}_buffer = {local_name}_fh.read()\n",
+    )
+
+
+def _render_file_payload_dict(local_name: str, base_indent: str) -> str:
+    # FilePayload do Playwright (name/mimeType/buffer) — nunca o caminho
+    # local em si nem o conteúdo binário do arquivo aparecem no código
+    # gerado, só referências às variáveis já lidas no preâmbulo (ver
+    # _multipart_file_field_preamble); o conteúdo binário só existe em
+    # memória quando o teste roda de verdade ("Não incorporar conteúdo
+    # binário no código").
+    child_indent = base_indent + "    "
+    lines = [
+        f'{child_indent}"name": os.path.basename({local_name}_path),',
+        f'{child_indent}"mimeType": mimetypes.guess_type({local_name}_path)[0]',
+        f'{child_indent}or "application/octet-stream",',
+        f'{child_indent}"buffer": {local_name}_buffer,',
+    ]
+    return "{\n" + "\n".join(lines) + f"\n{base_indent}}}"
+
+
+def _resolve_multipart_body(body: NormalizedBody) -> _BodyResolution:
+    # Chegou aqui só depois de _unsupported_multipart_reason confirmar que
+    # todo campo de arquivo habilitado tem "key" — reanalisar aqui é puro e
+    # sem efeito colateral, mesmo padrão já usado por _resolve_auth/_resolve_body.
+    preamble_lines: list[str] = []
+    extra_imports: set[str] = set()
+    fields_code: dict[str, str] = {}
+    # Nomes de variável local já emitidos (arquivo ou campo textual
+    # resolvido) — evita repetir o mesmo `os.environ.get(...)` quando o
+    # mesmo campo/variável aparece mais de uma vez.
+    seen_local_names: set[str] = set()
+
+    for field in body.fields:
+        if field.disabled or not field.key:
+            continue
+
+        if field.field_type == "file":
+            local_name = _sanitize_field_identifier(field.key)
+            if local_name not in seen_local_names:
+                seen_local_names.add(local_name)
+                preamble_lines.extend(_multipart_file_field_preamble(field.key, local_name))
+                extra_imports |= {"os", "pytest", "mimetypes"}
+            fields_code[field.key] = _render_file_payload_dict(local_name, "            ")
+            continue
+
+        # Campo textual: "Resolver variáveis em campos textuais" — só uma
+        # referência pura ({{nome}}, nada mais na string) vira variável de
+        # ambiente (mesmo critério conservador de _resolve_auth, via
+        # _extract_pure_variable_name); qualquer outro valor (literal ou
+        # com variável parcial) é embutido como texto, mesmo tratamento já
+        # usado pelo body JSON (Parte 13) para conteúdo bruto.
+        variable_name = _extract_pure_variable_name(field.value)
+        if variable_name is None:
+            fields_code[field.key] = _python_string_literal(field.value or "")
+            continue
+
+        local_name = _sanitize_field_identifier(variable_name)
+        if local_name not in seen_local_names:
+            seen_local_names.add(local_name)
+            preamble_lines.extend(
+                _env_var_lookup_lines(local_name, _to_env_var_name(variable_name))
+            )
+            extra_imports.add("os")
+        fields_code[field.key] = local_name
+
+    return _BodyResolution(
+        preamble_lines=tuple(preamble_lines),
+        multipart_fields=fields_code or None,
+        extra_imports=frozenset(extra_imports),
+    )
 
 
 # --- Autenticação (Parte 12) -------------------------------------------------
@@ -742,9 +915,15 @@ def _generate_positive_success_test(
         if request.auth.auth_type in _NO_AUTH_TYPES
         else "com autenticação suportada via variável de ambiente"
     )
-    body_origin_note = "com body JSON" if body_resolution.data_expression is not None else "sem body"
+    if body_resolution.data_expression is not None:
+        body_origin_note = "com body JSON"
+    elif body_resolution.multipart_fields:
+        body_origin_note = "com multipart/form-data"
+    else:
+        body_origin_note = "sem body"
 
-    imports_block = "".join(f"import {name}\n" for name in sorted(auth_resolution.extra_imports))
+    all_imports = auth_resolution.extra_imports | body_resolution.extra_imports
+    imports_block = "".join(f"import {name}\n" for name in sorted(all_imports))
     if imports_block:
         imports_block += "\n\n"
 
@@ -754,6 +933,15 @@ def _generate_positive_success_test(
     preamble = "".join(auth_resolution.preamble_lines) + "".join(body_resolution.preamble_lines)
     if preamble:
         preamble += "\n"
+
+    http_call = _render_http_call(
+        method,
+        path,
+        all_params,
+        all_headers,
+        body_resolution.data_expression,
+        body_resolution.multipart_fields,
+    )
 
     content = (
         f"{imports_block}"
@@ -769,7 +957,7 @@ def _generate_positive_success_test(
         '    """\n'
         "\n"
         f"{preamble}"
-        f"{_render_http_call(method, path, all_params, all_headers, body_resolution.data_expression)}"
+        f"{http_call}"
         "\n"
         "    assert response is not None\n"
     )

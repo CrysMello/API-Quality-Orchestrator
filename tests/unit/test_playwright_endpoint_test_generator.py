@@ -121,9 +121,12 @@ def test_query_parameter_values_appear_structured_never_smashed_into_path_or_doc
 # --- Casos ainda não suportados: fallback + warning, nunca código enganoso ---
 
 
-def test_non_get_method_falls_back_to_placeholder_with_warning():
+def test_unsupported_method_falls_back_to_placeholder_with_warning():
+    # A partir da Parte 13, POST também é suportado (para poder carregar
+    # body JSON) — DELETE continua fora do escopo, mesmo caso do teste
+    # original antes da Parte 13.
     generated = _generate(
-        {"request": {"method": "POST", "url": "https://api.exemplo.com/users"}}
+        {"request": {"method": "DELETE", "url": "https://api.exemplo.com/users/1"}}
     )
 
     assert "@pytest.mark.skip" in generated.content
@@ -131,8 +134,21 @@ def test_non_get_method_falls_back_to_placeholder_with_warning():
     assert len(generated.warnings) == 1
     warning = generated.warnings[0]
     assert warning.code == ENDPOINT_NOT_SUPPORTED_YET
-    assert warning.endpoint == "POST /users"
-    assert "método POST" in warning.message
+    assert warning.endpoint == "DELETE /users/1"
+    assert "método DELETE" in warning.message
+
+
+def test_post_without_body_produces_a_real_positive_test():
+    # Parte 13: POST simples (sem body) também é suportado, não só quando
+    # há um body JSON para carregar.
+    generated = _generate(
+        {"request": {"method": "POST", "url": "https://api.exemplo.com/users"}}
+    )
+
+    assert "def test_post_users_success(api_context):" in generated.content
+    assert 'api_context.post("/users")' in generated.content
+    assert "@pytest.mark.skip" not in generated.content
+    assert generated.warnings == ()
 
 
 def test_request_with_body_falls_back_to_placeholder_with_warning():
@@ -256,7 +272,7 @@ def test_environment_never_leaks_into_the_fallback_content_either():
     )
 
     generated = _generate(
-        {"request": {"method": "POST", "url": "https://api.exemplo.com/users"}}, environment
+        {"request": {"method": "DELETE", "url": "https://api.exemplo.com/users/1"}}, environment
     )
 
     assert "outro-segredo-456" not in generated.content
@@ -869,3 +885,205 @@ def test_no_auth_block_produces_no_preamble_and_no_authorization_header():
     assert "Authorization" not in generated.content
     assert "os.environ" not in generated.content
     assert "sem autenticação" in generated.content
+
+
+# --- Parte 14: multipart/form-data ------------------------------------------
+
+
+def _request_with_multipart(fields: list[dict]) -> dict:
+    return {
+        "request": {
+            "method": "POST",
+            "url": "https://api.exemplo.com/upload",
+            "body": {"mode": "formdata", "formdata": fields},
+        }
+    }
+
+
+def test_multipart_with_only_text_fields():
+    generated = _generate(
+        _request_with_multipart(
+            [
+                {"key": "name", "value": "Rex", "type": "text"},
+                {"key": "species", "value": "dog", "type": "text"},
+            ]
+        )
+    )
+
+    assert "@pytest.mark.skip" not in generated.content
+    assert (
+        "        multipart={\n"
+        '            "name": "Rex",\n'
+        '            "species": "dog",\n'
+        "        },\n"
+    ) in generated.content
+    assert "data=" not in generated.content
+    ast.parse(generated.content)
+    assert generated.warnings == ()
+
+
+def test_multipart_with_only_a_file_field():
+    generated = _generate(
+        _request_with_multipart(
+            [{"key": "avatar", "type": "file", "src": "/home/joao/Desktop/avatar.png"}]
+        )
+    )
+
+    # Nunca o env var derivado do "src" da Collection — sempre do "key".
+    assert 'avatar_path = os.environ.get("AQO_UPLOAD_AVATAR")' in generated.content
+    assert (
+        'assert avatar_path, "Variável de ambiente obrigatória AQO_UPLOAD_AVATAR não definida."'
+        in generated.content
+    )
+    assert "if not os.path.isfile(avatar_path):" in generated.content
+    assert 'with open(avatar_path, "rb") as avatar_fh:' in generated.content
+    assert "avatar_buffer = avatar_fh.read()" in generated.content
+    assert '"avatar": {' in generated.content
+    assert '"name": os.path.basename(avatar_path),' in generated.content
+    assert "mimetypes.guess_type(avatar_path)[0]" in generated.content
+    assert '"buffer": avatar_buffer,' in generated.content
+    assert "import mimetypes" in generated.content
+    assert "import os" in generated.content
+    assert "import pytest" in generated.content
+    # Nunca o caminho local (sensível/específico da máquina de quem criou a
+    # Collection) persistido no código gerado.
+    assert "/home/joao/Desktop/avatar.png" not in generated.content
+    ast.parse(generated.content)
+    assert generated.warnings == ()
+
+
+def test_multipart_with_fields_and_a_file():
+    generated = _generate(
+        _request_with_multipart(
+            [
+                {"key": "name", "value": "Rex", "type": "text"},
+                {"key": "avatar", "type": "file", "src": "/tmp/avatar.png"},
+            ]
+        )
+    )
+
+    assert '"name": "Rex",' in generated.content
+    assert '"avatar": {' in generated.content
+    ast.parse(generated.content)
+
+
+def test_multipart_missing_file_fails_at_runtime_with_a_clear_message():
+    # "Validar existência do arquivo em runtime" + "Gerar mensagem clara
+    # quando o arquivo obrigatório estiver ausente" — checado só quando o
+    # teste roda de verdade, nunca na geração (o caminho apontado por
+    # AQO_UPLOAD_CONTRACT pode nem existir na máquina onde a suíte roda).
+    generated = _generate(
+        _request_with_multipart([{"key": "contract", "type": "file", "src": "/tmp/contract.pdf"}])
+    )
+
+    assert "if not os.path.isfile(contract_path):" in generated.content
+    assert (
+        "pytest.fail("
+        '"Arquivo obrigatório não encontrado para o campo \'contract\': " + contract_path)'
+    ) in generated.content
+    ast.parse(generated.content)
+
+
+def test_multipart_text_field_with_pure_variable_reference_resolves_via_env_var():
+    generated = _generate(
+        _request_with_multipart([{"key": "note", "value": "{{comment}}", "type": "text"}])
+    )
+
+    assert 'comment = os.environ.get("AQO_COMMENT")' in generated.content
+    assert (
+        'assert comment, "Variável de ambiente obrigatória AQO_COMMENT não definida."'
+        in generated.content
+    )
+    assert '"note": comment,' in generated.content
+    assert "{{comment}}" not in generated.content
+    ast.parse(generated.content)
+    assert generated.warnings == ()
+
+
+def test_multipart_text_field_with_partial_variable_is_kept_as_literal_text():
+    # Só uma referência PURA ({{nome}}, nada mais na string) resolve — mesmo
+    # critério conservador já usado pela autenticação (Parte 12).
+    generated = _generate(
+        _request_with_multipart(
+            [{"key": "note", "value": "prefixo-{{comment}}", "type": "text"}]
+        )
+    )
+
+    assert '"note": "prefixo-{{comment}}",' in generated.content
+    assert "os.environ" not in generated.content
+
+
+def test_multipart_file_field_without_key_falls_back_with_a_specific_warning():
+    generated = _generate(
+        _request_with_multipart([{"type": "file", "src": "/tmp/sem-nome.png"}])
+    )
+
+    assert "@pytest.mark.skip" in generated.content
+    assert len(generated.warnings) == 1
+    assert generated.warnings[0].code == "MULTIPART_FILE_NOT_RESOLVED"
+    ast.parse(generated.content)
+
+
+def test_disabled_multipart_field_is_never_rendered():
+    generated = _generate(
+        _request_with_multipart(
+            [
+                {"key": "name", "value": "Rex", "type": "text"},
+                {"key": "debug", "value": "true", "type": "text", "disabled": True},
+            ]
+        )
+    )
+
+    assert '"name": "Rex",' in generated.content
+    assert '"debug"' not in generated.content
+
+
+def test_disabled_file_field_without_key_never_blocks_generation():
+    # Campo desabilitado é decisão explícita já tomada na Collection — sua
+    # "key" ausente nunca deveria impedir a geração do endpoint.
+    generated = _generate(
+        _request_with_multipart(
+            [
+                {"key": "name", "value": "Rex", "type": "text"},
+                {"type": "file", "disabled": True},
+            ]
+        )
+    )
+
+    assert "@pytest.mark.skip" not in generated.content
+    assert '"name": "Rex",' in generated.content
+
+
+def test_multipart_never_emits_a_manual_boundary_or_content_type_header():
+    generated = _generate(
+        {
+            "request": {
+                "method": "POST",
+                "url": "https://api.exemplo.com/upload",
+                "header": [
+                    {"key": "Content-Type", "value": "multipart/form-data; boundary=custom"}
+                ],
+                "body": {
+                    "mode": "formdata",
+                    "formdata": [{"key": "name", "value": "Rex", "type": "text"}],
+                },
+            }
+        }
+    )
+
+    assert "boundary" not in generated.content
+    assert "Content-Type" not in generated.content
+
+
+def test_multipart_content_is_deterministic_across_calls():
+    request = _request_with_multipart(
+        [
+            {"key": "name", "value": "Rex", "type": "text"},
+            {"key": "avatar", "type": "file", "src": "/tmp/avatar.png"},
+        ]
+    )
+
+    first = _generate(request).content
+    second = _generate(request).content
+
+    assert first == second
