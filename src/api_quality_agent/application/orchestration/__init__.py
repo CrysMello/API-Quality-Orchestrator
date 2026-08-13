@@ -5,5 +5,13 @@ from api_quality_agent.application.orchestration.collection_generation_result im
 from api_quality_agent.application.orchestration.endpoint_generation_outcome import (
     EndpointGenerationOutcome,
 )
+from api_quality_agent.application.orchestration.playwright_generation_result import (
+    PlaywrightGenerationResult,
+)
 
-__all__ = ["AgentOrchestrator", "CollectionGenerationResult", "EndpointGenerationOutcome"]
+__all__ = [
+    "AgentOrchestrator",
+    "CollectionGenerationResult",
+    "EndpointGenerationOutcome",
+    "PlaywrightGenerationResult",
+]

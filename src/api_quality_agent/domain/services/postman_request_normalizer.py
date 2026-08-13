@@ -11,6 +11,7 @@ from api_quality_agent.domain.models import (
     NormalizationContext,
     NormalizationWarning,
     NormalizedAuth,
+    NormalizedAuthParameter,
     NormalizedBody,
     NormalizedBodyField,
     NormalizedHeader,
@@ -233,6 +234,18 @@ def _auth_has_sensitive_values(raw_auth: Mapping[str, Any], raw_type: str) -> bo
     return False
 
 
+def _normalize_auth_parameters(
+    raw_auth: Mapping[str, Any], raw_type: str
+) -> tuple[NormalizedAuthParameter, ...]:
+    return tuple(
+        NormalizedAuthParameter(
+            key=entry.get("key") if isinstance(entry.get("key"), str) else None,
+            value=entry.get("value") if isinstance(entry.get("value"), str) else None,
+        )
+        for entry in _extract_auth_entries(raw_auth, raw_type)
+    )
+
+
 def _normalize_auth(
     raw_auth: Mapping[str, Any] | None,
     *,
@@ -249,6 +262,7 @@ def _normalize_auth(
                 variable_references=(),
                 has_sensitive_values=False,
                 raw_type=None,
+                parameters=(),
             )
         if parent_has_auth is None:
             warnings.append(
@@ -265,6 +279,7 @@ def _normalize_auth(
             variable_references=(),
             has_sensitive_values=False,
             raw_type=None,
+            parameters=(),
         )
 
     raw_type = raw_auth.get("type")
@@ -277,6 +292,7 @@ def _normalize_auth(
             variable_references=(),
             has_sensitive_values=False,
             raw_type=raw_type,
+            parameters=(),
         )
 
     auth_type = _AUTH_TYPE_MAP.get(raw_type, AuthType.UNKNOWN) if raw_type else AuthType.UNKNOWN
@@ -295,6 +311,7 @@ def _normalize_auth(
             variable_references=(),
             has_sensitive_values=False,
             raw_type=raw_type,
+            parameters=(),
         )
 
     return NormalizedAuth(
@@ -303,6 +320,7 @@ def _normalize_auth(
         variable_references=_extract_auth_variable_references(raw_auth, raw_type),
         has_sensitive_values=_auth_has_sensitive_values(raw_auth, raw_type),
         raw_type=raw_type,
+        parameters=_normalize_auth_parameters(raw_auth, raw_type),
     )
 
 

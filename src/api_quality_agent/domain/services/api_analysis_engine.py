@@ -87,11 +87,12 @@ class ApiAnalysisEngine:
     ) -> tuple[AnalyzedCollectionRequest, ...]:
         # Mesma travessia e mesma ordem usadas por analyze_collection: permite
         # relacionar cada EndpointAnalysis ao CollectionRequest bruto que o
-        # originou (necessário para acessar examples/scripts na geração).
+        # originou (necessário para acessar examples/scripts na geração), e
+        # repassa o NormalizedRequest já calculado (nunca normaliza de novo).
         _warnings, entries, endpoints = self._analyze_collection_entries(document)
         return tuple(
-            AnalyzedCollectionRequest(raw_request=raw, analysis=analysis)
-            for (raw, _normalized), analysis in zip(entries, endpoints)
+            AnalyzedCollectionRequest(raw_request=raw, normalized_request=normalized, analysis=analysis)
+            for (raw, normalized), analysis in zip(entries, endpoints)
         )
 
     def _analyze_collection_entries(

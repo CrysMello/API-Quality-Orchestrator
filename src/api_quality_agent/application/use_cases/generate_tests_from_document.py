@@ -1,6 +1,4 @@
-import hashlib
 import json
-import re
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
@@ -19,15 +17,10 @@ from api_quality_agent.domain.models import (
     PostmanCollectionDocument,
 )
 from api_quality_agent.ports.outbound import ArtifactRepository
+from api_quality_agent.shared import sanitize_filename_component
 
-_UNSAFE_SLUG_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
-
-# Endpoints com paths longos/aninhados podem gerar nomes de arquivo que,
-# somados ao caminho completo em artifacts/, ultrapassam o limite de 260
-# caracteres do Windows (MAX_PATH), causando FileNotFoundError ao salvar.
-# 40 caracteres deixa margem para prefixos de diretório longos (ex.: projeto
-# sincronizado via OneDrive) + 3 UUIDs de workspace/collection/execution
-# (37 caracteres cada) + "scripts\" + hash + extensão ".js" sem estourar 260.
+# Limite de 40 caracteres + hash de 8: ver comentário completo em
+# shared/filename_sanitization.py (mitigação do MAX_PATH do Windows).
 _MAX_SLUG_LENGTH = 40
 _SLUG_HASH_LENGTH = 8
 
@@ -120,13 +113,12 @@ class GenerateTestsFromDocumentUseCase:
 
 
 def _slugify(value: str) -> str:
-    sanitized = _UNSAFE_SLUG_CHARS.sub("_", value).strip("_") or "collection"
-    if len(sanitized) <= _MAX_SLUG_LENGTH:
-        return sanitized
-
-    digest = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()[:_SLUG_HASH_LENGTH]
-    truncated_length = _MAX_SLUG_LENGTH - _SLUG_HASH_LENGTH - 1
-    return f"{sanitized[:truncated_length]}_{digest}"
+    return sanitize_filename_component(
+        value,
+        max_length=_MAX_SLUG_LENGTH,
+        hash_length=_SLUG_HASH_LENGTH,
+        fallback="collection",
+    )
 
 
 def _serialize_diff(diff: DiffResult) -> dict[str, Any]:

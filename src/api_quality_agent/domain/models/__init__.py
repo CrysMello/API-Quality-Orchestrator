@@ -46,6 +46,7 @@ from api_quality_agent.domain.models.execution_mode import ExecutionMode
 from api_quality_agent.domain.models.execution_result import ExecutionResult
 from api_quality_agent.domain.models.execution_result_location import ExecutionResultLocation
 from api_quality_agent.domain.models.execution_result_record import ExecutionResultRecord
+from api_quality_agent.domain.models.environment_variable import EnvironmentVariable
 from api_quality_agent.domain.models.generated_artifact import GeneratedArtifact
 from api_quality_agent.domain.models.infrastructure_failure import InfrastructureFailure
 from api_quality_agent.domain.models.infrastructure_failure_type import InfrastructureFailureType
@@ -60,6 +61,7 @@ from api_quality_agent.domain.models.negative_case_type import NegativeCaseType
 from api_quality_agent.domain.models.normalization_context import NormalizationContext
 from api_quality_agent.domain.models.normalization_warning import NormalizationWarning
 from api_quality_agent.domain.models.normalized_auth import NormalizedAuth
+from api_quality_agent.domain.models.normalized_auth_parameter import NormalizedAuthParameter
 from api_quality_agent.domain.models.normalized_body import NormalizedBody, NormalizedBodyField
 from api_quality_agent.domain.models.normalized_header import NormalizedHeader
 from api_quality_agent.domain.models.normalized_request import NormalizedRequest
@@ -80,6 +82,7 @@ from api_quality_agent.domain.models.postman_collection_items import (
     CollectionRequest,
     UnknownCollectionItem,
 )
+from api_quality_agent.domain.models.postman_environment import PostmanEnvironment
 from api_quality_agent.domain.models.request_definition import RequestDefinition
 from api_quality_agent.domain.models.resolved_input import ResolvedInput
 from api_quality_agent.domain.models.response_definition import ResponseDefinition
@@ -145,6 +148,7 @@ __all__ = [
     "DiffRiskLevel",
     "Endpoint",
     "EndpointAnalysis",
+    "EnvironmentVariable",
     "ExecutionContext",
     "ExecutionMode",
     "ExecutionResult",
@@ -164,6 +168,7 @@ __all__ = [
     "NormalizationContext",
     "NormalizationWarning",
     "NormalizedAuth",
+    "NormalizedAuthParameter",
     "NormalizedBody",
     "NormalizedBodyField",
     "NormalizedHeader",
@@ -175,6 +180,7 @@ __all__ = [
     "ParameterAnalysis",
     "ParameterLocation",
     "PostmanCollectionDocument",
+    "PostmanEnvironment",
     "RequestDefinition",
     "ResolvedInput",
     "ResponseDefinition",

@@ -20,6 +20,7 @@ from api_quality_agent.application.orchestration import AgentOrchestrator
 from api_quality_agent.application.use_cases import (
     GenerateCollectionFromOpenApiUseCase,
     GenerateCollectionTestsUseCase,
+    GeneratePlaywrightTestSuiteUseCase,
     GenerateTestsFromDocumentUseCase,
     GenerateTestsWithContractUseCase,
     GetCurrentWorkspaceUseCase,
@@ -39,17 +40,23 @@ from api_quality_agent.domain.services import (
     ApiAnalysisEngine,
     CollectionSelectionService,
     DiffEngine,
+    InferenceSchemaProvider,
     ManagedBlockMerger,
     SchemaInferenceEngine,
     TestStrategyEngine,
 )
 from api_quality_agent.generators import PostmanTestGenerator
+from api_quality_agent.generators.playwright import (
+    DefaultPlaywrightTestSuiteBuilder,
+    PlaywrightEndpointTestGenerator,
+)
 from api_quality_agent.parsers import (
     ExcelContractParser,
     OpenApiCollectionConverter,
     OpenApiParser,
     PostmanCollectionParser,
     PostmanCollectionSerializer,
+    PostmanEnvironmentParser,
 )
 from api_quality_agent.ports.outbound import (
     ArtifactRepository,
@@ -88,6 +95,13 @@ class CliContext:
     persist_execution_result_use_case: PersistExecutionResultUseCase
     excel_contract_parser: ExcelContractParser
     generate_with_contract_use_case: GenerateTestsWithContractUseCase
+    generate_playwright_use_case: GeneratePlaywrightTestSuiteUseCase
+    # input_resolver/environment_parser (Parte 09): usados só para
+    # ler/validar um -e/--environment do generate no modo online — nenhuma
+    # etapa existente antes desta precisava ler o Environment localmente
+    # (run só repassa o caminho para o Newman).
+    input_resolver: InputResolver
+    environment_parser: PostmanEnvironmentParser
 
 
 def _build_orchestrator() -> AgentOrchestrator:
@@ -98,6 +112,27 @@ def _build_orchestrator() -> AgentOrchestrator:
         PostmanTestGenerator(),
         ManagedBlockMerger(),
         DiffEngine(),
+    )
+
+
+def _build_playwright_use_case(
+    artifact_repository: ArtifactRepository,
+) -> GeneratePlaywrightTestSuiteUseCase:
+    # Composição paralela a _build_orchestrator(), para o caminho Playwright
+    # (Parte 06) — pipeline independente, nunca participa do merge/diff
+    # Postman. PlaywrightEndpointTestGenerator (Parte 07) gera um cenário
+    # positivo real para GET simples e cai no PlaceholderEndpointTestGenerator
+    # (com warning) para o que ainda não é suportado; DefaultPlaywrightTest
+    # SuiteBuilder é a implementação atual do contrato de suíte (Parte 03) —
+    # conteúdo avançado (asserções, negativos, variáveis) fica para etapas
+    # futuras.
+    return GeneratePlaywrightTestSuiteUseCase(
+        ApiAnalysisEngine(),
+        InferenceSchemaProvider(SchemaInferenceEngine()),
+        TestStrategyEngine(),
+        PlaywrightEndpointTestGenerator(),
+        DefaultPlaywrightTestSuiteBuilder(),
+        artifact_repository,
     )
 
 
@@ -181,6 +216,9 @@ def build_context(
         ),
         excel_contract_parser=ExcelContractParser(),
         generate_with_contract_use_case=generate_with_contract_use_case,
+        generate_playwright_use_case=_build_playwright_use_case(effective_artifact_repository),
+        input_resolver=InputResolver(),
+        environment_parser=PostmanEnvironmentParser(),
     )
 
 
@@ -207,6 +245,15 @@ class OfflineCliContext:
     generate_from_openapi_use_case: GenerateCollectionFromOpenApiUseCase
     excel_contract_parser: ExcelContractParser
     generate_with_contract_use_case: GenerateTestsWithContractUseCase
+    generate_playwright_use_case: GeneratePlaywrightTestSuiteUseCase
+    # Exposto separadamente (não só encapsulado dentro de
+    # generate_from_openapi_use_case) para permitir converter a
+    # especificação numa Collection sintética sem acionar a geração Postman
+    # — necessário quando --target playwright é usado com --openapi-file
+    # (ver generate_command.py): a conversão é pura, sem efeito colateral.
+    openapi_collection_converter: OpenApiCollectionConverter
+    # Parte 09: valida/interpreta um -e/--environment opcional do generate.
+    environment_parser: PostmanEnvironmentParser
 
 
 def build_offline_context(
@@ -239,6 +286,9 @@ def build_offline_context(
             DiffEngine(),
             effective_artifact_repository,
         ),
+        generate_playwright_use_case=_build_playwright_use_case(effective_artifact_repository),
+        openapi_collection_converter=OpenApiCollectionConverter(),
+        environment_parser=PostmanEnvironmentParser(),
     )
 
 

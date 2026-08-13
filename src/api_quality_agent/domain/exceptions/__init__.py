@@ -36,6 +36,9 @@ from api_quality_agent.domain.exceptions.managed_block_errors import (
 from api_quality_agent.domain.exceptions.postman_collection_errors import (
     InvalidPostmanCollectionError,
 )
+from api_quality_agent.domain.exceptions.postman_environment_errors import (
+    InvalidPostmanEnvironmentError,
+)
 from api_quality_agent.domain.exceptions.specification_errors import (
     InvalidApiSpecificationError,
     UnresolvedReferenceError,
@@ -64,6 +67,7 @@ __all__ = [
     "InvalidExecutionResultError",
     "InvalidJsonError",
     "InvalidPostmanCollectionError",
+    "InvalidPostmanEnvironmentError",
     "ReportAlreadyExistsError",
     "ResourceNotFoundError",
     "SelectionError",
