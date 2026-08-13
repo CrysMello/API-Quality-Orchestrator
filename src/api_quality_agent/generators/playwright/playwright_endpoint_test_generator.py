@@ -5,6 +5,8 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from api_quality_agent.domain.models import (
+    AssertionDefinition,
+    AssertionType,
     AuthType,
     BodyMode,
     NormalizedAuth,
@@ -93,6 +95,17 @@ BODY_JSON_INVALID = "BODY_JSON_INVALID"
 # como virar uma variável de ambiente estável (AQO_UPLOAD_<NOME>) — o
 # endpoint inteiro cai no fallback, nunca um nome de campo "adivinhado".
 MULTIPART_FILE_NOT_RESOLVED = "MULTIPART_FILE_NOT_RESOLVED"
+
+# Parte 16 — status HTTP: nunca inventa 200/201/qualquer código. Só gera
+# `assert response.status == N` quando strategy.assertions já tem uma
+# AssertionDefinition(STATUS_CODE) — a mesma TestStrategyEngine reaproveitada
+# do caminho Postman, com a mesma prioridade de evidência (contexto/contrato
+# > configuração > exemplo/contrato documentado > nenhuma, nunca "sucesso
+# assumido"). Mesmo código de warning já usado pelo gerador Postman
+# (postman_test_generator._translate_strategy_warnings) para o StrategyWarning
+# "STATUS_CODE_AMBIGUOUS" — vocabulário de warning consistente entre os dois
+# geradores.
+EXPECTED_STATUS_NOT_DEFINED = "EXPECTED_STATUS_NOT_DEFINED"
 
 
 def _is_json_content_type(content_type: str | None) -> bool:
@@ -950,6 +963,70 @@ class PlaywrightEndpointTestGenerator:
         )
 
 
+# --- Status HTTP (Parte 16) --------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _StatusAssertionResolution:
+    # Linha já pronta para inserir no lugar da asserção final da função
+    # gerada — nunca as duas ao mesmo tempo, sempre uma ou outra.
+    assertion_line: str
+    # Linha de docstring registrando a origem da expectativa nos metadados
+    # do cenário ("Registrar a origem da expectativa de status") — o mesmo
+    # AssertionDefinition.origin já usado pelo gerador Postman
+    # (contract/example/configuration/context), reaproveitado aqui como a
+    # evidência que, numa etapa futura (Parte 23), vira a classificação
+    # EXACT/DERIVED/BROAD; nada disso é implementado ainda, só preparado.
+    docstring_note: str
+    # None quando um status confiável foi encontrado; presente (validação
+    # parcial) quando não havia nenhuma evidência para consultar.
+    warning: PlaywrightGenerationWarning | None
+
+
+def _find_status_code_assertion(strategy: TestStrategy) -> AssertionDefinition | None:
+    return next(
+        (a for a in strategy.assertions if a.assertion_type is AssertionType.STATUS_CODE), None
+    )
+
+
+def _resolve_status_assertion(strategy: TestStrategy) -> _StatusAssertionResolution:
+    # "Não pode assumir que todo cenário positivo retorna 200 e não pode
+    # inventar códigos HTTP": só gera `assert response.status == N` quando
+    # strategy.assertions já traz um STATUS_CODE resolvido por evidência —
+    # nunca um range (200 <= status < 300 / response.ok) que trataria erro
+    # de autenticação/autorização/rota/mídia como sucesso só por cair na
+    # mesma classe HTTP de outro código aceitável.
+    assertion = _find_status_code_assertion(strategy)
+    if assertion is not None:
+        status_code = int(assertion.expected_value)
+        return _StatusAssertionResolution(
+            assertion_line=f"    assert response.status == {status_code}\n",
+            docstring_note=f"    Status: {status_code} (origem: {assertion.origin})\n",
+            warning=None,
+        )
+
+    # Sem evidência confiável: mantém a validação temporária de sempre
+    # (Bloco 3) e registra por que — nunca 200/201 "adivinhado".
+    return _StatusAssertionResolution(
+        assertion_line="    assert response is not None\n",
+        docstring_note=(
+            "    Status: não determinado — validação parcial "
+            "(ver warning EXPECTED_STATUS_NOT_DEFINED)\n"
+        ),
+        warning=PlaywrightGenerationWarning(
+            code=EXPECTED_STATUS_NOT_DEFINED,
+            message=(
+                "Nenhum status HTTP esperado pôde ser determinado a partir de evidência "
+                "disponível (estratégia de teste, Postman, OpenAPI, contrato ou exemplo); "
+                "a asserção de status não foi gerada — cenário mantido como validação parcial "
+                "('assert response is not None')."
+            ),
+            endpoint=strategy.endpoint_source,
+            scenario="success",
+        ),
+    )
+
+
 def _generate_positive_success_test(
     strategy: TestStrategy,
     request: NormalizedRequest,
@@ -958,6 +1035,7 @@ def _generate_positive_success_test(
     slug = endpoint_source_to_slug(strategy.endpoint_source)
     function_name = f"test_{slug}_success"
     method = (request.method or "get").lower()
+    status_resolution = _resolve_status_assertion(strategy)
 
     # Já sabido "supported" (gate em _unsupported_reason); recomputado aqui
     # (puro, sem efeito colateral) com uma sessão NOVA — mesmo padrão já
@@ -1035,20 +1113,25 @@ def _generate_positive_success_test(
         "    Category: positive\n"
         f"    Origin: NormalizedRequest ({request.method} simples, {body_origin_note}, "
         f"{auth_origin_note}, sem variáveis não resolvidas)\n"
+        f"{status_resolution.docstring_note}"
         '    """\n'
         "\n"
         f"{preamble}"
         f"{http_call}"
         "\n"
-        "    assert response is not None\n"
+        f"{status_resolution.assertion_line}"
     )
+
+    warnings = header_resolution.warnings
+    if status_resolution.warning is not None:
+        warnings = warnings + (status_resolution.warning,)
 
     return GeneratedEndpointTest(
         endpoint_source=strategy.endpoint_source,
         suggested_file_name=endpoint_source_to_file_name(strategy.endpoint_source),
         content=content,
         scenario_names=("success",),
-        warnings=header_resolution.warnings,
+        warnings=warnings,
         base_url=base_url,
         required_environment_variables=tuple(sorted(session.required_environment_variables)),
         resolved_variables=tuple(sorted(session.resolved_variables.items())),

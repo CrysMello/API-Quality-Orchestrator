@@ -6,12 +6,29 @@ primeiro teste positivo real (GET simples), com fallback para o placeholder
 import ast
 import json
 
+from api_quality_agent.domain.models import AssertionDefinition, AssertionType, TestStrategy
 from api_quality_agent.domain.services import ApiAnalysisEngine
 from api_quality_agent.generators.playwright import (
     ENDPOINT_NOT_SUPPORTED_YET,
     PlaywrightEndpointTestGenerator,
 )
 from api_quality_agent.parsers import PostmanCollectionParser
+
+# Status 200/origem "contract" por padrão: a maioria dos testes deste arquivo
+# não é sobre a Parte 16 (status HTTP) — sem isso, todo teste passaria a
+# ganhar o warning EXPECTED_STATUS_NOT_DEFINED (nenhuma AssertionDefinition
+# de STATUS_CODE presente) e a checar "assert response is not None" em vez
+# de um assert de status, obscurecendo o que cada teste realmente verifica.
+# Os testes da Parte 16 (seção dedicada abaixo) passam `assertions=()`
+# explicitamente para exercitar o caminho "sem status confiável".
+_DEFAULT_STATUS_ASSERTIONS = (
+    AssertionDefinition(
+        assertion_type=AssertionType.STATUS_CODE,
+        description="Status code da resposta deve ser 200.",
+        expected_value=200,
+        origin="contract",
+    ),
+)
 
 
 def _analyzed(request: dict):
@@ -32,13 +49,12 @@ def _analyzed(request: dict):
     return analyzed.analysis, analyzed.normalized_request
 
 
-def _generate(request: dict, environment=None):
+def _generate(request: dict, environment=None, *, assertions=_DEFAULT_STATUS_ASSERTIONS):
     strategy_source, normalized_request = _analyzed(request)
-    from api_quality_agent.domain.models import TestStrategy
 
     strategy = TestStrategy(
         endpoint_source=strategy_source.source,
-        assertions=(),
+        assertions=assertions,
         variable_extractions=(),
         negative_cases=(),
         warnings=(),
@@ -58,7 +74,10 @@ def test_simple_get_produces_a_real_positive_test():
 
     assert "def test_get_users_success(api_context):" in generated.content
     assert 'api_context.get("/users")' in generated.content
-    assert "assert response is not None" in generated.content
+    # Parte 16: com status conhecido (default deste arquivo: 200/contract —
+    # ver _DEFAULT_STATUS_ASSERTIONS), a asserção final é exata, não mais o
+    # placeholder "assert response is not None".
+    assert "assert response.status == 200" in generated.content
     assert "@pytest.mark.skip" not in generated.content
     assert generated.scenario_names == ("success",)
     assert generated.warnings == ()

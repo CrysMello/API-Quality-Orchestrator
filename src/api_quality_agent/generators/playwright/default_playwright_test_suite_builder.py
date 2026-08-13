@@ -9,6 +9,9 @@ from api_quality_agent.generators.playwright.endpoint_file_naming import (
 from api_quality_agent.generators.playwright.generated_endpoint_test import GeneratedEndpointTest
 from api_quality_agent.generators.playwright.generated_file import GeneratedFile
 from api_quality_agent.generators.playwright.generated_test_suite import GeneratedTestSuite
+from api_quality_agent.generators.playwright.playwright_generation_warning import (
+    PlaywrightGenerationWarning,
+)
 from api_quality_agent.generators.playwright.variable_resolver import UNRESOLVED_VARIABLE
 
 _ENDPOINTS_DIR = "endpoints"
@@ -177,7 +180,7 @@ def _resolved_variables(endpoint_tests: Sequence[GeneratedEndpointTest]) -> dict
 
 def _warning_entries(
     endpoint_tests: Sequence[GeneratedEndpointTest],
-    naming_warnings: Sequence[object],
+    naming_warnings: Sequence[PlaywrightGenerationWarning],
 ) -> list[dict[str, object]]:
     entries: list[dict[str, object]] = [
         {
