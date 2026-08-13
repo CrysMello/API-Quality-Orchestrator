@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from api_quality_agent.generators.playwright.playwright_generation_warning import (
     PlaywrightGenerationWarning,
 )
+from api_quality_agent.generators.playwright.variable_resolver import UnresolvedVariable
 
 
 @dataclass(frozen=True)
@@ -21,3 +22,20 @@ class GeneratedEndpointTest:
     # configurar o base_url padrão do APIRequestContext. None quando não
     # há evidência suficiente (nunca inventado).
     base_url: str | None = None
+    # Rastreabilidade de variáveis (Parte 15), consumida por
+    # DefaultPlaywrightTestSuiteBuilder para montar o generation-manifest.json
+    # — nunca preenchida pelo PlaceholderEndpointTestGenerator (endpoint que
+    # cai no fallback não resolve nada de verdade, só registra o que ficou
+    # sem resolução via unresolved_variables).
+    #
+    # AQO_* referenciadas pelo código deste endpoint — tanto por variável
+    # deferida quanto por secret (nunca o valor do secret, só o nome).
+    required_environment_variables: tuple[str, ...] = ()
+    # nome Postman -> valor literal resolvido — nunca um secret (ver
+    # VariableResolutionSession.resolved_variables).
+    resolved_variables: tuple[tuple[str, str], ...] = ()
+    # Variáveis que não puderam ser resolvidas (sem Environment, sem valor
+    # literal na Collection, sem forma segura de deferir) — location indica
+    # o campo onde apareceram (path, base_url, query, header, auth, body,
+    # multipart_field).
+    unresolved_variables: tuple[UnresolvedVariable, ...] = ()

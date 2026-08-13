@@ -9,6 +9,7 @@ from api_quality_agent.generators.playwright.endpoint_file_naming import (
     endpoint_source_to_file_name,
     endpoint_source_to_slug,
     is_parameterized_segment,
+    parameterized_segment_key,
     resolve_endpoint_file_names,
     to_snake_case,
 )
@@ -38,6 +39,11 @@ from api_quality_agent.generators.playwright.playwright_generation_warning impor
 from api_quality_agent.generators.playwright.playwright_test_suite_builder import (
     PlaywrightTestSuiteBuilder,
 )
+from api_quality_agent.generators.playwright.variable_resolver import (
+    UNRESOLVED_VARIABLE,
+    UnresolvedVariable,
+    VariableResolutionSession,
+)
 
 __all__ = [
     "AUTHENTICATION_NOT_SUPPORTED",
@@ -50,6 +56,7 @@ __all__ = [
     "MULTIPART_FILE_NOT_RESOLVED",
     "RESERVED_HEADER_OMITTED",
     "SENSITIVE_HEADER_OMITTED",
+    "UNRESOLVED_VARIABLE",
     "AssertionPrecision",
     "DefaultPlaywrightTestSuiteBuilder",
     "EndpointTestGenerator",
@@ -61,10 +68,13 @@ __all__ = [
     "PlaywrightGenerationWarning",
     "PlaywrightTestSuiteBuilder",
     "ResolvedEndpointFileNames",
+    "UnresolvedVariable",
+    "VariableResolutionSession",
     "derive_base_url",
     "endpoint_source_to_file_name",
     "endpoint_source_to_slug",
     "is_parameterized_segment",
+    "parameterized_segment_key",
     "resolve_endpoint_file_names",
     "to_snake_case",
 ]

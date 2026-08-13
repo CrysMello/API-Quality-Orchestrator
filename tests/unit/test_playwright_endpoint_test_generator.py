@@ -420,10 +420,31 @@ def test_only_disabled_query_parameters_keeps_the_single_line_call():
     assert "params=" not in generated.content
 
 
-def test_query_parameter_with_unresolved_variable_falls_back_with_warning():
+def test_query_parameter_with_pure_variable_reference_resolves_via_env_var():
+    # A partir da Parte 15, uma referência PURA ({{nome}}, nada mais na
+    # string) num query parameter resolve via o resolvedor central, em vez
+    # de derrubar o endpoint inteiro para o fallback.
     generated = _generate(
         _request_with_query(
             [{"key": "token", "value": "{{authToken}}"}], raw_suffix="?token={{authToken}}"
+        )
+    )
+
+    assert "@pytest.mark.skip" not in generated.content
+    assert 'auth_token = os.environ.get("AQO_AUTH_TOKEN")' in generated.content
+    assert '"token": auth_token,' in generated.content
+    assert "{{authToken}}" not in generated.content
+    assert generated.required_environment_variables == ("AQO_AUTH_TOKEN",)
+    ast.parse(generated.content)
+
+
+def test_query_parameter_with_partial_variable_falls_back_with_warning():
+    # Só uma referência PURA resolve — "prefixo-{{authToken}}" continua sem
+    # suporte, mesmo critério conservador de sempre.
+    generated = _generate(
+        _request_with_query(
+            [{"key": "token", "value": "prefixo-{{authToken}}"}],
+            raw_suffix="?token=prefixo-{{authToken}}",
         )
     )
 
@@ -613,9 +634,23 @@ def test_content_type_header_is_reserved_and_omitted():
     assert generated.warnings[0].code == "RESERVED_HEADER_OMITTED"
 
 
-def test_header_with_unresolved_variable_is_omitted_with_warning():
+def test_header_with_pure_variable_reference_resolves_via_env_var():
+    # A partir da Parte 15, uma referência PURA num header resolve via o
+    # resolvedor central, em vez de ser omitida.
     generated = _generate(
         _request_with_headers([{"key": "X-Tenant", "value": "{{tenantId}}"}])
+    )
+
+    assert 'tenant_id = os.environ.get("AQO_TENANT_ID")' in generated.content
+    assert '"X-Tenant": tenant_id,' in generated.content
+    assert "{{tenantId}}" not in generated.content
+    assert generated.warnings == ()
+    ast.parse(generated.content)
+
+
+def test_header_with_partial_variable_is_omitted_with_warning():
+    generated = _generate(
+        _request_with_headers([{"key": "X-Tenant", "value": "prefixo-{{tenantId}}"}])
     )
 
     assert "headers=" not in generated.content
@@ -1087,3 +1122,293 @@ def test_multipart_content_is_deterministic_across_calls():
     second = _generate(request).content
 
     assert first == second
+
+
+# --- Parte 15: resolvedor central de variáveis ------------------------------
+
+
+def _env(**variables):
+    from api_quality_agent.domain.models import EnvironmentVariable, PostmanEnvironment
+
+    return PostmanEnvironment(
+        name="QA",
+        variables=tuple(
+            EnvironmentVariable(key=key, value=value, is_secret=is_secret, enabled=True)
+            for key, (value, is_secret) in variables.items()
+        ),
+    )
+
+
+def _request_with_host_and_path(
+    host: list[str], path: list[str], *, variables: list[dict] | None = None
+) -> dict:
+    return {
+        "request": {
+            "method": "GET",
+            "url": {
+                "raw": "https://" + ".".join(host) + "/" + "/".join(path),
+                "protocol": "https",
+                "host": host,
+                "path": path,
+                "variable": variables or [],
+            },
+        }
+    }
+
+
+# --- base URL -----------------------------------------------------------
+
+
+def test_base_url_variable_resolves_via_environment():
+    generated = _generate(
+        _request_with_host_and_path(["{{baseUrl}}"], ["users"]),
+        _env(baseUrl=("api.staging.exemplo.com", False)),
+    )
+
+    assert "@pytest.mark.skip" not in generated.content
+    assert generated.base_url == "https://api.staging.exemplo.com"
+    assert generated.resolved_variables == (("baseUrl", "api.staging.exemplo.com"),)
+    ast.parse(generated.content)
+
+
+def test_base_url_variable_without_environment_falls_back_with_unresolved_variable():
+    generated = _generate(_request_with_host_and_path(["{{baseUrl}}"], ["users"]))
+
+    assert "@pytest.mark.skip" in generated.content
+    assert len(generated.unresolved_variables) == 1
+    assert generated.unresolved_variables[0].name == "baseUrl"
+    assert generated.unresolved_variables[0].location == "base_url"
+
+
+def test_base_url_variable_never_resolves_from_a_secret():
+    generated = _generate(
+        _request_with_host_and_path(["{{baseUrl}}"], ["users"]),
+        _env(baseUrl=("api.staging.exemplo.com", True)),
+    )
+
+    assert "@pytest.mark.skip" in generated.content
+    assert generated.unresolved_variables[0].name == "baseUrl"
+
+
+# --- path ------------------------------------------------------------------
+
+
+def test_double_brace_path_variable_resolves_via_environment():
+    generated = _generate(
+        _request_with_host_and_path(["api", "exemplo", "com"], ["{{version}}", "users"]),
+        _env(version=("v2", False)),
+    )
+
+    assert "@pytest.mark.skip" not in generated.content
+    assert 'api_context.get("/v2/users")' in generated.content
+    assert generated.resolved_variables == (("version", "v2"),)
+    ast.parse(generated.content)
+
+
+def test_openapi_style_path_variable_resolves_via_collection_default():
+    generated = _generate(
+        _request_with_host_and_path(
+            ["api", "exemplo", "com"],
+            ["users", "{id}"],
+            variables=[{"key": "id", "value": "42"}],
+        )
+    )
+
+    assert "@pytest.mark.skip" not in generated.content
+    assert 'api_context.get("/users/42")' in generated.content
+    assert generated.resolved_variables == (("id", "42"),)
+    assert generated.required_environment_variables == ()
+    ast.parse(generated.content)
+
+
+def test_postman_style_path_variable_resolves_via_collection_default():
+    generated = _generate(
+        _request_with_host_and_path(
+            ["api", "exemplo", "com"], ["users", ":id"], variables=[{"key": "id", "value": "7"}]
+        )
+    )
+
+    assert "@pytest.mark.skip" not in generated.content
+    assert 'api_context.get("/users/7")' in generated.content
+
+
+def test_path_variable_without_collection_default_falls_back_with_unresolved_variable():
+    # "produzida por outro teste" (fora de escopo desta fase) — sem default
+    # na Collection, o segmento continua não resolvido.
+    generated = _generate(
+        _request_with_host_and_path(
+            ["api", "exemplo", "com"], ["users", "{id}"], variables=[{"key": "id", "value": ""}]
+        )
+    )
+
+    assert "@pytest.mark.skip" in generated.content
+    assert len(generated.unresolved_variables) == 1
+    assert generated.unresolved_variables[0].name == "id"
+    assert generated.unresolved_variables[0].location == "path"
+
+
+def test_path_variable_never_deferred_to_a_system_environment_variable():
+    # Limitação deliberada desta parte: path/base URL só resolvem via
+    # Environment/Collection (prioridades 1/2), nunca via AQO_* em runtime
+    # (prioridade 3) — mesmo com um Environment informado, sem valor para
+    # "id" ali, o segmento fica sem resolução.
+    generated = _generate(
+        _request_with_host_and_path(
+            ["api", "exemplo", "com"], ["users", "{id}"], variables=[{"key": "id", "value": ""}]
+        ),
+        _env(other=("x", False)),
+    )
+
+    assert "@pytest.mark.skip" in generated.content
+    assert "AQO_ID" not in generated.content
+
+
+# --- query e headers ---------------------------------------------------------
+
+
+def test_query_parameter_with_pure_variable_resolves_via_environment_as_a_literal():
+    generated = _generate(
+        _request_with_query([{"key": "region", "value": "{{region}}"}]),
+        _env(region=("us-east-1", False)),
+    )
+
+    assert "@pytest.mark.skip" not in generated.content
+    assert '"region": "us-east-1",' in generated.content
+    assert "os.environ" not in generated.content
+    assert generated.required_environment_variables == ()
+    ast.parse(generated.content)
+
+
+def test_header_with_pure_variable_resolves_via_environment_as_a_literal():
+    generated = _generate(
+        _request_with_headers([{"key": "X-Tenant", "value": "{{tenantId}}"}]),
+        _env(tenantId=("tenant-42", False)),
+    )
+
+    assert '"X-Tenant": "tenant-42",' in generated.content
+    assert "os.environ" not in generated.content
+    ast.parse(generated.content)
+
+
+def test_same_variable_used_in_header_and_query_shares_a_single_local_variable():
+    generated = _generate(
+        {
+            "request": {
+                "method": "GET",
+                "url": {
+                    "raw": "https://api.exemplo.com/users?region={{region}}",
+                    "protocol": "https",
+                    "host": ["api", "exemplo", "com"],
+                    "path": ["users"],
+                    "query": [{"key": "region", "value": "{{region}}"}],
+                },
+                "header": [{"key": "X-Region", "value": "{{region}}"}],
+            }
+        }
+    )
+
+    assert generated.content.count('region = os.environ.get("AQO_REGION")') == 1
+    assert '"region": region,' in generated.content
+    assert '"X-Region": region,' in generated.content
+    assert generated.required_environment_variables == ("AQO_REGION",)
+    ast.parse(generated.content)
+
+
+# --- autenticação ------------------------------------------------------------
+
+
+def test_bearer_auth_embeds_a_non_secret_environment_value_as_a_literal():
+    generated = _generate(
+        _request_with_auth(_bearer_auth("{{accessToken}}")),
+        _env(accessToken=("literal-token-value", False)),
+    )
+
+    assert 'token = "literal-token-value"' in generated.content
+    assert "os.environ" not in generated.content
+    assert '"Authorization": f"Bearer {token}",' in generated.content
+    assert generated.required_environment_variables == ()
+    assert generated.resolved_variables == (("accessToken", "literal-token-value"),)
+    ast.parse(generated.content)
+
+
+def test_bearer_auth_still_defers_a_secret_environment_value():
+    generated = _generate(
+        _request_with_auth(_bearer_auth("{{accessToken}}")),
+        _env(accessToken=("super-secreto", True)),
+    )
+
+    assert "super-secreto" not in generated.content
+    assert 'token = os.environ.get("AQO_ACCESS_TOKEN")' in generated.content
+    assert generated.required_environment_variables == ("AQO_ACCESS_TOKEN",)
+    assert generated.resolved_variables == ()
+
+
+def test_basic_auth_with_environment_values_embeds_both_as_literals():
+    generated = _generate(
+        _request_with_auth(_basic_auth("{{basicUsername}}", "{{basicPassword}}")),
+        _env(basicUsername=("admin", False), basicPassword=("hunter2", False)),
+    )
+
+    assert 'username = "admin"' in generated.content
+    assert 'password = "hunter2"' in generated.content
+    assert (
+        'credentials = base64.b64encode(f"{username}:{password}".encode()).decode()'
+        in generated.content
+    )
+    assert generated.required_environment_variables == ()
+    ast.parse(generated.content)
+
+
+# --- body JSON e multipart textual ------------------------------------------
+
+
+def test_json_body_pure_variable_value_resolves_via_environment():
+    generated = _generate(
+        {
+            "request": {
+                "method": "POST",
+                "url": "https://api.exemplo.com/users",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "body": {"mode": "raw", "raw": '{"region": "{{region}}"}'},
+            }
+        },
+        _env(region=("us-east-1", False)),
+    )
+
+    assert '"region": "us-east-1",' in generated.content
+    assert "os.environ" not in generated.content
+    ast.parse(generated.content)
+
+
+def test_multipart_text_field_pure_variable_resolves_via_environment():
+    generated = _generate(
+        _request_with_multipart([{"key": "note", "value": "{{comment}}", "type": "text"}]),
+        _env(comment=("hello", False)),
+    )
+
+    assert '"note": "hello",' in generated.content
+    assert "os.environ" not in generated.content
+    ast.parse(generated.content)
+
+
+# --- rastreabilidade agregada (required_environment_variables) -------------
+
+
+def test_required_environment_variables_are_deduplicated_and_sorted():
+    generated = _generate(
+        {
+            "request": {
+                "method": "GET",
+                "url": {
+                    "raw": "https://api.exemplo.com/users?a={{alpha}}",
+                    "protocol": "https",
+                    "host": ["api", "exemplo", "com"],
+                    "path": ["users"],
+                    "query": [{"key": "a", "value": "{{alpha}}"}],
+                },
+                "header": [{"key": "X-Beta", "value": "{{beta}}"}],
+            }
+        }
+    )
+
+    assert generated.required_environment_variables == ("AQO_ALPHA", "AQO_BETA")

@@ -17,12 +17,11 @@ from api_quality_agent.domain.models import (
     PostmanEnvironment,
     TestStrategy,
 )
-from api_quality_agent.generators.playwright.base_url import derive_base_url
 from api_quality_agent.generators.playwright.endpoint_file_naming import (
     endpoint_source_to_file_name,
     endpoint_source_to_slug,
     is_parameterized_segment,
-    to_snake_case,
+    parameterized_segment_key,
 )
 from api_quality_agent.generators.playwright.endpoint_test_generator import EndpointTestGenerator
 from api_quality_agent.generators.playwright.generated_endpoint_test import GeneratedEndpointTest
@@ -31,6 +30,12 @@ from api_quality_agent.generators.playwright.placeholder_endpoint_test_generator
 )
 from api_quality_agent.generators.playwright.playwright_generation_warning import (
     PlaywrightGenerationWarning,
+)
+from api_quality_agent.generators.playwright.variable_resolver import (
+    VariableResolutionSession,
+    env_var_lookup_lines,
+    extract_pure_variable_name,
+    multipart_file_env_var,
 )
 
 _NO_AUTH_TYPES = (AuthType.NONE, AuthType.INHERIT, AuthType.UNKNOWN)
@@ -61,13 +66,12 @@ DUPLICATE_HEADER_IGNORED = "DUPLICATE_HEADER_IGNORED"
 # Parte 12 — autenticação suportada: Bearer Token, API Key (header ou
 # query) e Basic Auth, só quando o(s) valor(es) relevante(s) forem uma
 # referência pura a uma variável Postman ({{nome}}, nada mais na string) —
-# nunca um segredo literal embutido na Collection. O nome da variável vira
-# o nome da variável de ambiente lida em tempo de execução, nunca o valor
-# em si (ver _to_env_var_name).
+# nunca um segredo literal embutido na Collection. A partir da Parte 15, a
+# resolução do NOME em si (literal do Environment/Collection vs variável de
+# ambiente do sistema) passa pelo resolvedor central — ver
+# variable_resolver.py.
 AUTHENTICATION_NOT_SUPPORTED = "AUTHENTICATION_NOT_SUPPORTED"
 AUTHENTICATION_VALUE_NOT_RESOLVED = "AUTHENTICATION_VALUE_NOT_RESOLVED"
-_PURE_VARIABLE_REFERENCE = re.compile(r"^\{\{\s*([^{}]+?)\s*\}\}$")
-_ENV_VAR_PREFIX = "AQO_"
 
 # Parte 13 — método passa a incluir POST (além de GET), principalmente
 # para poder carregar um body JSON. PUT/PATCH/DELETE continuam fora do
@@ -115,46 +119,66 @@ class _UnsupportedReason:
     message: str
 
 
-def _unsupported_reason(request: NormalizedRequest) -> _UnsupportedReason | None:
+def _unsupported_reason(
+    request: NormalizedRequest, environment: PostmanEnvironment | None
+) -> tuple[_UnsupportedReason | None, VariableResolutionSession]:
     # Caso mais simples primeiro (Parte 07 em diante): GET ou POST (Parte
     # 13), body ausente, JSON válido ou multipart/form-data resolvível
-    # (Parte 14), sem variáveis de path não resolvidas, com autenticação
-    # suportada (Parte 12) ou nenhuma. Qualquer coisa além disso ainda cai
-    # no fallback (placeholder + warning) — nunca um código enganoso que
-    # pareça testar algo que não testa de verdade.
+    # (Parte 14), path/base URL/query resolvíveis pelo resolvedor central
+    # (Parte 15), com autenticação suportada (Parte 12) ou nenhuma.
+    # Qualquer coisa além disso ainda cai no fallback (placeholder +
+    # warning) — nunca um código enganoso que pareça testar algo que não
+    # testa de verdade.
+    #
+    # A sessão é sempre devolvida (mesmo quando o endpoint acaba caindo no
+    # fallback) para que quem chama consiga registrar, no manifesto, as
+    # variáveis que ficaram sem resolução (ex.: um path variable sem
+    # default na Collection) — mesmo warning-level dado que o exemplo do
+    # plano de ação mostra para "GET /users/{id}".
+    session = VariableResolutionSession(environment=environment)
+
     method = (request.method or "").upper()
     if method not in _SUPPORTED_METHODS:
-        return _UnsupportedReason(
-            ENDPOINT_NOT_SUPPORTED_YET,
-            f"método {request.method or 'desconhecido'} ainda não suportado",
+        return (
+            _UnsupportedReason(
+                ENDPOINT_NOT_SUPPORTED_YET,
+                f"método {request.method or 'desconhecido'} ainda não suportado",
+            ),
+            session,
         )
 
     body_reason = _unsupported_body_reason(request.body)
     if body_reason is not None:
-        return body_reason
+        return body_reason, session
 
-    auth_resolution = _resolve_auth(request.auth)
+    auth_resolution = _resolve_auth(request.auth, session)
     if not auth_resolution.supported:
         assert auth_resolution.reason_code is not None  # garantido por _unsupported_auth
         assert auth_resolution.reason_message is not None
-        return _UnsupportedReason(auth_resolution.reason_code, auth_resolution.reason_message)
-
-    if _has_unresolved_variables(request.url):
-        return _UnsupportedReason(
-            ENDPOINT_NOT_SUPPORTED_YET, "variáveis não resolvidas na URL ainda não são suportadas"
+        return (
+            _UnsupportedReason(auth_resolution.reason_code, auth_resolution.reason_message),
+            session,
         )
 
-    query_reason = _unsupported_query_reason(request.url.query_parameters)
-    if query_reason is not None:
-        return _UnsupportedReason(ENDPOINT_NOT_SUPPORTED_YET, query_reason)
+    url_reason = _unsupported_url_reason(request.url, session)
+    if url_reason is not None:
+        return _UnsupportedReason(ENDPOINT_NOT_SUPPORTED_YET, url_reason), session
 
-    return None
+    query_reason = _unsupported_query_reason(request.url.query_parameters, session)
+    if query_reason is not None:
+        return _UnsupportedReason(ENDPOINT_NOT_SUPPORTED_YET, query_reason), session
+
+    return None, session
 
 
 def _unsupported_body_reason(body: NormalizedBody) -> _UnsupportedReason | None:
     # "Tratar body vazio": has_content já é False para RAW com texto vazio
     # (ver PostmanRequestNormalizer._normalize_body) — nada a fazer aqui
     # além de tratar como "sem body", igual a uma request sem body nenhum.
+    #
+    # Resolução de variável (Parte 15) não muda SE o body é suportado —
+    # só COMO ele é renderizado (ver _resolve_body) — por isso esta função
+    # não recebe a sessão.
     if not body.has_content:
         return None
 
@@ -195,16 +219,125 @@ def _unsupported_multipart_reason(body: NormalizedBody) -> _UnsupportedReason | 
     return None
 
 
-def _has_unresolved_variables(url: NormalizedUrl) -> bool:
-    if url.variables:
-        return True
-    if url.raw and "{{" in url.raw:
-        return True
-    return any(is_parameterized_segment(segment) for segment in url.path)
+# --- URL: path e base URL (Parte 15) -----------------------------------------
+
+
+def _unsupported_url_reason(url: NormalizedUrl, session: VariableResolutionSession) -> str | None:
+    # Protocolo com {{variável}} é extremamente raro e não tem um "local"
+    # melhor para reportar do que base_url — tratado à parte para nunca
+    # quebrar a montagem de host/path abaixo com um protocolo incompleto.
+    if url.protocol and "{{" in url.protocol:
+        session.mark_unresolved(url.protocol, "base_url")
+        return "variáveis não resolvidas na URL ainda não são suportadas"
+
+    # Ambos sempre rodam (nunca curto-circuita no primeiro None) para que
+    # todo problema da URL seja reportado de uma vez, não só o primeiro.
+    path_ok = _resolve_path_segments(url, session) is not None
+    host_ok = _resolve_host_segments(url, session) is not None
+    if not path_ok or not host_ok:
+        return "variáveis não resolvidas na URL ainda não são suportadas"
+    return None
+
+
+def _resolve_path_segments(
+    url: NormalizedUrl, session: VariableResolutionSession
+) -> tuple[str, ...] | None:
+    # Só prioridades 1 e 2 do resolvedor (environment/Collection, ambos já
+    # conhecidos na geração) — o path= do Playwright é sempre uma string
+    # simples neste gerador, nunca uma f-string; por isso um path variable
+    # que só resolveria via variável de ambiente do sistema (prioridade 3)
+    # continua "não resolvido" aqui, limitação deliberada desta parte.
+    variables_by_key = {variable.key: variable.value for variable in url.variables if variable.key}
+
+    resolved: list[str] = []
+    ok = True
+    for segment in url.path:
+        pure_variable = extract_pure_variable_name(segment)
+        if pure_variable is not None:
+            # {{nome}} de verdade (variável Postman) — nunca "produzida por
+            # outro teste"; resolve via Environment/Collection, senão fica
+            # sem resolução (nunca inventa, nunca defere para runtime aqui).
+            value = session.resolve_compile_time(
+                pure_variable, collection_literal=variables_by_key.get(pure_variable)
+            )
+            if value is None:
+                session.mark_unresolved(pure_variable, "path")
+                ok = False
+                continue
+            resolved.append(value)
+            continue
+
+        if is_parameterized_segment(segment):
+            # :nome ou {nome} (Postman/OpenAPI) — "produzida por outro
+            # teste" por padrão (fora de escopo desta fase); só resolve
+            # quando a própria Collection já declarou um default para essa
+            # chave em url.variable[] (NormalizedUrlVariable.value).
+            key = parameterized_segment_key(segment)
+            literal = variables_by_key.get(key) if key else None
+            if not literal:
+                session.mark_unresolved(key or segment, "path")
+                ok = False
+                continue
+            assert key is not None  # garantido por literal ser não-None acima
+            session.resolved_variables[key] = literal
+            resolved.append(literal)
+            continue
+
+        resolved.append(segment)
+
+    return tuple(resolved) if ok else None
+
+
+def _resolve_host_segments(
+    url: NormalizedUrl, session: VariableResolutionSession
+) -> tuple[str, ...] | None:
+    # Sem equivalente de "valor literal da Collection" para host (não há
+    # um NormalizedUrlVariable para segmentos de host) — só Environment ou
+    # sem resolução; nunca defere para variável de ambiente do sistema aqui
+    # (mesma limitação/motivo do path, ver _resolve_path_segments).
+    resolved: list[str] = []
+    ok = True
+    for segment in url.host:
+        pure_variable = extract_pure_variable_name(segment)
+        if pure_variable is not None:
+            value = session.resolve_compile_time(pure_variable)
+            if value is None:
+                session.mark_unresolved(pure_variable, "base_url")
+                ok = False
+                continue
+            resolved.append(value)
+            continue
+
+        if "{{" in segment:
+            # Referência parcial dentro de um segmento de host — nunca
+            # interpolada (mesmo critério conservador de auth/multipart).
+            session.mark_unresolved(segment, "base_url")
+            ok = False
+            continue
+
+        resolved.append(segment)
+
+    return tuple(resolved) if ok else None
+
+
+def _relative_path_from_segments(segments: tuple[str, ...]) -> str:
+    if segments:
+        return "/" + "/".join(segments)
+    return "/"
+
+
+def _base_url_from_resolved(protocol: str | None, host_segments: tuple[str, ...]) -> str | None:
+    # Mesmo critério de base_url.derive_base_url, mas a partir do host já
+    # resolvido pelo resolvedor central — nunca inventa um host quando
+    # protocol/host não estão presentes.
+    if not protocol or not host_segments:
+        return None
+    return f"{protocol}://{'.'.join(host_segments)}"
 
 
 def _unsupported_query_reason(
     query_parameters: tuple[NormalizedQueryParameter, ...],
+    session: VariableResolutionSession,
 ) -> str | None:
     enabled = [q for q in query_parameters if not q.disabled and q.key]
 
@@ -220,34 +353,40 @@ def _unsupported_query_reason(
 
     for parameter in enabled:
         assert parameter.key is not None  # filtrado acima
-        if "{{" in parameter.key or "{{" in (parameter.value or ""):
+        if "{{" in parameter.key:
+            session.mark_unresolved(parameter.key, "query")
+            return "variáveis não resolvidas em query parameters ainda não são suportadas"
+        value = parameter.value or ""
+        if "{{" in value and extract_pure_variable_name(value) is None:
+            # Referência parcial — Parte 15 só resolve quando o valor
+            # inteiro é {{nome}} (mesmo critério conservador de auth).
+            session.mark_unresolved(value, "query")
             return "variáveis não resolvidas em query parameters ainda não são suportadas"
 
     return None
 
 
-def _relative_path(url: NormalizedUrl) -> str:
-    if url.path:
-        return "/" + "/".join(url.path)
-    return "/"
-
-
 def _build_query_params(
     query_parameters: tuple[NormalizedQueryParameter, ...],
+    session: VariableResolutionSession,
 ) -> dict[str, str]:
     # Só parâmetros habilitados (nunca gerados os desabilitados); ordem
     # preservada (mesma ordem da Collection, tuple já é determinística);
     # valor ausente/None tratado como string vazia — presente, mas vazio,
     # nunca omitido (distinto de "parâmetro ausente", que nunca chega aqui).
-    # Valor já vem pré-renderizado como código Python (literal), para poder
-    # conviver no mesmo dict com parâmetros vindos de _resolve_auth
-    # (Parte 12), que são expressões — não literais — e não passam por
-    # _render_python_literal.
+    # Valor já vem pré-renderizado como código Python (literal OU expressão
+    # do resolvedor central — Parte 15), para poder conviver no mesmo dict
+    # com parâmetros vindos de _resolve_auth, que também são expressões.
     params: dict[str, str] = {}
     for parameter in query_parameters:
         if parameter.disabled or not parameter.key:
             continue
-        params[parameter.key] = _render_python_literal(_coerce_query_value(parameter.value or ""))
+        value = parameter.value or ""
+        pure_variable = extract_pure_variable_name(value)
+        if pure_variable is not None:
+            params[parameter.key] = session.resolve(pure_variable)
+            continue
+        params[parameter.key] = _render_python_literal(_coerce_query_value(value))
     return params
 
 
@@ -270,13 +409,14 @@ def _resolve_headers(
     *,
     endpoint_source: str,
     environment: PostmanEnvironment | None,
+    session: VariableResolutionSession,
 ) -> _HeaderResolution:
     # Só headers habilitados entram na consideração — os demais são
     # ignorados sem gerar warning (desabilitado é uma decisão explícita já
     # tomada na Collection, não uma omissão nossa a explicar).
     enabled = [h for h in headers if not h.disabled and h.key]
 
-    resolved: dict[str, tuple[str, str]] = {}  # chave normalizada -> (nome original, valor)
+    resolved: dict[str, tuple[str, str]] = {}  # chave normalizada -> (nome original, expressão)
     warnings: list[PlaywrightGenerationWarning] = []
 
     for header in enabled:
@@ -290,7 +430,13 @@ def _resolve_headers(
             warnings.append(_header_warning(code, endpoint_source, key, _reserved_reason(lower_key)))
             continue
 
-        if "{{" in key or "{{" in value:
+        pure_variable = extract_pure_variable_name(value) if "{{" in value else None
+        if "{{" in key or ("{{" in value and pure_variable is None):
+            # Parte 15: só uma referência PURA no valor resolve (ver
+            # abaixo); nome de header com variável, ou valor com variável
+            # parcial, continuam omitidos — mesmo critério conservador já
+            # usado desde a Parte 11, agora também registrado no manifesto.
+            session.mark_unresolved(key if "{{" in key else value, "header")
             warnings.append(
                 _header_warning(
                     HEADER_VALUE_NOT_RESOLVED,
@@ -324,14 +470,14 @@ def _resolve_headers(
                     "duplicado (diferença de caixa incluída); mantido o último valor definido",
                 )
             )
-        resolved[lower_key] = (key, value)
 
-    # Valor pré-renderizado como código Python (literal) — mesmo motivo de
-    # _build_query_params: precisa conviver com headers vindos de
-    # _resolve_auth (Parte 12), que são expressões, não literais.
-    ordered_headers = {
-        original_key: _python_string_literal(value) for original_key, value in resolved.values()
-    }
+        # Expressão já pronta (Parte 15): literal escapado para um valor
+        # comum, ou a variável local/literal resolvida pelo resolvedor
+        # central quando o valor inteiro é {{nome}}.
+        expression = session.resolve(pure_variable) if pure_variable is not None else _python_string_literal(value)
+        resolved[lower_key] = (key, expression)
+
+    ordered_headers = {original_key: expression for original_key, expression in resolved.values()}
     return _HeaderResolution(headers=ordered_headers, warnings=tuple(warnings))
 
 
@@ -372,21 +518,22 @@ def _render_http_call(
     data: str | None,
     multipart: dict[str, str] | None = None,
 ) -> str:
-    # params/headers/data/multipart já chegam pré-renderizados como código
-    # Python (cada valor é ou um literal escapado — _python_string_literal/
-    # _render_python_literal/_render_json_literal — ou uma expressão de
-    # _resolve_auth/_resolve_body, ex.: 'f"Bearer {token}"', "request_body"
-    # ou o texto multi-linha de um FilePayload) — este ponto só monta o
-    # texto, nunca decide como cada valor deve ser representado. data e
-    # multipart são mutuamente exclusivos (JSON vs multipart/form-data —
-    # nunca os dois ao mesmo tempo, ver _resolve_body).
+    # path/params/headers/data/multipart já chegam pré-renderizados como
+    # código Python (cada valor é ou um literal escapado — _python_string_
+    # literal/_render_python_literal/_render_json_literal — ou uma
+    # expressão do resolvedor central/_resolve_auth, ex.: 'f"Bearer
+    # {token}"', "request_body" ou o texto multi-linha de um FilePayload) —
+    # este ponto só monta o texto, nunca decide como cada valor deve ser
+    # representado. data e multipart são mutuamente exclusivos (JSON vs
+    # multipart/form-data — nunca os dois ao mesmo tempo, ver _resolve_body).
     call = f"api_context.{method}"
+    path_literal = _python_string_literal(path)
     if not params and not headers and data is None and not multipart:
-        return f"    response = {call}({_python_string_literal(path)})\n"
+        return f"    response = {call}({path_literal})\n"
 
     lines = [
         f"    response = {call}(\n",
-        f"        {_python_string_literal(path)},\n",
+        f"        {path_literal},\n",
     ]
     if params:
         lines.append("        params={\n")
@@ -447,50 +594,52 @@ def _python_string_literal(value: str) -> str:
 class _BodyResolution:
     # Linhas já formatadas para inserir no corpo da função, antes da
     # chamada api_context.<método>(...) — atribuição de request_body (JSON,
-    # Parte 13) e/ou leitura de variáveis de ambiente e arquivos (multipart,
-    # Parte 14).
+    # Parte 13). Vazio para multipart (Parte 14/15): todo preâmbulo de
+    # campo/arquivo multipart passa a viver na sessão do resolvedor central,
+    # compartilhada com os demais campos do endpoint.
     preamble_lines: tuple[str, ...]
     # Expressão Python já pronta para o argumento data= — sempre o nome da
     # variável local "request_body" quando há body JSON, None quando não há
     # (mesma convenção de valor pré-renderizado de headers/params/auth).
     data_expression: str | None = None
     # Dict chave -> expressão Python já pronta para o argumento multipart=
-    # (Parte 14) — cada valor é ou um literal escapado, ou o nome de uma
-    # variável local (campo textual com {{variável}} resolvida), ou o texto
-    # multi-linha de um FilePayload (campo de arquivo). None quando o body
-    # não é multipart/form-data.
+    # (Parte 14) — cada valor é ou um literal escapado, ou uma expressão do
+    # resolvedor central (campo textual com {{variável}} resolvida), ou o
+    # texto multi-linha de um FilePayload (campo de arquivo). None quando o
+    # body não é multipart/form-data.
     multipart_fields: dict[str, str] | None = None
-    # Imports extras exigidos pelo preâmbulo acima (ex.: "pytest" para
-    # pytest.fail, "mimetypes" para adivinhar o Content-Type do arquivo) —
-    # union com auth_resolution.extra_imports em _generate_positive_success_test.
-    extra_imports: frozenset[str] = frozenset()
 
 
-def _resolve_body(body: NormalizedBody) -> _BodyResolution:
+def _resolve_body(body: NormalizedBody, session: VariableResolutionSession) -> _BodyResolution:
     if not body.has_content:
         return _BodyResolution(preamble_lines=())
 
     if body.mode is BodyMode.FORMDATA:
-        return _resolve_multipart_body(body)
+        return _resolve_multipart_body(body, session)
 
     # Chegou aqui só depois de _unsupported_body_reason confirmar RAW +
     # Content-Type de JSON + JSON válido — reanalisar aqui é puro e sem
     # efeito colateral, mesmo padrão já usado por _resolve_auth.
     parsed = json.loads(body.text_content or "")
-    rendered = _render_json_literal(parsed, "    ")
+    rendered = _render_json_literal(parsed, "    ", session)
     return _BodyResolution(
         preamble_lines=(f"    request_body = {rendered}\n",),
         data_expression="request_body",
     )
 
 
-def _render_json_literal(value: Any, base_indent: str) -> str:
+def _render_json_literal(value: Any, base_indent: str, session: VariableResolutionSession) -> str:
     # value vem de json.loads: já preserva os tipos exatamente como
     # "Implementar" pede — null->None, true/false->bool, number->int/float,
     # string->str, object->dict (preserva ordem de inserção == ordem no
     # JSON original), array->list. Este renderizador só converte cada valor
     # Python já correto para o literal de código-fonte equivalente,
     # formatado deterministicamente (mesma indentação sempre, mesma ordem).
+    #
+    # Parte 15: uma string que é INTEIRAMENTE uma referência {{nome}} passa
+    # pelo resolvedor central em vez de virar um literal de texto cru — o
+    # mesmo critério conservador de sempre (só referência pura resolve;
+    # "prefixo-{{nome}}" continua embutido como texto, igual à Parte 13).
     if value is None:
         return "None"
     if isinstance(value, bool):
@@ -499,68 +648,49 @@ def _render_json_literal(value: Any, base_indent: str) -> str:
     if isinstance(value, (int, float)):
         return repr(value)
     if isinstance(value, str):
+        pure_variable = extract_pure_variable_name(value)
+        if pure_variable is not None:
+            return session.resolve(pure_variable)
         return _python_string_literal(value)
     if isinstance(value, list):
-        return _render_json_list(value, base_indent)
+        return _render_json_list(value, base_indent, session)
     if isinstance(value, dict):
-        return _render_json_dict(value, base_indent)
+        return _render_json_dict(value, base_indent, session)
     # Defensivo: json.loads nunca produz outro tipo além dos acima.
     return _python_string_literal(str(value))
 
 
-def _render_json_dict(value: dict[str, Any], base_indent: str) -> str:
+def _render_json_dict(
+    value: dict[str, Any], base_indent: str, session: VariableResolutionSession
+) -> str:
     if not value:
         return "{}"
     child_indent = base_indent + "    "
     lines = [
         f"{child_indent}{_python_string_literal(key)}: "
-        f"{_render_json_literal(item, child_indent)},"
+        f"{_render_json_literal(item, child_indent, session)},"
         for key, item in value.items()
     ]
     return "{\n" + "\n".join(lines) + f"\n{base_indent}}}"
 
 
-def _render_json_list(value: list[Any], base_indent: str) -> str:
+def _render_json_list(
+    value: list[Any], base_indent: str, session: VariableResolutionSession
+) -> str:
     if not value:
         return "[]"
     child_indent = base_indent + "    "
-    lines = [f"{child_indent}{_render_json_literal(item, child_indent)}," for item in value]
+    lines = [
+        f"{child_indent}{_render_json_literal(item, child_indent, session)}," for item in value
+    ]
     return "[\n" + "\n".join(lines) + f"\n{base_indent}]"
 
 
 # --- Multipart/form-data (Parte 14) ------------------------------------------
 
-# Campo de multipart pode ter espaço/símbolo no "key" (ex.: "Profile
-# Picture") — nunca usado cru como identificador Python nem como sufixo de
-# variável de ambiente.
-_INVALID_IDENTIFIER_CHARS = re.compile(r"[^a-z0-9_]+")
-
-
-def _sanitize_field_identifier(name: str) -> str:
-    # Mesmo alfabeto seguro usado por endpoint_file_naming._sanitize_segment
-    # (snake_case + só [a-z0-9_]) — reservas de nome quando sobra vazio (ex.:
-    # "key" só com símbolos) nunca deixam o identificador em branco.
-    #
-    # Limitação conhecida, deliberadamente não tratada (fora do escopo desta
-    # parte, sem exemplo/critério que peça isso): dois campos cujo "key" (ou
-    # variável) sanitiza para o mesmo slug (ex.: "Profile Picture" e
-    # "profile_picture") colidiriam no mesmo nome de variável local — o
-    # último declarado prevalece, sem aviso.
-    slug = _INVALID_IDENTIFIER_CHARS.sub("_", to_snake_case(name)).strip("_")
-    return slug or "field"
-
-
-def _multipart_file_env_var(field_key: str) -> str:
-    # Nunca deriva o env var do "src" declarado na Collection (normalmente
-    # um caminho local da máquina de quem criou a Collection, sem sentido
-    # em outra máquina/CI) — só do nome do campo, mesmo quando a Collection
-    # já trouxer um arquivo anexado ("Receber caminhos de arquivos por
-    # configuração ou variável de ambiente").
-    return f"{_ENV_VAR_PREFIX}UPLOAD_{_sanitize_field_identifier(field_key).upper()}"
-
 
 def _multipart_file_field_preamble(field_key: str, local_name: str) -> tuple[str, ...]:
-    env_var = _multipart_file_env_var(field_key)
+    env_var = multipart_file_env_var(field_key)
     # Só o nome do campo (já seguro para aparecer em mensagem, mesmo padrão
     # de _header_warning) — nunca um caminho local — entra na mensagem de
     # falha; concatenado (+) em vez de f-string aqui para não precisar
@@ -574,7 +704,7 @@ def _multipart_file_field_preamble(field_key: str, local_name: str) -> tuple[str
         # ambiente e o próprio arquivo só são checados quando o teste roda,
         # nunca na geração — o mesmo teste gerado detecta tanto a variável
         # não configurada quanto o caminho configurado mas inexistente.
-        *_env_var_lookup_lines(f"{local_name}_path", env_var),
+        *env_var_lookup_lines(f"{local_name}_path", env_var),
         f"    if not os.path.isfile({local_name}_path):\n",
         f"        pytest.fail({message_literal} + {local_name}_path)\n",
         f'    with open({local_name}_path, "rb") as {local_name}_fh:\n',
@@ -599,56 +729,37 @@ def _render_file_payload_dict(local_name: str, base_indent: str) -> str:
     return "{\n" + "\n".join(lines) + f"\n{base_indent}}}"
 
 
-def _resolve_multipart_body(body: NormalizedBody) -> _BodyResolution:
+def _resolve_multipart_body(
+    body: NormalizedBody, session: VariableResolutionSession
+) -> _BodyResolution:
     # Chegou aqui só depois de _unsupported_multipart_reason confirmar que
     # todo campo de arquivo habilitado tem "key" — reanalisar aqui é puro e
     # sem efeito colateral, mesmo padrão já usado por _resolve_auth/_resolve_body.
-    preamble_lines: list[str] = []
-    extra_imports: set[str] = set()
+    # Todo preâmbulo/import extra passa a viver na sessão compartilhada
+    # (Parte 15) — nunca duplicado aqui.
     fields_code: dict[str, str] = {}
-    # Nomes de variável local já emitidos (arquivo ou campo textual
-    # resolvido) — evita repetir o mesmo `os.environ.get(...)` quando o
-    # mesmo campo/variável aparece mais de uma vez.
-    seen_local_names: set[str] = set()
 
     for field in body.fields:
         if field.disabled or not field.key:
             continue
 
         if field.field_type == "file":
-            local_name = _sanitize_field_identifier(field.key)
-            if local_name not in seen_local_names:
-                seen_local_names.add(local_name)
-                preamble_lines.extend(_multipart_file_field_preamble(field.key, local_name))
-                extra_imports |= {"os", "pytest", "mimetypes"}
+            local_name = session.resolve_file_field(field.key, _multipart_file_field_preamble)
             fields_code[field.key] = _render_file_payload_dict(local_name, "            ")
             continue
 
         # Campo textual: "Resolver variáveis em campos textuais" — só uma
-        # referência pura ({{nome}}, nada mais na string) vira variável de
-        # ambiente (mesmo critério conservador de _resolve_auth, via
-        # _extract_pure_variable_name); qualquer outro valor (literal ou
-        # com variável parcial) é embutido como texto, mesmo tratamento já
+        # referência pura ({{nome}}, nada mais na string) passa pelo
+        # resolvedor central; qualquer outro valor (literal ou com
+        # variável parcial) é embutido como texto, mesmo tratamento já
         # usado pelo body JSON (Parte 13) para conteúdo bruto.
-        variable_name = _extract_pure_variable_name(field.value)
-        if variable_name is None:
+        pure_variable = extract_pure_variable_name(field.value)
+        if pure_variable is None:
             fields_code[field.key] = _python_string_literal(field.value or "")
             continue
+        fields_code[field.key] = session.resolve(pure_variable)
 
-        local_name = _sanitize_field_identifier(variable_name)
-        if local_name not in seen_local_names:
-            seen_local_names.add(local_name)
-            preamble_lines.extend(
-                _env_var_lookup_lines(local_name, _to_env_var_name(variable_name))
-            )
-            extra_imports.add("os")
-        fields_code[field.key] = local_name
-
-    return _BodyResolution(
-        preamble_lines=tuple(preamble_lines),
-        multipart_fields=fields_code or None,
-        extra_imports=frozenset(extra_imports),
-    )
+    return _BodyResolution(preamble_lines=(), multipart_fields=fields_code or None)
 
 
 # --- Autenticação (Parte 12) -------------------------------------------------
@@ -659,17 +770,12 @@ class _AuthResolution:
     supported: bool
     reason_code: str | None
     reason_message: str | None
-    # Linhas já formatadas (indentação de 4 espaços + quebra de linha
-    # incluídas) para inserir no corpo da função, antes da chamada
-    # api_context.get(...) — ex.: leitura da variável de ambiente + assert.
-    preamble_lines: tuple[str, ...]
     # Chave -> expressão Python já pronta (não um literal cru) — ex.:
-    # 'f"Bearer {token}"' ou "api_key" (nome de variável local definida no
-    # preâmbulo). Mesma convenção de valor pré-renderizado usada por
-    # _build_query_params/_resolve_headers.
+    # 'f"Bearer {token}"' ou "api_key" (nome de variável local materializada
+    # na sessão via resolve_as_local_variable). Mesma convenção de valor
+    # pré-renderizado usada por _build_query_params/_resolve_headers.
     extra_headers: dict[str, str]
     extra_params: dict[str, str]
-    extra_imports: frozenset[str]
 
 
 def _unsupported_auth(code: str, message: str) -> _AuthResolution:
@@ -677,28 +783,22 @@ def _unsupported_auth(code: str, message: str) -> _AuthResolution:
         supported=False,
         reason_code=code,
         reason_message=message,
-        preamble_lines=(),
         extra_headers={},
         extra_params={},
-        extra_imports=frozenset(),
     )
 
 
 def _supported_auth(
     *,
-    preamble_lines: tuple[str, ...] = (),
     extra_headers: dict[str, str] | None = None,
     extra_params: dict[str, str] | None = None,
-    extra_imports: frozenset[str] = frozenset(),
 ) -> _AuthResolution:
     return _AuthResolution(
         supported=True,
         reason_code=None,
         reason_message=None,
-        preamble_lines=preamble_lines,
         extra_headers=extra_headers or {},
         extra_params=extra_params or {},
-        extra_imports=extra_imports,
     )
 
 
@@ -708,56 +808,28 @@ def _find_auth_param(
     return next((parameter for parameter in parameters if parameter.key == key), None)
 
 
-def _extract_pure_variable_name(value: str | None) -> str | None:
-    # Só uma referência de variável Postman, nada mais na string (ex.:
-    # "{{accessToken}}" resolve; "Bearer {{accessToken}}" ou um valor
-    # literal não resolvem) — evidência estrutural mínima para nunca tratar
-    # um segredo hardcoded na Collection como se fosse seguro de embutir.
-    if not value:
-        return None
-    match = _PURE_VARIABLE_REFERENCE.match(value)
-    return match.group(1) if match else None
-
-
-def _to_env_var_name(variable_name: str) -> str:
-    # apiKey -> api_key -> AQO_API_KEY; accessToken -> AQO_ACCESS_TOKEN.
-    return f"{_ENV_VAR_PREFIX}{to_snake_case(variable_name).upper()}"
-
-
-def _env_var_lookup_lines(local_variable: str, env_var: str) -> tuple[str, ...]:
-    # "Validação clara de variável obrigatória": o teste falha explicando
-    # exatamente qual variável de ambiente configurar, em vez de um erro
-    # genérico de autenticação vindo de dentro do Playwright.
-    return (
-        f'    {local_variable} = os.environ.get("{env_var}")\n',
-        f'    assert {local_variable}, '
-        f'"Variável de ambiente obrigatória {env_var} não definida."\n',
-    )
-
-
-def _resolve_bearer_auth(auth: NormalizedAuth) -> _AuthResolution:
+def _resolve_bearer_auth(auth: NormalizedAuth, session: VariableResolutionSession) -> _AuthResolution:
     token_param = _find_auth_param(auth.parameters, "token")
     if token_param is None or not token_param.value:
         return _unsupported_auth(
             AUTHENTICATION_NOT_SUPPORTED, "Bearer Token sem o parâmetro 'token' definido"
         )
 
-    variable_name = _extract_pure_variable_name(token_param.value)
+    variable_name = extract_pure_variable_name(token_param.value)
     if variable_name is None:
         return _unsupported_auth(
             AUTHENTICATION_VALUE_NOT_RESOLVED,
             "valor do Bearer Token não é uma referência de variável ({{...}}) resolvível",
         )
 
-    env_var = _to_env_var_name(variable_name)
-    return _supported_auth(
-        preamble_lines=_env_var_lookup_lines("token", env_var),
-        extra_headers={"Authorization": 'f"Bearer {token}"'},
-        extra_imports=frozenset({"os"}),
-    )
+    # "token" é sempre materializado como variável local (mesmo quando o
+    # valor já é conhecido na geração via Environment) — o header é sempre
+    # a mesma f-string, literal ou deferida (Parte 15).
+    session.resolve_as_local_variable(variable_name, "token")
+    return _supported_auth(extra_headers={"Authorization": 'f"Bearer {token}"'})
 
 
-def _resolve_api_key_auth(auth: NormalizedAuth) -> _AuthResolution:
+def _resolve_api_key_auth(auth: NormalizedAuth, session: VariableResolutionSession) -> _AuthResolution:
     key_param = _find_auth_param(auth.parameters, "key")
     value_param = _find_auth_param(auth.parameters, "value")
     if key_param is None or not key_param.value or value_param is None or not value_param.value:
@@ -765,7 +837,7 @@ def _resolve_api_key_auth(auth: NormalizedAuth) -> _AuthResolution:
             AUTHENTICATION_NOT_SUPPORTED, "API Key sem 'key' e/ou 'value' definidos"
         )
 
-    variable_name = _extract_pure_variable_name(value_param.value)
+    variable_name = extract_pure_variable_name(value_param.value)
     if variable_name is None:
         return _unsupported_auth(
             AUTHENTICATION_VALUE_NOT_RESOLVED,
@@ -779,24 +851,15 @@ def _resolve_api_key_auth(auth: NormalizedAuth) -> _AuthResolution:
             AUTHENTICATION_NOT_SUPPORTED, f"localização de API Key '{location}' não suportada"
         )
 
-    env_var = _to_env_var_name(variable_name)
-    preamble = _env_var_lookup_lines("api_key", env_var)
+    session.resolve_as_local_variable(variable_name, "api_key")
     param_name = key_param.value
 
     if location == "header":
-        return _supported_auth(
-            preamble_lines=preamble,
-            extra_headers={param_name: "api_key"},
-            extra_imports=frozenset({"os"}),
-        )
-    return _supported_auth(
-        preamble_lines=preamble,
-        extra_params={param_name: "api_key"},
-        extra_imports=frozenset({"os"}),
-    )
+        return _supported_auth(extra_headers={param_name: "api_key"})
+    return _supported_auth(extra_params={param_name: "api_key"})
 
 
-def _resolve_basic_auth(auth: NormalizedAuth) -> _AuthResolution:
+def _resolve_basic_auth(auth: NormalizedAuth, session: VariableResolutionSession) -> _AuthResolution:
     username_param = _find_auth_param(auth.parameters, "username")
     password_param = _find_auth_param(auth.parameters, "password")
     if (
@@ -809,37 +872,35 @@ def _resolve_basic_auth(auth: NormalizedAuth) -> _AuthResolution:
             AUTHENTICATION_NOT_SUPPORTED, "Basic Auth sem 'username' e/ou 'password' definidos"
         )
 
-    username_variable = _extract_pure_variable_name(username_param.value)
-    password_variable = _extract_pure_variable_name(password_param.value)
+    username_variable = extract_pure_variable_name(username_param.value)
+    password_variable = extract_pure_variable_name(password_param.value)
     if username_variable is None or password_variable is None:
         return _unsupported_auth(
             AUTHENTICATION_VALUE_NOT_RESOLVED,
             "usuário ou senha do Basic Auth não são referências de variável ({{...}}) resolvíveis",
         )
 
-    username_env = _to_env_var_name(username_variable)
-    password_env = _to_env_var_name(password_variable)
-    preamble = (
-        *_env_var_lookup_lines("username", username_env),
-        *_env_var_lookup_lines("password", password_env),
-        '    credentials = base64.b64encode(f"{username}:{password}".encode()).decode()\n',
-    )
-    return _supported_auth(
-        preamble_lines=preamble,
-        extra_headers={"Authorization": 'f"Basic {credentials}"'},
-        extra_imports=frozenset({"os", "base64"}),
-    )
+    session.resolve_as_local_variable(username_variable, "username")
+    session.resolve_as_local_variable(password_variable, "password")
+    if "credentials" not in session.seen_local_names:
+        session.seen_local_names.add("credentials")
+        session.preamble_lines.append(
+            '    credentials = base64.b64encode(f"{username}:{password}".encode()).decode()\n'
+        )
+        session.extra_imports.add("base64")
+
+    return _supported_auth(extra_headers={"Authorization": 'f"Basic {credentials}"'})
 
 
-def _resolve_auth(auth: NormalizedAuth) -> _AuthResolution:
+def _resolve_auth(auth: NormalizedAuth, session: VariableResolutionSession) -> _AuthResolution:
     if auth.auth_type in _NO_AUTH_TYPES:
         return _supported_auth()
     if auth.auth_type is AuthType.BEARER:
-        return _resolve_bearer_auth(auth)
+        return _resolve_bearer_auth(auth, session)
     if auth.auth_type is AuthType.API_KEY:
-        return _resolve_api_key_auth(auth)
+        return _resolve_api_key_auth(auth, session)
     if auth.auth_type is AuthType.BASIC:
-        return _resolve_basic_auth(auth)
+        return _resolve_basic_auth(auth, session)
 
     label = auth.raw_type or auth.auth_type.value
     return _unsupported_auth(
@@ -866,7 +927,7 @@ class PlaywrightEndpointTestGenerator:
         request: NormalizedRequest,
         environment: PostmanEnvironment | None = None,
     ) -> GeneratedEndpointTest:
-        reason = _unsupported_reason(request)
+        reason, session = _unsupported_reason(request, environment)
         if reason is None:
             return _generate_positive_success_test(strategy, request, environment)
 
@@ -877,7 +938,16 @@ class PlaywrightEndpointTestGenerator:
             endpoint=strategy.endpoint_source,
             scenario=None,
         )
-        return replace(fallback, warnings=fallback.warnings + (warning,))
+        # Variáveis que ficaram sem resolução mesmo num endpoint que caiu
+        # no fallback (Parte 15) — ex.: "GET /users/{id}" sem default de
+        # "id" na Collection — ainda entram no manifesto (ver
+        # default_playwright_test_suite_builder.py), mesmo sem um teste
+        # real gerado para elas.
+        return replace(
+            fallback,
+            warnings=fallback.warnings + (warning,),
+            unresolved_variables=tuple(session.unresolved),
+        )
 
 
 def _generate_positive_success_test(
@@ -888,17 +958,28 @@ def _generate_positive_success_test(
     slug = endpoint_source_to_slug(strategy.endpoint_source)
     function_name = f"test_{slug}_success"
     method = (request.method or "get").lower()
-    path = _relative_path(request.url)
-    params = _build_query_params(request.url.query_parameters)
-    header_resolution = _resolve_headers(
-        request.headers, endpoint_source=strategy.endpoint_source, environment=environment
-    )
+
     # Já sabido "supported" (gate em _unsupported_reason); recomputado aqui
-    # (puro, sem efeito colateral) para obter o preâmbulo/headers/params
-    # reais a renderizar — mesmo padrão já usado para headers/params, que
-    # também são recalculados em vez de repassados da checagem de suporte.
-    auth_resolution = _resolve_auth(request.auth)
-    body_resolution = _resolve_body(request.body)
+    # (puro, sem efeito colateral) com uma sessão NOVA — mesmo padrão já
+    # usado para headers/params/auth, que também são recalculados em vez de
+    # repassados da checagem de suporte. Ordem de resolução: path/base URL
+    # (nunca geram preâmbulo — só literais já conhecidos na geração), depois
+    # autenticação, query, headers e por fim o body — cada um pode acrescentar
+    # preâmbulo/import à MESMA sessão, na ordem em que aparecem abaixo.
+    session = VariableResolutionSession(environment=environment)
+
+    path_segments = _resolve_path_segments(request.url, session)
+    host_segments = _resolve_host_segments(request.url, session)
+    assert path_segments is not None and host_segments is not None  # garantido pelo gate
+    path = _relative_path_from_segments(path_segments)
+    base_url = _base_url_from_resolved(request.url.protocol, host_segments)
+
+    auth_resolution = _resolve_auth(request.auth, session)
+    params = _build_query_params(request.url.query_parameters, session)
+    header_resolution = _resolve_headers(
+        request.headers, endpoint_source=strategy.endpoint_source, environment=environment, session=session
+    )
+    body_resolution = _resolve_body(request.body, session)
 
     # Auth tem precedência sobre um header/param regular de mesmo nome —
     # nunca colide com "Authorization"/"Content-Type" manuais (já excluídos
@@ -922,15 +1003,15 @@ def _generate_positive_success_test(
     else:
         body_origin_note = "sem body"
 
-    all_imports = auth_resolution.extra_imports | body_resolution.extra_imports
-    imports_block = "".join(f"import {name}\n" for name in sorted(all_imports))
+    imports_block = "".join(f"import {name}\n" for name in sorted(session.extra_imports))
     if imports_block:
         imports_block += "\n\n"
 
-    # Ordem: preâmbulo de autenticação (configuração da requisição) antes
-    # do preâmbulo de body (o que está sendo enviado) — ambos antes da
-    # chamada em si.
-    preamble = "".join(auth_resolution.preamble_lines) + "".join(body_resolution.preamble_lines)
+    # Preâmbulo único (Parte 15): tudo que auth/query/headers/body
+    # acrescentaram à sessão, na ordem em que cada resolução aconteceu
+    # acima, seguido da montagem do body JSON (que não passa pela sessão —
+    # ver _BodyResolution.preamble_lines).
+    preamble = "".join(session.preamble_lines) + "".join(body_resolution.preamble_lines)
     if preamble:
         preamble += "\n"
 
@@ -968,5 +1049,8 @@ def _generate_positive_success_test(
         content=content,
         scenario_names=("success",),
         warnings=header_resolution.warnings,
-        base_url=derive_base_url(request.url),
+        base_url=base_url,
+        required_environment_variables=tuple(sorted(session.required_environment_variables)),
+        resolved_variables=tuple(sorted(session.resolved_variables.items())),
+        unresolved_variables=(),
     )

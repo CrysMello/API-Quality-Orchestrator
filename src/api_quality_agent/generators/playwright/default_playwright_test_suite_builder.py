@@ -3,15 +3,25 @@ from collections.abc import Sequence
 
 from api_quality_agent.domain.models import ExecutionContext
 from api_quality_agent.generators.playwright.endpoint_file_naming import (
+    ResolvedEndpointFileNames,
     resolve_endpoint_file_names,
 )
 from api_quality_agent.generators.playwright.generated_endpoint_test import GeneratedEndpointTest
 from api_quality_agent.generators.playwright.generated_file import GeneratedFile
 from api_quality_agent.generators.playwright.generated_test_suite import GeneratedTestSuite
+from api_quality_agent.generators.playwright.variable_resolver import UNRESOLVED_VARIABLE
 
 _ENDPOINTS_DIR = "endpoints"
 _CONFTEST_FILE_NAME = "conftest.py"
 _MANIFEST_FILE_NAME = "generation-manifest.json"
+
+# Bumpar deliberadamente (nunca por efeito colateral de outra mudança) toda
+# vez que o formato do manifesto ganhar/perder uma chave — mesmo espírito
+# de EXECUTION_RESULT_SCHEMA_VERSION (persist_execution_result_use_case.py)
+# e do teste de caracterização que trava esse valor
+# (tests/characterization/test_execution_result_schema.py). Ver
+# tests/unit/test_playwright_manifest_schema.py para o equivalente aqui.
+_MANIFEST_SCHEMA_VERSION = "1.0"
 
 # Pode ser sobrescrito em tempo de execução sem regenerar a suíte (ex.:
 # apontar para staging/produção em CI) — nunca uma credencial, só a URL
@@ -45,7 +55,7 @@ class DefaultPlaywrightTestSuiteBuilder:
         )
         manifest_file = GeneratedFile(
             relative_path=_MANIFEST_FILE_NAME,
-            content=_render_manifest(endpoint_tests, context),
+            content=_render_manifest(endpoint_tests, naming, context),
         )
 
         warnings = naming.warnings + tuple(
@@ -112,20 +122,124 @@ def _render_conftest(endpoint_tests: Sequence[GeneratedEndpointTest]) -> str:
     )
 
 
+def _endpoint_method_and_path(endpoint_source: str) -> tuple[str, str]:
+    # endpoint_source é sempre "MÉTODO /path" (ver
+    # api_analysis_engine._endpoint_source_label) — mesma partição já usada
+    # por endpoint_file_naming.endpoint_source_to_slug.
+    method, _, path = endpoint_source.strip().partition(" ")
+    return method, path
+
+
+def _endpoint_entries(
+    endpoint_tests: Sequence[GeneratedEndpointTest], naming: ResolvedEndpointFileNames
+) -> list[dict[str, object]]:
+    # "O manifesto lista todos os arquivos realmente existentes": o nome de
+    # arquivo aqui é sempre o já resolvido por resolve_endpoint_file_names
+    # (com sufixo de colisão quando aplicável), nunca
+    # endpoint_test.suggested_file_name cru — o mesmo caminho que de fato
+    # vira um GeneratedFile em build().
+    entries = []
+    for endpoint_test, file_name in zip(endpoint_tests, naming.file_names, strict=True):
+        method, path = _endpoint_method_and_path(endpoint_test.endpoint_source)
+        entries.append(
+            {
+                "endpoint": endpoint_test.endpoint_source,
+                "method": method,
+                "path": path,
+                "file": f"{_ENDPOINTS_DIR}/{file_name}",
+                # scenario_names só é vazio para o PlaceholderEndpointTestGenerator
+                # (fallback) — mesmo sinal já usado internamente pelo gerador,
+                # nunca uma heurística nova sobre o texto do conteúdo.
+                "rendered": bool(endpoint_test.scenario_names),
+            }
+        )
+    return entries
+
+
+def _required_environment_variables(endpoint_tests: Sequence[GeneratedEndpointTest]) -> list[str]:
+    variables: set[str] = set()
+    for endpoint_test in endpoint_tests:
+        variables.update(endpoint_test.required_environment_variables)
+    return sorted(variables)
+
+
+def _resolved_variables(endpoint_tests: Sequence[GeneratedEndpointTest]) -> dict[str, str]:
+    # Nunca um secret (ver VariableResolutionSession.resolved_variables) —
+    # mesclado na ordem dos endpoints; um mesmo nome resolvido para valores
+    # diferentes em endpoints diferentes (raro — só possível via default de
+    # Collection por path variable) mantém o último, mesmo critério já
+    # usado para headers duplicados.
+    merged: dict[str, str] = {}
+    for endpoint_test in endpoint_tests:
+        merged.update(endpoint_test.resolved_variables)
+    return merged
+
+
+def _warning_entries(
+    endpoint_tests: Sequence[GeneratedEndpointTest],
+    naming_warnings: Sequence[object],
+) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = [
+        {
+            "code": warning.code,
+            "endpoint": warning.endpoint,
+            "scenario": warning.scenario,
+            "message": warning.message,
+        }
+        for warning in naming_warnings
+    ]
+    for endpoint_test in endpoint_tests:
+        for warning in endpoint_test.warnings:
+            entries.append(
+                {
+                    "code": warning.code,
+                    "endpoint": warning.endpoint,
+                    "scenario": warning.scenario,
+                    "message": warning.message,
+                }
+            )
+        for unresolved in endpoint_test.unresolved_variables:
+            # Formato do warning obrigatório da Parte 15 (variable/location
+            # em vez de message/scenario) — ver exemplo no plano de ação.
+            entries.append(
+                {
+                    "code": UNRESOLVED_VARIABLE,
+                    "endpoint": endpoint_test.endpoint_source,
+                    "variable": unresolved.name,
+                    "location": unresolved.location,
+                }
+            )
+    return entries
+
+
 def _render_manifest(
-    endpoint_tests: Sequence[GeneratedEndpointTest], context: ExecutionContext
+    endpoint_tests: Sequence[GeneratedEndpointTest],
+    naming: ResolvedEndpointFileNames,
+    context: ExecutionContext,
 ) -> str:
-    # Manifesto mínimo (Parte 06, deliberadamente incompleto): só o
-    # suficiente para confirmar que a suíte foi gerada e para quantas
-    # endpoints. Rastreabilidade completa (cenários, warnings por cenário,
-    # precisão de asserções, variáveis não resolvidas — ver seção 7 do
-    # plano de ação) é escopo de uma etapa futura.
+    # Parte 15: amplia o manifesto mínimo da Parte 06 com rastreabilidade
+    # de variáveis (resolvidas sem expor secret, externas necessárias, não
+    # resolvidas com localização) e a lista real de endpoints/arquivos
+    # gerados — nunca um resumo aproximado, sempre derivado dos mesmos
+    # GeneratedEndpointTest que viram os arquivos físicos em build().
+    not_rendered = [
+        endpoint_test.endpoint_source
+        for endpoint_test in endpoint_tests
+        if not endpoint_test.scenario_names
+    ]
+
     payload = {
+        "schema_version": _MANIFEST_SCHEMA_VERSION,
         "target": "playwright",
         "collection_name": context.collection_name,
         "execution_id": context.execution_id,
         "generated_at": context.started_at.isoformat(),
         "endpoints_analyzed": len(endpoint_tests),
         "endpoint_files_generated": len(endpoint_tests),
+        "endpoints": _endpoint_entries(endpoint_tests, naming),
+        "endpoints_not_rendered": not_rendered,
+        "required_environment_variables": _required_environment_variables(endpoint_tests),
+        "resolved_variables": _resolved_variables(endpoint_tests),
+        "warnings": _warning_entries(endpoint_tests, naming.warnings),
     }
     return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"

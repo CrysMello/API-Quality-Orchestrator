@@ -48,6 +48,25 @@ def is_parameterized_segment(segment: str) -> bool:
     return bool(_COLON_PARAMETER.match(segment) or _BRACE_PARAMETER.match(segment))
 
 
+def parameterized_segment_key(segment: str) -> str | None:
+    # Nome declarado dentro de :nome ou {nome} (ex.: "id" em ":id"/"{id}")
+    # — usado pela Parte 15 (variable_resolver) para casar um segmento de
+    # path parametrizado com o default de mesmo "key" em
+    # NormalizedUrl.variables. None quando o segmento não é parametrizado
+    # (is_parameterized_segment(segment) é False) — {{nome}} (variável
+    # Postman "de verdade", nunca "produzida por outro teste") também
+    # combina com _BRACE_PARAMETER (um-ou-mais "{"), mas quem chama isto já
+    # deve ter descartado esse caso via variable_resolver.extract_pure_variable_name
+    # antes de chegar aqui.
+    colon_match = _COLON_PARAMETER.match(segment)
+    if colon_match:
+        return colon_match.group(1)
+    brace_match = _BRACE_PARAMETER.match(segment)
+    if brace_match:
+        return brace_match.group(1)
+    return None
+
+
 def _segment_to_slug_part(segment: str) -> str:
     colon_match = _COLON_PARAMETER.match(segment)
     if colon_match:
