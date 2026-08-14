@@ -38,6 +38,7 @@ from api_quality_agent.generators.playwright.scenario_quality_guard import (
 from api_quality_agent.generators.playwright.variable_resolver import (
     UnresolvedVariable,
     VariableResolutionSession,
+    merge_collection_variables,
 )
 from api_quality_agent.generators.playwright.warning_catalog import (
     ASSERTION_NOT_GENERATED,
@@ -107,6 +108,7 @@ __all__ = [
     "endpoint_source_to_file_name",
     "endpoint_source_to_slug",
     "is_parameterized_segment",
+    "merge_collection_variables",
     "parameterized_segment_key",
     "resolve_endpoint_file_names",
     "to_snake_case",

@@ -10,6 +10,7 @@ from api_quality_agent.domain.models import EnvironmentVariable, PostmanEnvironm
 from api_quality_agent.generators.playwright.variable_resolver import (
     VariableResolutionSession,
     extract_pure_variable_name,
+    merge_collection_variables,
     multipart_file_env_var,
     sanitize_identifier,
     to_env_var_name,
@@ -59,6 +60,102 @@ def test_multipart_file_env_var_uses_upload_infix():
 def test_sanitize_identifier_replaces_spaces_and_symbols():
     assert sanitize_identifier("Profile Picture") == "profile_picture"
     assert sanitize_identifier("!!!") == "field"
+
+
+# --- merge_collection_variables: variável de nível de Collection ------------
+# (gap identificado ao validar a Collection JSONPlaceholder.dev: {{baseUrl}}
+# só existia no array "variable" de nível de Collection — não em
+# url.variable[] — e nunca resolvia sem um Environment explícito.)
+
+
+def test_merge_collection_variables_without_environment_creates_one():
+    merged = merge_collection_variables(None, [{"key": "baseUrl", "value": "api.exemplo.com"}])
+
+    assert merged is not None
+    assert merged.name is None
+    variable = merged.get("baseUrl")
+    assert variable is not None
+    assert variable.value == "api.exemplo.com"
+    assert variable.is_secret is False
+
+
+def test_merge_collection_variables_adds_to_an_existing_environment():
+    environment = _environment(apiKey=("literal-nao-secreto", False))
+
+    merged = merge_collection_variables(environment, [{"key": "baseUrl", "value": "api.exemplo.com"}])
+
+    assert merged is not environment  # nunca muta o Environment original
+    assert merged.get("apiKey").value == "literal-nao-secreto"
+    assert merged.get("baseUrl").value == "api.exemplo.com"
+
+
+def test_merge_collection_variables_never_overrides_an_existing_environment_key():
+    environment = _environment(baseUrl=("api.producao.com", False))
+
+    merged = merge_collection_variables(
+        environment, [{"key": "baseUrl", "value": "api.exemplo.com"}]
+    )
+
+    # Environment continua prioridade 1 — o valor da Collection nunca
+    # sobrescreve o que o Environment já declarou para o mesmo nome.
+    assert merged.get("baseUrl").value == "api.producao.com"
+
+
+def test_merge_collection_variables_marks_secret_typed_entries_as_secret():
+    merged = merge_collection_variables(
+        None, [{"key": "apiKey", "value": "nao-deveria-vazar", "type": "secret"}]
+    )
+
+    assert merged.get("apiKey").is_secret is True
+
+
+def test_merge_collection_variables_skips_disabled_entries():
+    merged = merge_collection_variables(
+        None, [{"key": "baseUrl", "value": "api.exemplo.com", "disabled": True}]
+    )
+
+    assert merged is None
+
+
+def test_merge_collection_variables_skips_entries_without_a_usable_key_or_value():
+    merged = merge_collection_variables(
+        None,
+        [
+            {"key": "", "value": "x"},
+            {"key": "semValor", "value": ""},
+            {"key": "semValor2"},
+            {"value": "semChave"},
+        ],
+    )
+
+    assert merged is None
+
+
+def test_merge_collection_variables_returns_the_same_environment_when_nothing_new():
+    environment = _environment(baseUrl=("api.exemplo.com", False))
+
+    merged = merge_collection_variables(environment, [{"key": "baseUrl", "value": "outro-valor"}])
+
+    assert merged is environment  # nada a acrescentar -> devolve o mesmo objeto
+
+
+def test_merge_collection_variables_with_no_collection_variables_is_a_no_op():
+    assert merge_collection_variables(None, []) is None
+    environment = _environment(baseUrl=("api.exemplo.com", False))
+    assert merge_collection_variables(environment, []) is environment
+
+
+def test_merge_collection_variables_resolves_as_a_literal_end_to_end():
+    # Prova o efeito real (não só a construção do PostmanEnvironment): uma
+    # sessão criada com o environment mesclado resolve {{baseUrl}} como
+    # literal, mesmo sem nenhum Environment explícito ter sido informado.
+    merged = merge_collection_variables(None, [{"key": "baseUrl", "value": "api.exemplo.com"}])
+    session = VariableResolutionSession(environment=merged)
+
+    expression = session.resolve("baseUrl")
+
+    assert expression == '"api.exemplo.com"'
+    assert session.required_environment_variables == set()
 
 
 # --- prioridade 1: environment (não secret) ---------------------------------

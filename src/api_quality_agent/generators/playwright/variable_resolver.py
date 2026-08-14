@@ -7,9 +7,13 @@ entre campos, e alimenta o rastreamento usado pelo generation-manifest.json).
 Prioridade de resolução (determinística, nunca invertida):
 1. environment informado no `generate` (-e/--environment) — só quando a
    variável NÃO é secret (ver EnvironmentVariable.is_secret) e tem valor.
-2. valor literal já declarado na própria Collection (hoje, o único lugar
-   onde isso existe estruturalmente é `url.variable[]` — o default que o
-   Postman guarda ao lado de um segmento de path `:nome`/`{nome}`).
+2. valor literal já declarado na própria Collection — `url.variable[]`
+   (default que o Postman guarda ao lado de um segmento de path
+   `:nome`/`{nome}`) ou o array `variable[]` de nível de Collection (ex.:
+   `baseUrl` declarado uma vez só, no topo do arquivo — `merge_collection_
+   variables`, usado pelo caso de uso de geração para materializar essas
+   entradas como se fossem um Environment de prioridade mais baixa, nunca
+   sobrescrevendo uma variável de Environment já definida).
 3. variável de ambiente do sistema — nunca lida agora: o código gerado lê
    `os.environ.get("AQO_<NOME>")` quando o teste roda de verdade. É o que
    sempre acontece quando 1 e 2 não resolveram (secret incluído — nunca o
@@ -25,14 +29,57 @@ Prioridade de resolução (determinística, nunca invertida):
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
-from api_quality_agent.domain.models import PostmanEnvironment
+from api_quality_agent.domain.models import EnvironmentVariable, PostmanEnvironment
 from api_quality_agent.generators.playwright.endpoint_file_naming import to_snake_case
 from api_quality_agent.generators.playwright.warning_catalog import UNRESOLVED_VARIABLE
 
 _ENV_VAR_PREFIX = "AQO_"
 _UPLOAD_ENV_VAR_INFIX = "UPLOAD_"
+
+
+def merge_collection_variables(
+    environment: PostmanEnvironment | None, collection_variables: Sequence[dict[str, Any]]
+) -> PostmanEnvironment | None:
+    # Materializa PostmanCollectionDocument.variables (o array `variable[]`
+    # de nível de Collection, ex.: `baseUrl`) como entradas de prioridade
+    # 2 (ver docstring do módulo) — sem isso, um host/segmento que só
+    # existisse ali (nunca em url.variable[], que é por segmento de path)
+    # nunca resolvia sem um Environment explícito, mesmo quando a própria
+    # Collection já declarava o valor.
+    #
+    # Nunca sobrescreve uma variável de Environment já definida (mesmo
+    # nome): Environment continua prioridade 1. Nunca resolve uma entrada
+    # desabilitada, sem "key"/"value" string, ou marcada "type": "secret"
+    # (mesmo critério de EnvironmentVariable.is_secret) — essa cai para a
+    # prioridade 3 (AQO_<NOME> em runtime), nunca um literal embutido.
+    existing_keys = {variable.key for variable in (environment.variables if environment else ())}
+    extra_variables: list[EnvironmentVariable] = []
+    for raw in collection_variables:
+        if raw.get("disabled") is True:
+            continue
+        key = raw.get("key")
+        value = raw.get("value")
+        if not isinstance(key, str) or not key or key in existing_keys:
+            continue
+        if not isinstance(value, str) or not value:
+            continue
+        extra_variables.append(
+            EnvironmentVariable(
+                key=key, value=value, is_secret=raw.get("type") == "secret", enabled=True
+            )
+        )
+    if not extra_variables:
+        return environment
+
+    return PostmanEnvironment(
+        name=environment.name if environment else None,
+        variables=(environment.variables if environment else ()) + tuple(extra_variables),
+    )
+
 
 # Só uma referência de variável Postman, nada mais na string (ex.:
 # "{{accessToken}}" resolve; "Bearer {{accessToken}}" ou um valor literal
