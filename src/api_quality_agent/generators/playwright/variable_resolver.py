@@ -4,23 +4,34 @@
 para que o mesmo nome tenha o mesmo tratamento em qualquer campo, deduplica
 entre campos, e alimenta o rastreamento usado pelo generation-manifest.json).
 
-Prioridade de resolução (determinística, nunca invertida):
+Prioridade de resolução (determinística, nunca invertida — a MESMA para
+todo campo: path, host, query, header, auth e body chamam sempre os
+métodos desta classe, nunca reimplementam a regra por conta própria):
 1. environment informado no `generate` (-e/--environment) — só quando a
    variável NÃO é secret (ver EnvironmentVariable.is_secret) e tem valor.
-2. valor literal já declarado na própria Collection — `url.variable[]`
-   (default que o Postman guarda ao lado de um segmento de path
-   `:nome`/`{nome}`) ou o array `variable[]` de nível de Collection (ex.:
-   `baseUrl` declarado uma vez só, no topo do arquivo — `merge_collection_
-   variables`, usado pelo caso de uso de geração para materializar essas
-   entradas como se fossem um Environment de prioridade mais baixa, nunca
-   sobrescrevendo uma variável de Environment já definida).
-3. variável de ambiente do sistema — nunca lida agora: o código gerado lê
+   `EnvironmentVariable.source == "environment"` (default do campo).
+2. variável de nível de Collection — o array `variable[]` do topo do
+   arquivo (ex.: `baseUrl` declarado uma única vez para toda a Collection),
+   materializado por `merge_collection_variables` (chamado pelo caso de
+   uso de geração) como entradas extras de `PostmanEnvironment.variables`
+   com `source == "collection"` — nunca sobrescrevendo uma entrada de
+   Environment já presente para o mesmo nome (checado antes de mesclar, e
+   reforçado pela ordem: entradas de Environment sempre vêm primeiro na
+   tupla final, então `PostmanEnvironment.get()` as encontra antes).
+   Ambas as fontes (1 e 2) passam pelo MESMO método, `_environment_value` —
+   nunca uma segunda estrutura/parâmetro para "variável de Collection".
+3. valor literal declarado em `url.variable[]` — o default que o Postman
+   guarda ao lado de um segmento de path `:nome`/`{nome}` (mecanismo
+   deliberadamente separado do item 2: é um default POR SEGMENTO de URL,
+   nunca um valor geral da Collection, mesmo os dois preenchendo o mesmo
+   papel de "literal já conhecido na geração" quando 1 e 2 não resolveram).
+4. variável de ambiente do sistema — nunca lida agora: o código gerado lê
    `os.environ.get("AQO_<NOME>")` quando o teste roda de verdade. É o que
-   sempre acontece quando 1 e 2 não resolveram (secret incluído — nunca o
+   sempre acontece quando 1-3 não resolveram (secret incluído — nunca o
    valor literal do secret, só o nome da variável externa).
-4. variável de workflow (produzida por outro teste) — fora de escopo desta
+5. variável de workflow (produzida por outro teste) — fora de escopo desta
    fase (ver "Não implementar"), nunca considerada aqui.
-5. não resolvida — decisão de quem chama este módulo, não deste módulo:
+6. não resolvida — decisão de quem chama este módulo, não deste módulo:
    uma referência parcial ({{}} misturada com texto) ou um segmento
    `:nome`/`{nome}` sem default na Collection nunca chegam a
    `resolve`/`resolve_compile_time` — o campo desiste antes, registrando
@@ -49,10 +60,19 @@ def merge_collection_variables(
     # 2 (ver docstring do módulo) — sem isso, um host/segmento que só
     # existisse ali (nunca em url.variable[], que é por segmento de path)
     # nunca resolvia sem um Environment explícito, mesmo quando a própria
-    # Collection já declarava o valor.
+    # Collection já declarava o valor. Cada entrada nasce com
+    # source="collection" (EnvironmentVariable.source) — nunca misturada de
+    # forma indistinguível com uma variável vinda de um Environment de
+    # verdade, mesmo as duas convivendo na mesma PostmanEnvironment.variables
+    # (única estrutura que o resolvedor já sabe ler, sem precisar de um
+    # segundo campo/parâmetro espalhado pelos renderers de header/query/
+    # auth/body — todos continuam chamando só VariableResolutionSession).
     #
     # Nunca sobrescreve uma variável de Environment já definida (mesmo
-    # nome): Environment continua prioridade 1. Nunca resolve uma entrada
+    # nome, comparado ANTES de acrescentar — environment.variables sempre
+    # vem primeiro na tupla final, então PostmanEnvironment.get() resolve
+    # o de Environment mesmo se uma chave escapasse dessa checagem):
+    # Environment continua prioridade 1. Nunca resolve uma entrada
     # desabilitada, sem "key"/"value" string, ou marcada "type": "secret"
     # (mesmo critério de EnvironmentVariable.is_secret) — essa cai para a
     # prioridade 3 (AQO_<NOME> em runtime), nunca um literal embutido.
@@ -69,7 +89,11 @@ def merge_collection_variables(
             continue
         extra_variables.append(
             EnvironmentVariable(
-                key=key, value=value, is_secret=raw.get("type") == "secret", enabled=True
+                key=key,
+                value=value,
+                is_secret=raw.get("type") == "secret",
+                enabled=True,
+                source="collection",
             )
         )
     if not extra_variables:
@@ -173,8 +197,13 @@ class VariableResolutionSession:
     unresolved: list[UnresolvedVariable] = field(default_factory=list)
 
     def _environment_value(self, name: str) -> tuple[str, bool] | None:
-        # (valor, is_secret) só quando o Environment define e habilita a
-        # variável; None quando não define (não é "resolvida como vazia").
+        # Prioridades 1 (Environment) e 2 (variável de Collection, mesclada
+        # por merge_collection_variables) num único método — as duas vivem
+        # em self.environment.variables, distinguíveis por
+        # EnvironmentVariable.source, mas resolvidas pelo MESMO código,
+        # nunca um branch por fonte. (valor, is_secret) só quando alguma
+        # das duas define e habilita a variável; None quando nenhuma
+        # define (não é "resolvida como vazia").
         if self.environment is None:
             return None
         variable = self.environment.get(name)
@@ -183,9 +212,11 @@ class VariableResolutionSession:
         return variable.value, variable.is_secret
 
     def _literal_value(self, name: str, *, collection_literal: str | None) -> str | None:
-        # Prioridade 1 então 2 — só um valor NÃO secret conta como
-        # "literal conhecido na geração"; secret sempre pula direto para a
-        # prioridade 3 (nunca embutido, mesmo já sabendo o valor).
+        # Prioridades 1-2 (environment/collection, via _environment_value)
+        # então 3 (collection_literal, url.variable[]) — só um valor NÃO
+        # secret conta como "literal conhecido na geração"; secret sempre
+        # pula direto para a prioridade 4 (nunca embutido, mesmo já
+        # sabendo o valor).
         environment_hit = self._environment_value(name)
         if environment_hit is not None:
             value, is_secret = environment_hit
@@ -200,9 +231,9 @@ class VariableResolutionSession:
         return None
 
     def _defer(self, name: str, local_variable: str) -> str:
-        # Prioridade 3: variável de ambiente do sistema, lida só quando o
+        # Prioridade 4: variável de ambiente do sistema, lida só quando o
         # teste roda — nunca agora. Sempre construível para qualquer nome,
-        # secret ou não (secret cai direto aqui, pulando a prioridade 1/2).
+        # secret ou não (secret cai direto aqui, pulando as prioridades 1-3).
         env_var = to_env_var_name(name)
         self.required_environment_variables.add(env_var)
         if local_variable not in self.seen_local_names:
@@ -213,9 +244,9 @@ class VariableResolutionSession:
 
     def resolve(self, name: str, *, collection_literal: str | None = None) -> str:
         # Expressão Python já pronta para embutir INLINE no código gerado —
-        # um literal escapado (prioridade 1/2, valor já conhecido na
+        # um literal escapado (prioridades 1-3, valor já conhecido na
         # geração) ou o nome de uma variável local lida em runtime
-        # (prioridade 3). O identificador local é sempre derivado do
+        # (prioridade 4). O identificador local é sempre derivado do
         # próprio nome da variável Postman (sanitize_identifier) — nunca
         # escolhido pelo chamador — para que o MESMO nome usado em dois
         # campos diferentes (ex.: {{token}} num header e numa query)
@@ -249,7 +280,7 @@ class VariableResolutionSession:
     def resolve_compile_time(
         self, name: str, *, collection_literal: str | None = None
     ) -> str | None:
-        # Só prioridades 1 e 2 (valor já conhecido na geração, sem esperar o
+        # Só prioridades 1-3 (valor já conhecido na geração, sem esperar o
         # teste rodar) — usado por campos que não têm como virar uma
         # expressão em runtime (path/base URL: o path= do Playwright é
         # sempre uma string simples neste gerador, nunca uma f-string —

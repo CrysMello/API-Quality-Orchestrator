@@ -62,7 +62,7 @@ def test_sanitize_identifier_replaces_spaces_and_symbols():
     assert sanitize_identifier("!!!") == "field"
 
 
-# --- merge_collection_variables: variável de nível de Collection ------------
+# --- prioridade 2: variável de nível de Collection (merge_collection_variables)
 # (gap identificado ao validar a Collection JSONPlaceholder.dev: {{baseUrl}}
 # só existia no array "variable" de nível de Collection — não em
 # url.variable[] — e nunca resolvia sem um Environment explícito.)
@@ -158,6 +158,53 @@ def test_merge_collection_variables_resolves_as_a_literal_end_to_end():
     assert session.required_environment_variables == set()
 
 
+def test_merge_collection_variables_tags_entries_with_source_collection():
+    # Nunca misturado de forma indistinguível com uma variável de
+    # Environment: cada entrada mesclada carrega a própria origem.
+    merged = merge_collection_variables(None, [{"key": "baseUrl", "value": "api.exemplo.com"}])
+
+    assert merged.get("baseUrl").source == "collection"
+
+
+def test_a_real_environment_variable_keeps_source_environment():
+    environment = _environment(apiKey=("literal-nao-secreto", False))
+
+    merged = merge_collection_variables(environment, [{"key": "baseUrl", "value": "x"}])
+
+    assert merged.get("apiKey").source == "environment"
+    assert merged.get("baseUrl").source == "collection"
+
+
+def test_secret_collection_variable_never_becomes_a_literal_and_defers_to_aqo_env_var():
+    # "Collection apiKey=segredo, type=secret -> não grava segredo, usa
+    # AQO_API_KEY" (mesmo critério de EnvironmentVariable.is_secret vindo
+    # de um Environment de verdade — a prioridade 2 do resolvedor não abre
+    # uma exceção para segredo declarado na Collection).
+    merged = merge_collection_variables(
+        None, [{"key": "apiKey", "value": "123-secret", "type": "secret"}]
+    )
+    session = VariableResolutionSession(environment=merged)
+
+    expression = session.resolve("apiKey")
+
+    assert expression == "api_key"
+    assert "123-secret" not in expression
+    assert session.resolved_variables == {}
+    assert session.required_environment_variables == {"AQO_API_KEY"}
+    assert "123-secret" not in "".join(session.preamble_lines)
+    assert 'os.environ.get("AQO_API_KEY")' in "".join(session.preamble_lines)
+
+
+def test_name_absent_from_environment_and_collection_and_url_variable_is_never_resolved():
+    merged = merge_collection_variables(None, [{"key": "baseUrl", "value": "api.exemplo.com"}])
+    session = VariableResolutionSession(environment=merged)
+
+    # resolve_compile_time nunca defere para AQO_* (quem chama decide o
+    # que fazer com None — ver mark_unresolved) — só prova que um nome
+    # ausente em toda fonte conhecida nunca "vaza" um valor de outra chave.
+    assert session.resolve_compile_time("postId") is None
+
+
 # --- prioridade 1: environment (não secret) ---------------------------------
 
 
@@ -184,7 +231,7 @@ def test_resolve_never_embeds_a_secret_environment_value():
     assert "super-secreto" not in "".join(session.preamble_lines)
 
 
-# --- prioridade 2: literal da Collection -------------------------------------
+# --- prioridade 3: literal de url.variable[] (default por segmento de path) -
 
 
 def test_resolve_falls_back_to_collection_literal_when_environment_has_no_match():
@@ -206,7 +253,7 @@ def test_environment_takes_priority_over_collection_literal():
     assert session.resolved_variables == {"id": "99"}
 
 
-# --- prioridade 3: variável de ambiente do sistema (deferida) --------------
+# --- prioridade 4: variável de ambiente do sistema (deferida) --------------
 
 
 def test_resolve_defers_to_a_system_environment_variable_without_any_source():
