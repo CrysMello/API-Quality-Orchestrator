@@ -1801,6 +1801,206 @@ def _resolve_json_schema_assertion(
     )
 
 
+# --- Valores esperados (Parte 22) --------------------------------------------
+
+# Convenção própria (extensão "x-", mesmo mecanismo de vendor extension já
+# padrão em OpenAPI/JSON Schema) para marcar "correlação comprovada entre
+# request e response": um schema de resposta nunca é lido como "mesmo nome
+# de campo = mesmo valor" por conta própria (isso seria regra de negócio
+# inferida, explicitamente fora de escopo) — só quando o contrato declara
+# EXPLICITAMENTE, neste campo, de qual campo do request o valor deveria vir.
+_CORRELATION_KEYWORD = "x-source-request-field"
+
+
+@dataclass(frozen=True)
+class _ExpectedValueCheck:
+    path: tuple[str, ...]
+    # "const": value é o único valor aceito (igualdade). "enum": value é a
+    # tupla de valores aceitos (inclusão) — só usado quando o schema declara
+    # 2+ valores; um "enum" de 1 valor só é o mesmo que "const".
+    kind: str
+    value: Any
+
+
+def _collect_expected_values(
+    schema: Any, *, prefix: tuple[str, ...] = ()
+) -> list[_ExpectedValueCheck]:
+    # "Valor explícito no contrato": só const/enum, palavras-chave padrão do
+    # próprio JSON Schema — nunca um valor "adivinhado" a partir de um
+    # exemplo isolado (isso é exatamente o padrão já evitado desde a Parte
+    # 19: presença/valor num exemplo não é obrigatoriedade nem expectativa).
+    checks: list[_ExpectedValueCheck] = []
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return checks
+
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return checks
+
+    for field_name, field_schema in properties.items():
+        if not isinstance(field_name, str) or not isinstance(field_schema, dict):
+            continue
+        path = (*prefix, field_name)
+
+        if "const" in field_schema:
+            checks.append(_ExpectedValueCheck(path=path, kind="const", value=field_schema["const"]))
+        else:
+            enum_values = field_schema.get("enum")
+            if isinstance(enum_values, list) and len(enum_values) == 1:
+                checks.append(_ExpectedValueCheck(path=path, kind="const", value=enum_values[0]))
+            elif isinstance(enum_values, list) and len(enum_values) >= 2:
+                checks.append(
+                    _ExpectedValueCheck(path=path, kind="enum", value=tuple(enum_values))
+                )
+
+        if field_schema.get("type") == "object":
+            checks.extend(_collect_expected_values(field_schema, prefix=path))
+
+    return checks
+
+
+@dataclass(frozen=True)
+class _CorrelationCheck:
+    # Só no nível superior da resposta (nunca aninhado — a correlação já é
+    # a parte mais "arriscada" desta parte; manter o escopo raso reduz
+    # ambiguidade sobre a que ela se refere).
+    path: tuple[str, ...]
+    source_field: str
+
+
+def _collect_correlation_checks(
+    schema: Any, request_json: dict[str, Any] | None
+) -> list[_CorrelationCheck]:
+    checks: list[_CorrelationCheck] = []
+    if request_json is None or not isinstance(schema, dict) or schema.get("type") != "object":
+        return checks
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return checks
+
+    for field_name, field_schema in properties.items():
+        if not isinstance(field_name, str) or not isinstance(field_schema, dict):
+            continue
+        source_field = field_schema.get(_CORRELATION_KEYWORD)
+        # "Não assumir que todo campo enviado será devolvido": só gera a
+        # checagem quando o campo de origem REALMENTE foi enviado no
+        # request_body desta requisição — nunca aponta para um campo que
+        # nem existe no que foi enviado.
+        if isinstance(source_field, str) and source_field in request_json:
+            checks.append(_CorrelationCheck(path=(field_name,), source_field=source_field))
+
+    return checks
+
+
+def _parsed_request_json_body(request_body: NormalizedBody) -> dict[str, Any] | None:
+    # Mesmo critério de _unsupported_body_reason/_resolve_body (Parte 13) —
+    # recomputado aqui (puro, sem efeito colateral) em vez de repassado,
+    # mesmo padrão já usado por auth/headers/etc. neste arquivo. Quando isto
+    # devolve um dict, Parte 13 garante que `request_body` existe no código
+    # gerado (mesma condição, mesmo texto fonte).
+    if request_body.mode is not BodyMode.RAW or not _is_json_content_type(request_body.content_type):
+        return None
+    try:
+        parsed = json.loads(request_body.text_content or "")
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _render_expected_value_check_lines(check: _ExpectedValueCheck) -> tuple[str, ...]:
+    label = ".".join(check.path)
+    path_literal = repr(check.path)
+    # "Valores sensíveis não podem aparecer na mensagem de falha" (regra 6):
+    # nunca um `assert _value == X` cru — o assertion rewriting do pytest
+    # exibiria os dois valores reais na falha mesmo com uma mensagem
+    # customizada ao lado. Por isso sempre if/pytest.fail com uma mensagem
+    # que cita só o CAMPO, nunca o valor esperado nem o recebido.
+    message = f"Valor inesperado para o campo '{label}' (ver contrato)."
+    fail_line = f"        pytest.fail({_python_string_literal(message)})\n"
+    if check.kind == "const":
+        expected_literal = _render_schema_literal(check.value, "    ")
+        condition = f"_value != {expected_literal}"
+    else:
+        values_literal = (
+            "(" + ", ".join(_render_schema_literal(item, "    ") for item in check.value) + ",)"
+        )
+        condition = f"_value not in {values_literal}"
+    return (
+        f"    _value = _get_nested_value(body, {path_literal})\n",
+        f"    if {condition}:\n",
+        fail_line,
+    )
+
+
+def _render_correlation_check_lines(check: _CorrelationCheck) -> tuple[str, ...]:
+    label = ".".join(check.path)
+    path_literal = repr(check.path)
+    source_literal = _python_string_literal(check.source_field)
+    # A mensagem inteira passa por _python_string_literal UMA vez só, nunca
+    # concatenada com source_literal (que já é código-fonte, com aspas
+    # próprias) dentro de outra string — evita aspas aninhadas quebrando a
+    # sintaxe do arquivo gerado. Mesma cautela da regra 6: nunca um `assert`
+    # cru comparando os dois valores — só o nome dos dois campos aparece na
+    # mensagem.
+    message = (
+        f"Valor do campo '{label}' não corresponde ao valor enviado em "
+        f"request_body['{check.source_field}'] (ver contrato)."
+    )
+    return (
+        f"    _value = _get_nested_value(body, {path_literal})\n",
+        f"    if _value != request_body.get({source_literal}):\n",
+        f"        pytest.fail({_python_string_literal(message)})\n",
+    )
+
+
+@dataclass(frozen=True)
+class _ExpectedValuesResolution:
+    helper_names: frozenset[str]
+    lines: tuple[str, ...]
+    docstring_note: str
+
+
+def _resolve_expected_values_assertion(
+    strategy: TestStrategy,
+    response_body_resolution: _BodyJsonResolution,
+    request_body: NormalizedBody,
+) -> _ExpectedValuesResolution:
+    # Mesmo pré-requisito das Partes 19-21: só existe `body` para comparar
+    # quando a Parte 18 já provou (por evidência) que a resposta é JSON.
+    empty = _ExpectedValuesResolution(helper_names=frozenset(), lines=(), docstring_note="")
+    if not response_body_resolution.lines:
+        return empty
+
+    schema_assertion = _find_schema_assertion(strategy)
+    schema = schema_assertion.expected_value if schema_assertion is not None else None
+
+    value_checks = _collect_expected_values(schema)
+    request_json = _parsed_request_json_body(request_body)
+    correlation_checks = _collect_correlation_checks(schema, request_json)
+
+    if not value_checks and not correlation_checks:
+        return empty
+
+    assert schema_assertion is not None  # garantido por value_checks/correlation_checks não vazios
+
+    lines: list[str] = []
+    for check in value_checks:
+        lines.extend(_render_expected_value_check_lines(check))
+    for correlation_check in correlation_checks:
+        lines.extend(_render_correlation_check_lines(correlation_check))
+
+    total = len(value_checks) + len(correlation_checks)
+    docstring_note = (
+        f"    Expected values: {total} campo(s) validados (origem: {schema_assertion.origin})\n"
+    )
+
+    return _ExpectedValuesResolution(
+        helper_names=frozenset({"get_nested_value"}),
+        lines=tuple(lines),
+        docstring_note=docstring_note,
+    )
+
+
 def _generate_positive_success_test(
     strategy: TestStrategy,
     request: NormalizedRequest,
@@ -1815,6 +2015,9 @@ def _generate_positive_success_test(
     required_fields_resolution = _resolve_required_fields_assertion(strategy, response_body_resolution)
     field_types_resolution = _resolve_field_types_assertion(strategy, response_body_resolution)
     json_schema_resolution = _resolve_json_schema_assertion(strategy, response_body_resolution)
+    expected_values_resolution = _resolve_expected_values_assertion(
+        strategy, response_body_resolution, request.body
+    )
 
     # Já sabido "supported" (gate em _unsupported_reason); recomputado aqui
     # (puro, sem efeito colateral) com uma sessão NOVA — mesmo padrão já
@@ -1887,7 +2090,9 @@ def _generate_positive_success_test(
     )
 
     helpers_block = _render_helpers_block(
-        required_fields_resolution.helper_names | field_types_resolution.helper_names
+        required_fields_resolution.helper_names
+        | field_types_resolution.helper_names
+        | expected_values_resolution.helper_names
     )
 
     content = (
@@ -1908,6 +2113,7 @@ def _generate_positive_success_test(
         f"{required_fields_resolution.docstring_note}"
         f"{field_types_resolution.docstring_note}"
         f"{json_schema_resolution.docstring_note}"
+        f"{expected_values_resolution.docstring_note}"
         '    """\n'
         "\n"
         f"{preamble}"
@@ -1919,6 +2125,7 @@ def _generate_positive_success_test(
         f"{''.join(required_fields_resolution.lines)}"
         f"{''.join(field_types_resolution.lines)}"
         f"{''.join(json_schema_resolution.lines)}"
+        f"{''.join(expected_values_resolution.lines)}"
     )
 
     warnings = header_resolution.warnings
