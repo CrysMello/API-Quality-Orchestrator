@@ -38,6 +38,7 @@ from api_quality_agent.generators.playwright.variable_resolver import (
     env_var_lookup_lines,
     extract_pure_variable_name,
     multipart_file_env_var,
+    sanitize_identifier,
 )
 
 _NO_AUTH_TYPES = (AuthType.NONE, AuthType.INHERIT, AuthType.UNKNOWN)
@@ -1225,6 +1226,182 @@ def _resolve_body_json_assertion(
     )
 
 
+# --- Campos obrigatórios (Parte 19) ------------------------------------------
+
+# Definidos como texto (não como funções Python normais deste módulo) para
+# aparecer, ao pé da letra, no arquivo de teste gerado — nunca importados de
+# api_quality_agent em runtime (a suíte gerada não depende do projeto que a
+# gerou, mesmo princípio já seguido por conftest.py/demais partes). Os
+# testes unitários deste módulo executam este MESMO texto (via exec) para
+# provar o comportamento em runtime, nunca uma cópia que possa divergir.
+#
+# _assert_required_field_present: navega node[path[0]][path[1]]... e falha
+# com o caminho completo (ex.: "user.address.zipCode") assim que uma chave
+# estiver ausente do dict corrente. Presença com valor null NUNCA falha —
+# "diferenciar campo ausente de presente com null" — e interrompe a
+# navegação (nada abaixo de um nó null para checar, "respeitar nullable").
+# Um nó que não é mais um dict (não navegável) também interrompe sem falhar
+# — nunca uma validação de tipo (fora de escopo desta parte).
+#
+# _get_nested_value: mesma navegação seguem, mas devolve o valor (ou None)
+# em vez de fazer asserção — usado só para localizar um campo array já
+# comprovado presente, antes de iterar seus itens com segurança.
+_REQUIRED_FIELD_HELPERS_SOURCE = (
+    "def _assert_required_field_present(node, path):\n"
+    "    for index, key in enumerate(path):\n"
+    "        if not isinstance(node, dict):\n"
+    "            return\n"
+    '        assert key in node, "Campo obrigatório ausente: " + ".".join(path[: index + 1])\n'
+    "        node = node[key]\n"
+    "        if node is None:\n"
+    "            return\n"
+    "\n"
+    "\n"
+    "def _get_nested_value(node, path):\n"
+    "    for key in path:\n"
+    "        if not isinstance(node, dict) or key not in node:\n"
+    "            return None\n"
+    "        node = node[key]\n"
+    "    return node\n"
+)
+
+
+@dataclass(frozen=True)
+class _RequiredArrayField:
+    # path até o campo array em si (ex.: ("order", "items")); campos que
+    # cada item da lista deve ter, só quando o schema do "items" já
+    # documenta o próprio "required" — nunca inventado.
+    path: tuple[str, ...]
+    item_required_fields: tuple[str, ...]
+
+
+def _collect_required_structure(
+    schema: Any, *, prefix: tuple[str, ...] = ()
+) -> tuple[list[tuple[str, ...]], list[_RequiredArrayField]]:
+    # "Consumir informações de required presentes em... JSON Schema" — nunca
+    # inferido aqui a partir de exemplos (isso já aconteceria, se fosse o
+    # caso, antes de chegar neste schema — este código só lê o "required"
+    # já declarado). Só desce em propriedades cujo próprio schema documenta
+    # type=object — um "type" ausente/ambíguo (ex.: lista de tipos do JSON
+    # Schema, campo nullable "type": ["object", "null"]) nunca é assumido
+    # como navegável, então nada é gerado para ele (regra 6, na prática:
+    # nunca força presença de filhos de um campo cujo tipo não está
+    # claramente documentado como objeto).
+    required_paths: list[tuple[str, ...]] = []
+    required_arrays: list[_RequiredArrayField] = []
+
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return required_paths, required_arrays
+
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return required_paths, required_arrays
+
+    required_names = schema.get("required")
+    required_names = required_names if isinstance(required_names, list) else []
+
+    for field_name in required_names:
+        if not isinstance(field_name, str):
+            continue
+        path = (*prefix, field_name)
+        required_paths.append(path)
+
+        field_schema = properties.get(field_name)
+        if not isinstance(field_schema, dict):
+            continue
+        field_type = field_schema.get("type")
+
+        if field_type == "object":
+            nested_paths, nested_arrays = _collect_required_structure(field_schema, prefix=path)
+            required_paths.extend(nested_paths)
+            required_arrays.extend(nested_arrays)
+        elif field_type == "array":
+            # "Para arrays: aplicar estrutura aos itens somente quando o
+            # schema determinar" — só quando items é um schema de objeto
+            # com "required" próprio; nunca aplica a estrutura do pai aos
+            # itens nem inventa uma estrutura para eles.
+            items_schema = field_schema.get("items")
+            if isinstance(items_schema, dict) and items_schema.get("type") == "object":
+                item_required = items_schema.get("required")
+                if isinstance(item_required, list):
+                    item_fields = tuple(f for f in item_required if isinstance(f, str))
+                    if item_fields:
+                        required_arrays.append(
+                            _RequiredArrayField(path=path, item_required_fields=item_fields)
+                        )
+
+    return required_paths, required_arrays
+
+
+def _render_required_array_field_lines(array_field: _RequiredArrayField) -> tuple[str, ...]:
+    local_name = f"_{sanitize_identifier('_'.join(array_field.path))}_items"
+    path_literal = repr(array_field.path)
+    array_path_label = ".".join(array_field.path) + "[]"
+    lines = [
+        f"    {local_name} = _get_nested_value(body, {path_literal})\n",
+        f"    if isinstance({local_name}, list):\n",
+        f"        for _item in {local_name}:\n",
+        "            if not isinstance(_item, dict):\n",
+        "                continue\n",
+        f"            for _field in {array_field.item_required_fields!r}:\n",
+        # "Não acessar item[0] sem garantir existência": nunca indexado,
+        # sempre um for — uma lista vazia simplesmente não itera (nunca
+        # falha por causa disso).
+        f'                assert _field in _item, "Campo obrigatório ausente: {array_path_label}." '
+        '+ _field\n',
+    ]
+    return tuple(lines)
+
+
+@dataclass(frozen=True)
+class _RequiredFieldsResolution:
+    # Bloco de funções auxiliares (module-level, uma vez por arquivo) — só
+    # emitido quando há pelo menos um campo obrigatório a validar.
+    helpers_block: str
+    lines: tuple[str, ...]
+    docstring_note: str
+
+
+def _resolve_required_fields_assertion(
+    strategy: TestStrategy, response_body_resolution: _BodyJsonResolution
+) -> _RequiredFieldsResolution:
+    # Só faz sentido checar campos dentro de `body` quando a Parte 18 já
+    # garantiu que essa variável existe (evidência de JSON) — nunca gerado
+    # isoladamente.
+    if not response_body_resolution.lines:
+        return _RequiredFieldsResolution(helpers_block="", lines=(), docstring_note="")
+
+    schema_assertion = _find_schema_assertion(strategy)
+    schema = schema_assertion.expected_value if schema_assertion is not None else None
+    required_paths, required_arrays = _collect_required_structure(schema)
+
+    if not required_paths and not required_arrays:
+        return _RequiredFieldsResolution(helpers_block="", lines=(), docstring_note="")
+
+    assert schema_assertion is not None  # garantido por required_paths/arrays não vazios
+
+    lines: list[str] = []
+    for path in required_paths:
+        lines.append(f"    _assert_required_field_present(body, {path!r})\n")
+    for array_field in required_arrays:
+        lines.extend(_render_required_array_field_lines(array_field))
+
+    total = len(required_paths) + len(required_arrays)
+    docstring_note = (
+        f"    Required fields: {total} campo(s) obrigatório(s) validados "
+        f"(origem: {schema_assertion.origin})\n"
+    )
+
+    return _RequiredFieldsResolution(
+        # "\n\n" ao final: mesma separação de duas linhas em branco que o
+        # Python/ruff esperam entre defs de nível de módulo, antes da
+        # função de teste que vem a seguir.
+        helpers_block=f"{_REQUIRED_FIELD_HELPERS_SOURCE}\n\n",
+        lines=tuple(lines),
+        docstring_note=docstring_note,
+    )
+
+
 def _generate_positive_success_test(
     strategy: TestStrategy,
     request: NormalizedRequest,
@@ -1236,6 +1413,7 @@ def _generate_positive_success_test(
     status_resolution = _resolve_status_assertion(strategy)
     content_type_resolution = _resolve_content_type_assertion(strategy)
     response_body_resolution = _resolve_body_json_assertion(strategy, content_type_resolution)
+    required_fields_resolution = _resolve_required_fields_assertion(strategy, response_body_resolution)
 
     # Já sabido "supported" (gate em _unsupported_reason); recomputado aqui
     # (puro, sem efeito colateral) com uma sessão NOVA — mesmo padrão já
@@ -1305,6 +1483,7 @@ def _generate_positive_success_test(
 
     content = (
         f"{imports_block}"
+        f"{required_fields_resolution.helpers_block}"
         f"def {function_name}(api_context):\n"
         '    """\n'
         f"    Request: {safe_request_name}\n"
@@ -1317,6 +1496,7 @@ def _generate_positive_success_test(
         f"{status_resolution.docstring_note}"
         f"{content_type_resolution.docstring_note}"
         f"{response_body_resolution.docstring_note}"
+        f"{required_fields_resolution.docstring_note}"
         '    """\n'
         "\n"
         f"{preamble}"
@@ -1325,6 +1505,7 @@ def _generate_positive_success_test(
         f"{status_resolution.assertion_line}"
         f"{''.join(content_type_resolution.lines)}"
         f"{''.join(response_body_resolution.lines)}"
+        f"{''.join(required_fields_resolution.lines)}"
     )
 
     warnings = header_resolution.warnings
