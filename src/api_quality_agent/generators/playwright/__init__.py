@@ -31,6 +31,10 @@ from api_quality_agent.generators.playwright.playwright_generation_warning impor
 from api_quality_agent.generators.playwright.playwright_test_suite_builder import (
     PlaywrightTestSuiteBuilder,
 )
+from api_quality_agent.generators.playwright.scenario_quality_guard import (
+    GeneratedScenarioQualityError,
+    assert_no_false_positive_smells,
+)
 from api_quality_agent.generators.playwright.variable_resolver import (
     UnresolvedVariable,
     VariableResolutionSession,
@@ -89,6 +93,7 @@ __all__ = [
     "EndpointTestGenerator",
     "GeneratedEndpointTest",
     "GeneratedFile",
+    "GeneratedScenarioQualityError",
     "GeneratedTestSuite",
     "PlaceholderEndpointTestGenerator",
     "PlaywrightEndpointTestGenerator",
@@ -97,6 +102,7 @@ __all__ = [
     "ResolvedEndpointFileNames",
     "UnresolvedVariable",
     "VariableResolutionSession",
+    "assert_no_false_positive_smells",
     "derive_base_url",
     "endpoint_source_to_file_name",
     "endpoint_source_to_slug",

@@ -13,6 +13,9 @@ from api_quality_agent.generators.playwright.generated_test_suite import Generat
 from api_quality_agent.generators.playwright.playwright_generation_warning import (
     PlaywrightGenerationWarning,
 )
+from api_quality_agent.generators.playwright.scenario_quality_guard import (
+    assert_no_false_positive_smells,
+)
 from api_quality_agent.generators.playwright.warning_catalog import UNRESOLVED_VARIABLE
 
 _ENDPOINTS_DIR = "endpoints"
@@ -52,6 +55,14 @@ class DefaultPlaywrightTestSuiteBuilder:
         naming = resolve_endpoint_file_names(
             [endpoint_test.endpoint_source for endpoint_test in endpoint_tests]
         )
+
+        # Parte 25 — guarda de qualidade "antes da persistência": levanta
+        # imediatamente se algum conteúdo já gerado contiver um padrão
+        # proibido (falso positivo conhecido) — nunca chega a virar
+        # GeneratedFile. Uma violação aqui é sempre um bug do gerador, não
+        # algo recuperável silenciando o problema.
+        for endpoint_test in endpoint_tests:
+            assert_no_false_positive_smells(endpoint_test.content)
 
         endpoint_files = tuple(
             GeneratedFile(relative_path=f"{_ENDPOINTS_DIR}/{file_name}", content=endpoint_test.content)
