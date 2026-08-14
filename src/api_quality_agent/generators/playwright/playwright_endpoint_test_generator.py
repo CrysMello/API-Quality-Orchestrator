@@ -1646,6 +1646,161 @@ def _resolve_field_types_assertion(
     )
 
 
+# --- JSON Schema (Parte 21) ---------------------------------------------------
+
+# "JSON Schema é adicional, não substitutivo" — roda DEPOIS de status,
+# Content-Type, body, campos obrigatórios e tipos (Partes 16-20), nunca no
+# lugar deles; valida a MESMA evidência (AssertionType.SCHEMA) de forma
+# completa/estrutural, via a lib jsonschema de verdade (não uma
+# reimplementação própria) — nunca instalada como dependência do pacote
+# principal (a geração em si não a usa), só como dependência de
+# desenvolvimento (roda nos testes deste módulo) e, implicitamente, de
+# quem for executar a suíte Playwright gerada (mesmo princípio de
+# playwright/pytest, já exigidos por conftest.py sem serem dependência do
+# projeto que gera a suíte).
+JSON_SCHEMA_REF_NOT_SUPPORTED = "JSON_SCHEMA_REF_NOT_SUPPORTED"
+
+
+def _render_schema_literal(value: Any, base_indent: str) -> str:
+    # Deliberadamente independente de _render_json_literal (Parte 13/18):
+    # aquele resolve {{variável}} via a sessão do resolvedor central (Parte
+    # 15), o que nunca faz sentido para um JSON SCHEMA (estrutura/contrato,
+    # não um valor de request) — aqui todo valor é sempre um literal puro,
+    # nunca uma expressão.
+    if value is None:
+        return "None"
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return _python_string_literal(value)
+    if isinstance(value, list):
+        return _render_schema_literal_list(value, base_indent)
+    if isinstance(value, dict):
+        return _render_schema_literal_dict(value, base_indent)
+    return _python_string_literal(str(value))
+
+
+def _render_schema_literal_dict(value: dict[str, Any], base_indent: str) -> str:
+    if not value:
+        return "{}"
+    child_indent = base_indent + "    "
+    lines = [
+        f"{child_indent}{_python_string_literal(key)}: "
+        f"{_render_schema_literal(item, child_indent)},"
+        for key, item in value.items()
+    ]
+    return "{\n" + "\n".join(lines) + f"\n{base_indent}}}"
+
+
+def _render_schema_literal_list(value: list[Any], base_indent: str) -> str:
+    if not value:
+        return "[]"
+    child_indent = base_indent + "    "
+    lines = [f"{child_indent}{_render_schema_literal(item, child_indent)}," for item in value]
+    return "[\n" + "\n".join(lines) + f"\n{base_indent}]"
+
+
+def _find_unsupported_schema_refs(schema: Any) -> list[str]:
+    # "$ref somente dentro do escopo efetivamente suportado": uma referência
+    # LOCAL (começa com "#", ex.: "#/$defs/User") nunca sai do próprio
+    # documento — a resolução embutida do jsonschema já lida com isso sem
+    # tocar rede. Qualquer outra coisa (URL absoluta, caminho de arquivo)
+    # nunca é buscada automaticamente (regra 7) — só reportada.
+    found: list[str] = []
+    _walk_schema_refs(schema, found)
+    return found
+
+
+def _walk_schema_refs(node: Any, found: list[str]) -> None:
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str) and not ref.startswith("#"):
+            found.append(ref)
+        for value in node.values():
+            _walk_schema_refs(value, found)
+    elif isinstance(node, list):
+        for item in node:
+            _walk_schema_refs(item, found)
+
+
+@dataclass(frozen=True)
+class _JsonSchemaResolution:
+    lines: tuple[str, ...]
+    docstring_note: str
+    warning: PlaywrightGenerationWarning | None
+    extra_imports: frozenset[str]
+
+
+def _resolve_json_schema_assertion(
+    strategy: TestStrategy, response_body_resolution: _BodyJsonResolution
+) -> _JsonSchemaResolution:
+    # Mesmo pré-requisito das Partes 19/20: só existe `body` para validar
+    # quando a Parte 18 já provou (por evidência) que a resposta é JSON.
+    empty = _JsonSchemaResolution(
+        lines=(), docstring_note="", warning=None, extra_imports=frozenset()
+    )
+    if not response_body_resolution.lines:
+        return empty
+
+    schema_assertion = _find_schema_assertion(strategy)
+    if schema_assertion is None or not isinstance(schema_assertion.expected_value, dict):
+        return empty
+    schema = schema_assertion.expected_value
+
+    unsupported_refs = _find_unsupported_schema_refs(schema)
+    if unsupported_refs:
+        # "Não baixar conteúdo remoto automaticamente": a validação inteira
+        # é pulada (nunca uma validação parcial que finja ter checado tudo)
+        # e o motivo fica registrado tanto no warning quanto na docstring.
+        refs_label = ", ".join(sorted(set(unsupported_refs)))
+        warning = PlaywrightGenerationWarning(
+            code=JSON_SCHEMA_REF_NOT_SUPPORTED,
+            message=(
+                "Schema contém referência(s) $ref fora do escopo suportado (não local ao "
+                f"documento): {refs_label}. Validação por JSON Schema não foi gerada — nunca "
+                "baixamos conteúdo remoto automaticamente."
+            ),
+            endpoint=strategy.endpoint_source,
+            scenario="success",
+        )
+        docstring_note = (
+            "    JSON Schema: não validado — referência(s) $ref não suportada(s) "
+            "(ver warning JSON_SCHEMA_REF_NOT_SUPPORTED)\n"
+        )
+        return _JsonSchemaResolution(
+            lines=(), docstring_note=docstring_note, warning=warning, extra_imports=frozenset()
+        )
+
+    schema_literal = _render_schema_literal(schema, "    ")
+    lines = (
+        f"    _response_json_schema = {schema_literal}\n",
+        "    try:\n",
+        "        jsonschema.validate(instance=body, schema=_response_json_schema)\n",
+        "    except jsonschema.exceptions.ValidationError as error:\n",
+        "        pytest.fail(\n",
+        # Caminho, keyword, valor esperado e mensagem do validator (regra
+        # 5) — nunca só "schema inválido" genérico. error.path é um
+        # deque de chaves/índices; join com "." só depois de garantir que
+        # cada elemento vira string (índice de array vem como int).
+        '            "Body não corresponde ao JSON Schema esperado — "\n',
+        '            + "caminho: " + ".".join(str(part) for part in error.path)\n',
+        '            + "; keyword: " + str(error.validator)\n',
+        '            + "; esperado: " + repr(error.validator_value)\n',
+        '            + "; mensagem: " + error.message\n',
+        "        )\n",
+    )
+    docstring_note = f"    JSON Schema: validado (origem: {schema_assertion.origin})\n"
+
+    return _JsonSchemaResolution(
+        lines=lines,
+        docstring_note=docstring_note,
+        warning=None,
+        extra_imports=frozenset({"jsonschema"}),
+    )
+
+
 def _generate_positive_success_test(
     strategy: TestStrategy,
     request: NormalizedRequest,
@@ -1659,6 +1814,7 @@ def _generate_positive_success_test(
     response_body_resolution = _resolve_body_json_assertion(strategy, content_type_resolution)
     required_fields_resolution = _resolve_required_fields_assertion(strategy, response_body_resolution)
     field_types_resolution = _resolve_field_types_assertion(strategy, response_body_resolution)
+    json_schema_resolution = _resolve_json_schema_assertion(strategy, response_body_resolution)
 
     # Já sabido "supported" (gate em _unsupported_reason); recomputado aqui
     # (puro, sem efeito colateral) com uma sessão NOVA — mesmo padrão já
@@ -1704,7 +1860,11 @@ def _generate_positive_success_test(
     else:
         body_origin_note = "sem body"
 
-    all_imports = session.extra_imports | response_body_resolution.extra_imports
+    all_imports = (
+        session.extra_imports
+        | response_body_resolution.extra_imports
+        | json_schema_resolution.extra_imports
+    )
     imports_block = "".join(f"import {name}\n" for name in sorted(all_imports))
     if imports_block:
         imports_block += "\n\n"
@@ -1747,6 +1907,7 @@ def _generate_positive_success_test(
         f"{response_body_resolution.docstring_note}"
         f"{required_fields_resolution.docstring_note}"
         f"{field_types_resolution.docstring_note}"
+        f"{json_schema_resolution.docstring_note}"
         '    """\n'
         "\n"
         f"{preamble}"
@@ -1757,6 +1918,7 @@ def _generate_positive_success_test(
         f"{''.join(response_body_resolution.lines)}"
         f"{''.join(required_fields_resolution.lines)}"
         f"{''.join(field_types_resolution.lines)}"
+        f"{''.join(json_schema_resolution.lines)}"
     )
 
     warnings = header_resolution.warnings
@@ -1764,6 +1926,8 @@ def _generate_positive_success_test(
         warnings = warnings + (status_resolution.warning,)
     if response_body_resolution.warning is not None:
         warnings = warnings + (response_body_resolution.warning,)
+    if json_schema_resolution.warning is not None:
+        warnings = warnings + (json_schema_resolution.warning,)
 
     return GeneratedEndpointTest(
         endpoint_source=strategy.endpoint_source,
