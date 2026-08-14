@@ -7,7 +7,6 @@ from api_quality_agent.generators.playwright.default_playwright_test_suite_build
     DefaultPlaywrightTestSuiteBuilder,
 )
 from api_quality_agent.generators.playwright.endpoint_file_naming import (
-    FILE_NAME_COLLISION_RESOLVED,
     ResolvedEndpointFileNames,
     endpoint_source_to_file_name,
     endpoint_source_to_slug,
@@ -24,20 +23,6 @@ from api_quality_agent.generators.playwright.placeholder_endpoint_test_generator
     PlaceholderEndpointTestGenerator,
 )
 from api_quality_agent.generators.playwright.playwright_endpoint_test_generator import (
-    AUTHENTICATION_NOT_SUPPORTED,
-    AUTHENTICATION_VALUE_NOT_RESOLVED,
-    BODY_JSON_INVALID,
-    BODY_NOT_SUPPORTED,
-    BODY_STRUCTURE_NOT_DETERMINED,
-    BROAD_STATUS_ASSERTION,
-    DUPLICATE_HEADER_IGNORED,
-    ENDPOINT_NOT_SUPPORTED_YET,
-    EXPECTED_STATUS_NOT_DEFINED,
-    HEADER_VALUE_NOT_RESOLVED,
-    JSON_SCHEMA_REF_NOT_SUPPORTED,
-    MULTIPART_FILE_NOT_RESOLVED,
-    RESERVED_HEADER_OMITTED,
-    SENSITIVE_HEADER_OMITTED,
     PlaywrightEndpointTestGenerator,
 )
 from api_quality_agent.generators.playwright.playwright_generation_warning import (
@@ -47,12 +32,36 @@ from api_quality_agent.generators.playwright.playwright_test_suite_builder impor
     PlaywrightTestSuiteBuilder,
 )
 from api_quality_agent.generators.playwright.variable_resolver import (
-    UNRESOLVED_VARIABLE,
     UnresolvedVariable,
     VariableResolutionSession,
 )
+from api_quality_agent.generators.playwright.warning_catalog import (
+    ASSERTION_NOT_GENERATED,
+    AUTHENTICATION_NOT_SUPPORTED,
+    AUTHENTICATION_VALUE_NOT_RESOLVED,
+    BODY_JSON_INVALID,
+    BODY_NOT_SUPPORTED,
+    BODY_STRUCTURE_NOT_DETERMINED,
+    BROAD_STATUS_ASSERTION,
+    DUPLICATE_HEADER_IGNORED,
+    ENDPOINT_NOT_SUPPORTED_YET,
+    EXPECTED_STATUS_NOT_DEFINED,
+    FILE_NAME_COLLISION_RESOLVED,
+    HEADER_VALUE_NOT_RESOLVED,
+    HTTP_METHOD_NOT_SUPPORTED,
+    INFORMATION_INSUFFICIENT,
+    JSON_SCHEMA_REF_NOT_SUPPORTED,
+    MULTIPART_FILE_NOT_RESOLVED,
+    PLAYWRIGHT_WARNING_CODE_DESCRIPTIONS,
+    PLAYWRIGHT_WARNING_CODES,
+    RESERVED_HEADER_OMITTED,
+    SENSITIVE_HEADER_OMITTED,
+    UNRESOLVED_VARIABLE,
+    URL_NOT_RESOLVED,
+)
 
 __all__ = [
+    "ASSERTION_NOT_GENERATED",
     "AUTHENTICATION_NOT_SUPPORTED",
     "AUTHENTICATION_VALUE_NOT_RESOLVED",
     "BODY_JSON_INVALID",
@@ -62,12 +71,18 @@ __all__ = [
     "DUPLICATE_HEADER_IGNORED",
     "ENDPOINT_NOT_SUPPORTED_YET",
     "EXPECTED_STATUS_NOT_DEFINED",
+    "FILE_NAME_COLLISION_RESOLVED",
     "HEADER_VALUE_NOT_RESOLVED",
+    "HTTP_METHOD_NOT_SUPPORTED",
+    "INFORMATION_INSUFFICIENT",
     "JSON_SCHEMA_REF_NOT_SUPPORTED",
     "MULTIPART_FILE_NOT_RESOLVED",
+    "PLAYWRIGHT_WARNING_CODES",
+    "PLAYWRIGHT_WARNING_CODE_DESCRIPTIONS",
     "RESERVED_HEADER_OMITTED",
     "SENSITIVE_HEADER_OMITTED",
     "UNRESOLVED_VARIABLE",
+    "URL_NOT_RESOLVED",
     "AssertionClassification",
     "AssertionPrecision",
     "DefaultPlaywrightTestSuiteBuilder",

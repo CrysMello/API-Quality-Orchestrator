@@ -2,6 +2,7 @@ import json
 from collections.abc import Sequence
 
 from api_quality_agent.domain.models import ExecutionContext
+from api_quality_agent.generators.playwright.assertion_precision import AssertionPrecision
 from api_quality_agent.generators.playwright.endpoint_file_naming import (
     ResolvedEndpointFileNames,
     resolve_endpoint_file_names,
@@ -12,7 +13,7 @@ from api_quality_agent.generators.playwright.generated_test_suite import Generat
 from api_quality_agent.generators.playwright.playwright_generation_warning import (
     PlaywrightGenerationWarning,
 )
-from api_quality_agent.generators.playwright.variable_resolver import UNRESOLVED_VARIABLE
+from api_quality_agent.generators.playwright.warning_catalog import UNRESOLVED_VARIABLE
 
 _ENDPOINTS_DIR = "endpoints"
 _CONFTEST_FILE_NAME = "conftest.py"
@@ -24,9 +25,11 @@ _MANIFEST_FILE_NAME = "generation-manifest.json"
 # e do teste de caracterização que trava esse valor
 # (tests/characterization/test_execution_result_schema.py). Ver
 # tests/unit/test_playwright_manifest_schema.py para o equivalente aqui.
-# 1.1 (Parte 23): acrescenta "assertion_classifications" — nunca remove
-# nem renomeia uma chave existente.
-_MANIFEST_SCHEMA_VERSION = "1.1"
+# 1.1 (Parte 23): acrescenta "assertion_classifications".
+# 1.2 (Parte 24): warnings "de código" ganham method/location/metadata,
+# deduplicados; endpoints ganham "coverage" (complete/partial/not_generated)
+# — nunca remove nem renomeia uma chave existente.
+_MANIFEST_SCHEMA_VERSION = "1.2"
 
 # Pode ser sobrescrito em tempo de execução sem regenerar a suíte (ex.:
 # apontar para staging/produção em CI) — nunca uma credencial, só a URL
@@ -135,6 +138,30 @@ def _endpoint_method_and_path(endpoint_source: str) -> tuple[str, str]:
     return method, path
 
 
+def _endpoint_coverage(endpoint_test: GeneratedEndpointTest) -> str:
+    # Regra 4 da Parte 24: "warning deve permitir diferenciar cenário
+    # completo; parcial; não gerado" — reaproveita sinais já existentes,
+    # nunca uma heurística nova sobre o texto do conteúdo:
+    # - "not_generated": scenario_names vazio, mesmo critério de "rendered"
+    #   abaixo (endpoint caiu no PlaceholderEndpointTestGenerator).
+    # - "partial": cenário renderizado, mas com pelo menos um warning
+    #   registrado (header omitido, correlação não confirmável etc.), uma
+    #   variável sem resolução, ou uma classificação BROAD (regra 3 da
+    #   Parte 23: BROAD nunca conta como "completo").
+    # - "complete": renderizado, sem warnings/variáveis pendentes, todas as
+    #   classificações EXACT/DERIVED.
+    if not endpoint_test.scenario_names:
+        return "not_generated"
+    if endpoint_test.warnings or endpoint_test.unresolved_variables:
+        return "partial"
+    if any(
+        classification.precision is AssertionPrecision.BROAD
+        for classification in endpoint_test.assertion_classifications
+    ):
+        return "partial"
+    return "complete"
+
+
 def _endpoint_entries(
     endpoint_tests: Sequence[GeneratedEndpointTest], naming: ResolvedEndpointFileNames
 ) -> list[dict[str, object]]:
@@ -156,6 +183,7 @@ def _endpoint_entries(
                 # (fallback) — mesmo sinal já usado internamente pelo gerador,
                 # nunca uma heurística nova sobre o texto do conteúdo.
                 "rendered": bool(endpoint_test.scenario_names),
+                "coverage": _endpoint_coverage(endpoint_test),
             }
         )
     return entries
@@ -180,32 +208,61 @@ def _resolved_variables(endpoint_tests: Sequence[GeneratedEndpointTest]) -> dict
     return merged
 
 
+def _code_warning_entry(warning: PlaywrightGenerationWarning) -> dict[str, object]:
+    # Parte 24 — forma padronizada de um warning "de código": code, message,
+    # endpoint, method, scenario, location e metadata (regra "padronizar
+    # warnings com"). method é derivado automaticamente pelo próprio
+    # PlaywrightGenerationWarning (__post_init__) quando não informado
+    # explicitamente — nunca recalculado aqui.
+    return {
+        "code": warning.code,
+        "endpoint": warning.endpoint,
+        "method": warning.method,
+        "scenario": warning.scenario,
+        "location": warning.location,
+        "message": warning.message,
+        "metadata": dict(warning.metadata),
+    }
+
+
+def _entry_dedupe_key(entry: dict[str, object]) -> tuple[object, ...]:
+    # Regra 2 da Parte 24: "mesmo problema não deve ser duplicado
+    # desnecessariamente" — chave estável e hasháveis por valor (metadata é
+    # um dict, normalizado para tupla ordenada) para comparar entradas por
+    # CONTEÚDO, não por identidade do objeto.
+    def normalize(value: object) -> object:
+        if isinstance(value, dict):
+            return tuple(sorted(value.items()))
+        return value
+
+    return tuple((key, normalize(value)) for key, value in sorted(entry.items()))
+
+
+def _dedupe_entries(entries: list[dict[str, object]]) -> list[dict[str, object]]:
+    seen: set[tuple[object, ...]] = set()
+    deduped: list[dict[str, object]] = []
+    for entry in entries:
+        key = _entry_dedupe_key(entry)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+    return deduped
+
+
 def _warning_entries(
     endpoint_tests: Sequence[GeneratedEndpointTest],
     naming_warnings: Sequence[PlaywrightGenerationWarning],
 ) -> list[dict[str, object]]:
-    entries: list[dict[str, object]] = [
-        {
-            "code": warning.code,
-            "endpoint": warning.endpoint,
-            "scenario": warning.scenario,
-            "message": warning.message,
-        }
-        for warning in naming_warnings
-    ]
+    entries: list[dict[str, object]] = [_code_warning_entry(warning) for warning in naming_warnings]
     for endpoint_test in endpoint_tests:
         for warning in endpoint_test.warnings:
-            entries.append(
-                {
-                    "code": warning.code,
-                    "endpoint": warning.endpoint,
-                    "scenario": warning.scenario,
-                    "message": warning.message,
-                }
-            )
+            entries.append(_code_warning_entry(warning))
         for unresolved in endpoint_test.unresolved_variables:
             # Formato do warning obrigatório da Parte 15 (variable/location
-            # em vez de message/scenario) — ver exemplo no plano de ação.
+            # em vez de message/scenario) — ver exemplo no plano de ação;
+            # forma própria, distinta do warning "de código" acima (nunca as
+            # duas juntas na mesma entrada).
             entries.append(
                 {
                     "code": UNRESOLVED_VARIABLE,
@@ -214,7 +271,7 @@ def _warning_entries(
                     "location": unresolved.location,
                 }
             )
-    return entries
+    return _dedupe_entries(entries)
 
 
 def _assertion_classifications_section(

@@ -9,7 +9,7 @@ import json
 from api_quality_agent.domain.models import AssertionDefinition, AssertionType, TestStrategy
 from api_quality_agent.domain.services import ApiAnalysisEngine
 from api_quality_agent.generators.playwright import (
-    ENDPOINT_NOT_SUPPORTED_YET,
+    HTTP_METHOD_NOT_SUPPORTED,
     PlaywrightEndpointTestGenerator,
 )
 from api_quality_agent.parsers import PostmanCollectionParser
@@ -152,8 +152,12 @@ def test_unsupported_method_falls_back_to_placeholder_with_warning():
     assert "response = api_context" not in generated.content
     assert len(generated.warnings) == 1
     warning = generated.warnings[0]
-    assert warning.code == ENDPOINT_NOT_SUPPORTED_YET
+    # Parte 24: código específico (nunca mais o genérico ENDPOINT_NOT_
+    # SUPPORTED_YET) para o motivo exato do fallback.
+    assert warning.code == HTTP_METHOD_NOT_SUPPORTED
     assert warning.endpoint == "DELETE /users/1"
+    assert warning.method == "DELETE"
+    assert warning.location == "method"
     assert "método DELETE" in warning.message
 
 

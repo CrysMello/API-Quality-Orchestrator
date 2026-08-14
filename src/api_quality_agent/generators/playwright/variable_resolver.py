@@ -29,8 +29,7 @@ from dataclasses import dataclass, field
 
 from api_quality_agent.domain.models import PostmanEnvironment
 from api_quality_agent.generators.playwright.endpoint_file_naming import to_snake_case
-
-UNRESOLVED_VARIABLE = "UNRESOLVED_VARIABLE"
+from api_quality_agent.generators.playwright.warning_catalog import UNRESOLVED_VARIABLE
 
 _ENV_VAR_PREFIX = "AQO_"
 _UPLOAD_ENV_VAR_INFIX = "UPLOAD_"

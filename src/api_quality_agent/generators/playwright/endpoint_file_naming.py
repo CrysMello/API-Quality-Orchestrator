@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from api_quality_agent.generators.playwright.playwright_generation_warning import (
     PlaywrightGenerationWarning,
 )
+from api_quality_agent.generators.playwright.warning_catalog import FILE_NAME_COLLISION_RESOLVED
 from api_quality_agent.shared import sanitize_filename_component
 
 # Um parâmetro de path pode vir como :nome (Postman) ou {nome}/{{nome}}
@@ -25,8 +26,6 @@ _INVALID_SEGMENT_CHARS = re.compile(r"[^a-z0-9_]+")
 _MAX_ENDPOINT_SLUG_LENGTH = 40
 _ENDPOINT_SLUG_HASH_LENGTH = 8
 _FALLBACK_SLUG = "endpoint"
-
-FILE_NAME_COLLISION_RESOLVED = "FILE_NAME_COLLISION_RESOLVED"
 
 
 def to_snake_case(name: str) -> str:
@@ -148,6 +147,7 @@ def resolve_endpoint_file_names(
                 ),
                 endpoint=endpoint_source,
                 scenario=None,
+                metadata=(("base_name", base_name), ("resolved_name", resolved_name)),
             )
         )
 

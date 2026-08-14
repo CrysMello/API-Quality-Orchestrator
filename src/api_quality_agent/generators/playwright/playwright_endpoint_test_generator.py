@@ -44,6 +44,25 @@ from api_quality_agent.generators.playwright.variable_resolver import (
     multipart_file_env_var,
     sanitize_identifier,
 )
+from api_quality_agent.generators.playwright.warning_catalog import (
+    ASSERTION_NOT_GENERATED,
+    AUTHENTICATION_NOT_SUPPORTED,
+    AUTHENTICATION_VALUE_NOT_RESOLVED,
+    BODY_JSON_INVALID,
+    BODY_NOT_SUPPORTED,
+    BODY_STRUCTURE_NOT_DETERMINED,
+    BROAD_STATUS_ASSERTION,
+    DUPLICATE_HEADER_IGNORED,
+    EXPECTED_STATUS_NOT_DEFINED,
+    HEADER_VALUE_NOT_RESOLVED,
+    HTTP_METHOD_NOT_SUPPORTED,
+    INFORMATION_INSUFFICIENT,
+    JSON_SCHEMA_REF_NOT_SUPPORTED,
+    MULTIPART_FILE_NOT_RESOLVED,
+    RESERVED_HEADER_OMITTED,
+    SENSITIVE_HEADER_OMITTED,
+    URL_NOT_RESOLVED,
+)
 
 _NO_AUTH_TYPES = (AuthType.NONE, AuthType.INHERIT, AuthType.UNKNOWN)
 # Conversão conservadora de string -> tipo Python: só quando o round-trip
@@ -52,8 +71,6 @@ _NO_AUTH_TYPES = (AuthType.NONE, AuthType.INHERIT, AuthType.UNKNOWN)
 # valor, só troca a representação do mesmo dado já presente no request.
 _INTEGER_PATTERN = re.compile(r"^-?\d+$")
 _BOOLEAN_LITERALS = {"true": True, "false": False}
-
-ENDPOINT_NOT_SUPPORTED_YET = "ENDPOINT_NOT_SUPPORTED_YET"
 
 # Nomes reservados (case-insensitive): nunca renderizados como header
 # genérico, mesmo quando presentes e habilitados no NormalizedRequest.
@@ -65,11 +82,6 @@ ENDPOINT_NOT_SUPPORTED_YET = "ENDPOINT_NOT_SUPPORTED_YET"
 #   aqui) — evita duas fontes divergentes escrevendo o mesmo header.
 _RESERVED_HEADER_NAMES = frozenset({"authorization", "content-type"})
 
-HEADER_VALUE_NOT_RESOLVED = "HEADER_VALUE_NOT_RESOLVED"
-SENSITIVE_HEADER_OMITTED = "SENSITIVE_HEADER_OMITTED"
-RESERVED_HEADER_OMITTED = "RESERVED_HEADER_OMITTED"
-DUPLICATE_HEADER_IGNORED = "DUPLICATE_HEADER_IGNORED"
-
 # Parte 12 — autenticação suportada: Bearer Token, API Key (header ou
 # query) e Basic Auth, só quando o(s) valor(es) relevante(s) forem uma
 # referência pura a uma variável Postman ({{nome}}, nada mais na string) —
@@ -77,8 +89,6 @@ DUPLICATE_HEADER_IGNORED = "DUPLICATE_HEADER_IGNORED"
 # resolução do NOME em si (literal do Environment/Collection vs variável de
 # ambiente do sistema) passa pelo resolvedor central — ver
 # variable_resolver.py.
-AUTHENTICATION_NOT_SUPPORTED = "AUTHENTICATION_NOT_SUPPORTED"
-AUTHENTICATION_VALUE_NOT_RESOLVED = "AUTHENTICATION_VALUE_NOT_RESOLVED"
 
 # Parte 13 — método passa a incluir POST (além de GET), principalmente
 # para poder carregar um body JSON. PUT/PATCH/DELETE continuam fora do
@@ -91,16 +101,15 @@ _SUPPORTED_METHODS = frozenset({"GET", "POST"})
 # sem Content-Type de JSON cai no fallback do endpoint inteiro — não dá pra
 # montar uma requisição de verdade sem saber representar o corpo que ela
 # deveria carregar.
-BODY_NOT_SUPPORTED = "BODY_NOT_SUPPORTED"
+#
 # JSON declarado (RAW + Content-Type de JSON) mas o texto não é um JSON
 # válido — nunca tentamos corrigir automaticamente; o endpoint inteiro
 # cai no fallback em vez de gerar um payload aparentemente correto.
-BODY_JSON_INVALID = "BODY_JSON_INVALID"
+#
 # Multipart/form-data (Parte 14): um campo de arquivo sem "key" não tem
 # como virar uma variável de ambiente estável (AQO_UPLOAD_<NOME>) — o
 # endpoint inteiro cai no fallback, nunca um nome de campo "adivinhado".
-MULTIPART_FILE_NOT_RESOLVED = "MULTIPART_FILE_NOT_RESOLVED"
-
+#
 # Parte 16 — status HTTP: nunca inventa 200/201/qualquer código. Só gera
 # `assert response.status == N` quando strategy.assertions já tem uma
 # AssertionDefinition(STATUS_CODE) — a mesma TestStrategyEngine reaproveitada
@@ -110,8 +119,7 @@ MULTIPART_FILE_NOT_RESOLVED = "MULTIPART_FILE_NOT_RESOLVED"
 # (postman_test_generator._translate_strategy_warnings) para o StrategyWarning
 # "STATUS_CODE_AMBIGUOUS" — vocabulário de warning consistente entre os dois
 # geradores.
-EXPECTED_STATUS_NOT_DEFINED = "EXPECTED_STATUS_NOT_DEFINED"
-
+#
 # Parte 18 — body JSON: parseado (uma única vez, guardado em `body`) só
 # quando há evidência de que a resposta É JSON (Content-Type compatível
 # e/ou AssertionType.VALID_JSON_BODY) — nunca "qualquer JSON é considerado
@@ -119,8 +127,7 @@ EXPECTED_STATUS_NOT_DEFINED = "EXPECTED_STATUS_NOT_DEFINED"
 # dizer o tipo do nível superior (dict/list/escalar/null), o parse ainda
 # acontece (prova que é JSON bem formado), mas nenhum isinstance é gerado —
 # e este warning registra que a estrutura não pôde ser validada.
-BODY_STRUCTURE_NOT_DETERMINED = "BODY_STRUCTURE_NOT_DETERMINED"
-
+#
 # Parte 23 — classificação EXACT/DERIVED/BROAD (AssertionPrecision, já
 # existente desde a Parte 03): o nome literalmente previsto desde então
 # (ver os fixtures de teste de Parte 03 em test_playwright_generation_
@@ -130,7 +137,11 @@ BODY_STRUCTURE_NOT_DETERMINED = "BODY_STRUCTURE_NOT_DETERMINED"
 # EXPECTED_STATUS_NOT_DEFINED (que explica a ausência de evidência), nunca
 # no lugar dele: um explica o "por quê", o outro classifica o "o quê" foi
 # gerado no lugar.
-BROAD_STATUS_ASSERTION = "BROAD_STATUS_ASSERTION"
+#
+# Parte 24 — todos os códigos acima (e os novos HTTP_METHOD_NOT_SUPPORTED/
+# URL_NOT_RESOLVED/ASSERTION_NOT_GENERATED/INFORMATION_INSUFFICIENT) agora
+# vêm de warning_catalog (catálogo estruturado e estável, única fonte de
+# verdade) em vez de serem redefinidos aqui — ver import acima.
 
 
 def _media_type_only(content_type: str) -> str:
@@ -207,6 +218,10 @@ def _broad(assertion: str, *, source: str, justification: str) -> AssertionClass
 class _UnsupportedReason:
     code: str
     message: str
+    # Mesmo vocabulário de UnresolvedVariable.location (Parte 24): "method",
+    # "body", "auth", "url" ou "query" — onde no request o motivo do
+    # fallback está.
+    location: str
 
 
 def _unsupported_reason(
@@ -231,8 +246,9 @@ def _unsupported_reason(
     if method not in _SUPPORTED_METHODS:
         return (
             _UnsupportedReason(
-                ENDPOINT_NOT_SUPPORTED_YET,
+                HTTP_METHOD_NOT_SUPPORTED,
                 f"método {request.method or 'desconhecido'} ainda não suportado",
+                location="method",
             ),
             session,
         )
@@ -246,17 +262,22 @@ def _unsupported_reason(
         assert auth_resolution.reason_code is not None  # garantido por _unsupported_auth
         assert auth_resolution.reason_message is not None
         return (
-            _UnsupportedReason(auth_resolution.reason_code, auth_resolution.reason_message),
+            _UnsupportedReason(
+                auth_resolution.reason_code, auth_resolution.reason_message, location="auth"
+            ),
             session,
         )
 
+    # url_reason e query_reason cobrem, juntos, "URL" no sentido amplo (host,
+    # path e query string) — mesmo código URL_NOT_RESOLVED para os dois,
+    # location diferencia qual parte especificamente (Parte 24).
     url_reason = _unsupported_url_reason(request.url, session)
     if url_reason is not None:
-        return _UnsupportedReason(ENDPOINT_NOT_SUPPORTED_YET, url_reason), session
+        return _UnsupportedReason(URL_NOT_RESOLVED, url_reason, location="url"), session
 
     query_reason = _unsupported_query_reason(request.url.query_parameters, session)
     if query_reason is not None:
-        return _UnsupportedReason(ENDPOINT_NOT_SUPPORTED_YET, query_reason), session
+        return _UnsupportedReason(URL_NOT_RESOLVED, query_reason, location="query"), session
 
     return None, session
 
@@ -279,6 +300,7 @@ def _unsupported_body_reason(body: NormalizedBody) -> _UnsupportedReason | None:
         return _UnsupportedReason(
             BODY_NOT_SUPPORTED,
             "body não declarado como JSON (modo ou Content-Type) ainda não suportado",
+            location="body",
         )
 
     try:
@@ -287,7 +309,9 @@ def _unsupported_body_reason(body: NormalizedBody) -> _UnsupportedReason | None:
         # Nunca tenta corrigir automaticamente — só registra que não deu
         # para confiar no conteúdo declarado como JSON.
         return _UnsupportedReason(
-            BODY_JSON_INVALID, "body declarado como JSON mas o conteúdo não é um JSON válido"
+            BODY_JSON_INVALID,
+            "body declarado como JSON mas o conteúdo não é um JSON válido",
+            location="body",
         )
 
     return None
@@ -305,6 +329,7 @@ def _unsupported_multipart_reason(body: NormalizedBody) -> _UnsupportedReason | 
                 MULTIPART_FILE_NOT_RESOLVED,
                 "campo de arquivo sem nome (key) não pode ser referenciado por variável de "
                 "ambiente",
+                location="body",
             )
     return None
 
@@ -597,6 +622,10 @@ def _header_warning(
         message=f"Header '{safe_key}' omitido: {reason}.",
         endpoint=endpoint_source,
         scenario=None,
+        location="header",
+        # Nunca o VALOR do header aqui, mesmo critério da mensagem acima
+        # (regra 6) — só o nome, já seguro por construção.
+        metadata=(("header", safe_key),),
     )
 
 
@@ -1027,6 +1056,7 @@ class PlaywrightEndpointTestGenerator:
             message=f"Geração real ainda não suportada para este endpoint: {reason.message}.",
             endpoint=strategy.endpoint_source,
             scenario=None,
+            location=reason.location,
         )
         # Variáveis que ficaram sem resolução mesmo num endpoint que caiu
         # no fallback (Parte 15) — ex.: "GET /users/{id}" sem default de
@@ -1127,6 +1157,7 @@ def _resolve_status_assertion(strategy: TestStrategy) -> _StatusAssertionResolut
                 ),
                 endpoint=strategy.endpoint_source,
                 scenario="success",
+                location="status",
             ),
             PlaywrightGenerationWarning(
                 code=BROAD_STATUS_ASSERTION,
@@ -1136,6 +1167,7 @@ def _resolve_status_assertion(strategy: TestStrategy) -> _StatusAssertionResolut
                 ),
                 endpoint=strategy.endpoint_source,
                 scenario="success",
+                location="status",
             ),
         ),
         classification=classification,
@@ -1341,6 +1373,7 @@ def _resolve_body_json_assertion(
             ),
             endpoint=strategy.endpoint_source,
             scenario="success",
+            location="body",
         )
         # BROAD: só prova que o body é JSON bem formado, sem saber a
         # estrutura — BODY_STRUCTURE_NOT_DETERMINED (acima) já é o "warning
@@ -1686,7 +1719,7 @@ class _ArrayItemTypeCheck:
 
 def _collect_field_types(
     schema: Any, *, prefix: tuple[str, ...] = ()
-) -> tuple[list[_FieldTypeCheck], list[_ArrayItemTypeCheck]]:
+) -> tuple[list[_FieldTypeCheck], list[_ArrayItemTypeCheck], list[tuple[str, ...]]]:
     # "Não inferir tipo de negócio a partir de um único exemplo sem
     # classificação de evidência": só lê "type"/"nullable" já declarados no
     # schema resolvido (AssertionType.SCHEMA) — nunca deriva um tipo daqui
@@ -1694,28 +1727,39 @@ def _collect_field_types(
     # schema documenta type=object, mesmo critério da Parte 19.
     field_checks: list[_FieldTypeCheck] = []
     array_checks: list[_ArrayItemTypeCheck] = []
+    # Parte 24: campos com "type" DECLARADO mas ambíguo (lista com 2+ tipos
+    # não-null) ou de um formato não reconhecido — distinto de um campo que
+    # simplesmente não declara "type" (caso normal, nunca reportado aqui):
+    # aqui HÁ evidência, só não é suficiente para gerar a checagem sem
+    # arbitrariedade (ver _normalize_field_type) — vira ASSERTION_NOT_
+    # GENERATED em _resolve_field_types_assertion.
+    ambiguous_paths: list[tuple[str, ...]] = []
 
     if not isinstance(schema, dict) or schema.get("type") != "object":
-        return field_checks, array_checks
+        return field_checks, array_checks, ambiguous_paths
 
     properties = schema.get("properties")
     if not isinstance(properties, dict):
-        return field_checks, array_checks
+        return field_checks, array_checks, ambiguous_paths
 
     for field_name, field_schema in properties.items():
         if not isinstance(field_name, str) or not isinstance(field_schema, dict):
             continue
         path = (*prefix, field_name)
-        json_type, nullable = _normalize_field_type(
-            field_schema.get("type"), field_schema.get("nullable")
-        )
+        raw_type = field_schema.get("type")
+        json_type, nullable = _normalize_field_type(raw_type, field_schema.get("nullable"))
         if json_type is not None:
             field_checks.append(_FieldTypeCheck(path=path, json_type=json_type, nullable=nullable))
+        elif raw_type is not None:
+            ambiguous_paths.append(path)
 
         if json_type == "object":
-            nested_fields, nested_arrays = _collect_field_types(field_schema, prefix=path)
+            nested_fields, nested_arrays, nested_ambiguous = _collect_field_types(
+                field_schema, prefix=path
+            )
             field_checks.extend(nested_fields)
             array_checks.extend(nested_arrays)
+            ambiguous_paths.extend(nested_ambiguous)
         elif json_type == "array":
             items_schema = field_schema.get("items")
             if isinstance(items_schema, dict) and items_schema.get("type") == "object":
@@ -1735,7 +1779,7 @@ def _collect_field_types(
                         _ArrayItemTypeCheck(array_path=path, item_fields=tuple(item_fields))
                     )
 
-    return field_checks, array_checks
+    return field_checks, array_checks, ambiguous_paths
 
 
 def _render_array_item_type_check_lines(array_check: _ArrayItemTypeCheck) -> tuple[str, ...]:
@@ -1762,6 +1806,28 @@ class _FieldTypesResolution:
     lines: tuple[str, ...]
     docstring_note: str
     classification: AssertionClassification | None = None
+    # Parte 24: ASSERTION_NOT_GENERATED por campo com "type" ambíguo — pode
+    # existir mesmo quando classification é None (nenhum OUTRO campo pôde
+    # ser validado, mas este em específico tinha evidência parcial).
+    warnings: tuple[PlaywrightGenerationWarning, ...] = ()
+
+
+def _ambiguous_field_type_warning(
+    endpoint_source: str, path: tuple[str, ...]
+) -> PlaywrightGenerationWarning:
+    label = ".".join(path)
+    return PlaywrightGenerationWarning(
+        code=ASSERTION_NOT_GENERATED,
+        message=(
+            f"Campo '{label}' declara 'type' no schema, mas o valor não pôde ser traduzido "
+            "numa checagem única (lista com 2+ tipos não-null, ou um valor de 'type' não "
+            "reconhecido); nenhuma asserção de tipo foi gerada para ele."
+        ),
+        endpoint=endpoint_source,
+        scenario="success",
+        location="body",
+        metadata=(("field", label),),
+    )
 
 
 def _resolve_field_types_assertion(
@@ -1775,10 +1841,14 @@ def _resolve_field_types_assertion(
 
     schema_assertion = _find_schema_assertion(strategy)
     schema = schema_assertion.expected_value if schema_assertion is not None else None
-    field_checks, array_checks = _collect_field_types(schema)
+    field_checks, array_checks, ambiguous_paths = _collect_field_types(schema)
+
+    warnings = tuple(
+        _ambiguous_field_type_warning(strategy.endpoint_source, path) for path in ambiguous_paths
+    )
 
     if not field_checks and not array_checks:
-        return empty
+        return replace(empty, warnings=warnings)
 
     assert schema_assertion is not None  # garantido por field_checks/array_checks não vazios
 
@@ -1818,6 +1888,7 @@ def _resolve_field_types_assertion(
         lines=tuple(lines),
         docstring_note=docstring_note,
         classification=classification,
+        warnings=warnings,
     )
 
 
@@ -1832,8 +1903,8 @@ def _resolve_field_types_assertion(
 # desenvolvimento (roda nos testes deste módulo) e, implicitamente, de
 # quem for executar a suíte Playwright gerada (mesmo princípio de
 # playwright/pytest, já exigidos por conftest.py sem serem dependência do
-# projeto que gera a suíte).
-JSON_SCHEMA_REF_NOT_SUPPORTED = "JSON_SCHEMA_REF_NOT_SUPPORTED"
+# projeto que gera a suíte). Código JSON_SCHEMA_REF_NOT_SUPPORTED importado
+# de warning_catalog (Parte 24) — ver import no topo do arquivo.
 
 
 def _render_schema_literal(value: Any, base_indent: str) -> str:
@@ -1940,6 +2011,8 @@ def _resolve_json_schema_assertion(
             ),
             endpoint=strategy.endpoint_source,
             scenario="success",
+            location="body",
+            metadata=(("refs", refs_label),),
         )
         docstring_note = (
             "    JSON Schema: não validado — referência(s) $ref não suportada(s) "
@@ -2084,6 +2157,52 @@ def _collect_correlation_checks(
     return checks
 
 
+def _collect_unmet_correlations(
+    schema: Any, request_json: dict[str, Any] | None
+) -> list[tuple[str, str]]:
+    # Parte 24: o contrato DECLAROU a intenção (x-source-request-field
+    # aponta um campo do request), mas não há informação suficiente em
+    # tempo de geração para confirmá-la — o campo apontado nunca foi de
+    # fato enviado nesta requisição (ou não há request_body JSON nenhum).
+    # Distinto de "campo sem x-source-request-field" (não é uma intenção
+    # declarada, nunca reportado) — mesmo escopo raso (só nível superior)
+    # de _collect_correlation_checks.
+    unmet: list[tuple[str, str]] = []
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return unmet
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return unmet
+
+    for field_name, field_schema in properties.items():
+        if not isinstance(field_name, str) or not isinstance(field_schema, dict):
+            continue
+        source_field = field_schema.get(_CORRELATION_KEYWORD)
+        if not isinstance(source_field, str):
+            continue
+        if request_json is None or source_field not in request_json:
+            unmet.append((field_name, source_field))
+
+    return unmet
+
+
+def _unmet_correlation_warning(
+    endpoint_source: str, field_name: str, source_field: str
+) -> PlaywrightGenerationWarning:
+    return PlaywrightGenerationWarning(
+        code=INFORMATION_INSUFFICIENT,
+        message=(
+            f"Campo '{field_name}' declara correlação com 'x-source-request-field': "
+            f"'{source_field}', mas este campo não foi enviado no corpo desta requisição; "
+            "a correlação não pôde ser verificada e nenhuma asserção foi gerada para ela."
+        ),
+        endpoint=endpoint_source,
+        scenario="success",
+        location="body",
+        metadata=(("field", field_name), ("source_field", source_field)),
+    )
+
+
 def _parsed_request_json_body(request_body: NormalizedBody) -> dict[str, Any] | None:
     # Mesmo critério de _unsupported_body_reason/_resolve_body (Parte 13) —
     # recomputado aqui (puro, sem efeito colateral) em vez de repassado,
@@ -2155,6 +2274,11 @@ class _ExpectedValuesResolution:
     # nunca uma única classificação "média" que esconderia a diferença
     # (regra 3 da Parte 23: BROAD/DERIVED nunca contam como EXACT).
     classifications: tuple[AssertionClassification, ...] = ()
+    # Parte 24: INFORMATION_INSUFFICIENT por correlação declarada mas não
+    # confirmável — pode existir mesmo quando classifications está vazio
+    # (nenhuma OUTRA expectativa gerada, mas esta correlação em específico
+    # tinha uma intenção declarada).
+    warnings: tuple[PlaywrightGenerationWarning, ...] = ()
 
 
 def _resolve_expected_values_assertion(
@@ -2174,9 +2298,14 @@ def _resolve_expected_values_assertion(
     value_checks = _collect_expected_values(schema)
     request_json = _parsed_request_json_body(request_body)
     correlation_checks = _collect_correlation_checks(schema, request_json)
+    unmet_correlations = _collect_unmet_correlations(schema, request_json)
+    warnings = tuple(
+        _unmet_correlation_warning(strategy.endpoint_source, field_name, source_field)
+        for field_name, source_field in unmet_correlations
+    )
 
     if not value_checks and not correlation_checks:
-        return empty
+        return replace(empty, warnings=warnings)
 
     assert schema_assertion is not None  # garantido por value_checks/correlation_checks não vazios
 
@@ -2233,6 +2362,7 @@ def _resolve_expected_values_assertion(
         lines=tuple(lines),
         docstring_note=docstring_note,
         classifications=tuple(classifications),
+        warnings=warnings,
     )
 
 
@@ -2363,7 +2493,12 @@ def _generate_positive_success_test(
         f"{''.join(expected_values_resolution.lines)}"
     )
 
-    warnings = header_resolution.warnings + status_resolution.warnings
+    warnings = (
+        header_resolution.warnings
+        + status_resolution.warnings
+        + field_types_resolution.warnings
+        + expected_values_resolution.warnings
+    )
     if response_body_resolution.warning is not None:
         warnings = warnings + (response_body_resolution.warning,)
     if json_schema_resolution.warning is not None:

@@ -39,15 +39,15 @@ _TOP_LEVEL_KEYS = {
     "assertion_classifications",
 }
 
-_ENDPOINT_ENTRY_KEYS = {"endpoint", "method", "path", "file", "rendered"}
+_ENDPOINT_ENTRY_KEYS = {"endpoint", "method", "path", "file", "rendered", "coverage"}
 
 _CLASSIFICATION_ENTRY_KEYS = {"endpoint", "assertion", "precision", "source", "justification"}
 
 # Duas formas de warning coexistem no mesmo array: um PlaywrightGenerationWarning
-# "de código" (code/endpoint/scenario/message) e o UNRESOLVED_VARIABLE "de
-# variável" (code/endpoint/variable/location) — nunca as duas junto na mesma
-# entrada.
-_CODE_WARNING_KEYS = {"code", "endpoint", "scenario", "message"}
+# "de código" (code/endpoint/method/scenario/location/message/metadata,
+# padronizado na Parte 24) e o UNRESOLVED_VARIABLE "de variável"
+# (code/endpoint/variable/location) — nunca as duas junto na mesma entrada.
+_CODE_WARNING_KEYS = {"code", "endpoint", "method", "scenario", "location", "message", "metadata"}
 _VARIABLE_WARNING_KEYS = {"code", "endpoint", "variable", "location"}
 
 
@@ -73,12 +73,13 @@ def _manifest_payload(endpoint_tests) -> dict:
     return json.loads(manifest_file.content)
 
 
-def test_schema_version_is_1_1():
-    # Bumpado conscientemente na Parte 23: acrescenta "assertion_
-    # classifications" (nunca remove/renomeia uma chave existente).
+def test_schema_version_is_1_2():
+    # Bumpado conscientemente na Parte 24: warnings "de código" ganham
+    # method/location/metadata (deduplicados) e endpoints ganham "coverage"
+    # (nunca remove/renomeia uma chave existente).
     payload = _manifest_payload([_endpoint_test("GET /pets")])
 
-    assert payload["schema_version"] == "1.1"
+    assert payload["schema_version"] == "1.2"
 
 
 def test_top_level_keys_match_exactly():
@@ -106,6 +107,9 @@ def test_endpoint_entry_keys_and_values():
     assert entry["path"] == "/pets"
     assert entry["file"] == "endpoints/test_get_pets.py"
     assert entry["rendered"] is True
+    # Sem warnings/variáveis pendentes/classificação BROAD: cobertura
+    # completa (Parte 24, regra 4).
+    assert entry["coverage"] == "complete"
 
 
 def test_endpoint_file_matches_the_actually_resolved_name_after_a_collision():
@@ -179,6 +183,8 @@ def test_code_warning_entry_shape():
         message="Header 'Authorization' omitido: ...",
         endpoint="GET /pets",
         scenario=None,
+        location="header",
+        metadata=(("header", "Authorization"),),
     )
     endpoint_tests = [_endpoint_test("GET /pets", warnings=(warning,))]
 
@@ -189,6 +195,11 @@ def test_code_warning_entry_shape():
     assert set(entry.keys()) == _CODE_WARNING_KEYS
     assert entry["code"] == "SENSITIVE_HEADER_OMITTED"
     assert entry["endpoint"] == "GET /pets"
+    # method derivado automaticamente de "endpoint" (Parte 24), nunca
+    # recalculado no builder.
+    assert entry["method"] == "GET"
+    assert entry["location"] == "header"
+    assert entry["metadata"] == {"header": "Authorization"}
 
 
 def test_unresolved_variable_warning_entry_shape_matches_the_plan_example():
