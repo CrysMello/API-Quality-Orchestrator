@@ -6,9 +6,9 @@ de um array sem garantir existência, e sempre reporta o caminho completo
 (ex.: "user.address.zipCode") na falha.
 
 A primeira seção testa o comportamento em RUNTIME executando o texto exato
-de _REQUIRED_FIELD_HELPERS_SOURCE (o mesmo embutido no arquivo gerado, nunca
-uma cópia que possa divergir). A segunda seção testa o CONTEÚDO gerado,
-mesmo padrão já usado pelas Partes 16-18.
+que _render_helpers_block produz para estes dois helpers (o mesmo embutido
+no arquivo gerado, nunca uma cópia que possa divergir). A segunda seção
+testa o CONTEÚDO gerado, mesmo padrão já usado pelas Partes 16-18.
 """
 
 import ast
@@ -24,7 +24,7 @@ from api_quality_agent.domain.models import (
 from api_quality_agent.domain.services import ApiAnalysisEngine
 from api_quality_agent.generators.playwright import PlaywrightEndpointTestGenerator
 from api_quality_agent.generators.playwright.playwright_endpoint_test_generator import (
-    _REQUIRED_FIELD_HELPERS_SOURCE,
+    _render_helpers_block,
 )
 from api_quality_agent.generators.postman_test_generator import PostmanTestGenerator
 from api_quality_agent.parsers import PostmanCollectionParser
@@ -34,8 +34,11 @@ from api_quality_agent.parsers import PostmanCollectionParser
 
 @pytest.fixture
 def helpers():
+    source = _render_helpers_block(
+        frozenset({"assert_required_field_present", "get_nested_value"})
+    )
     namespace: dict = {}
-    exec(_REQUIRED_FIELD_HELPERS_SOURCE, namespace)  # noqa: S102 - texto do próprio gerador, não input externo
+    exec(source, namespace)  # noqa: S102 - texto do próprio gerador, não input externo
     return namespace
 
 
@@ -171,7 +174,10 @@ def test_required_field_generates_a_presence_assertion():
 # --- campo opcional ausente: nunca gera asserção ---------------------------
 
 
-def test_optional_field_never_generates_an_assertion():
+def test_optional_field_never_generates_a_presence_assertion():
+    # Um campo opcional nunca vira _assert_required_field_present — a
+    # validação de TIPO de campos opcionais (quando presentes) é escopo da
+    # Parte 20, não desta; aqui só a presença/obrigatoriedade importa.
     schema = {
         "type": "object",
         "properties": {"id": {"type": "string"}, "nickname": {"type": "string"}},
@@ -179,8 +185,8 @@ def test_optional_field_never_generates_an_assertion():
     }
     generated = _generate(_GET_USERS, _base_assertions(_schema_assertion(schema)))
 
-    assert "'nickname'" not in generated.content
-    assert "nickname" not in generated.content
+    assert "_assert_required_field_present(body, ('nickname',))" not in generated.content
+    assert "_assert_required_field_present(body, ('id',))" in generated.content
     ast.parse(generated.content)
 
 

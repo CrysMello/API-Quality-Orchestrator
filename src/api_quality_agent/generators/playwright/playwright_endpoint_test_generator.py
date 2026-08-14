@@ -1234,19 +1234,18 @@ def _resolve_body_json_assertion(
 # gerou, mesmo princípio já seguido por conftest.py/demais partes). Os
 # testes unitários deste módulo executam este MESMO texto (via exec) para
 # provar o comportamento em runtime, nunca uma cópia que possa divergir.
+# Cada helper é independente e só entra no arquivo gerado quando algo
+# realmente o usa (ver _render_helpers_block) — nunca duplicado quando mais
+# de uma parte (19 e 20) precisa do mesmo helper (ex.: _get_nested_value).
 #
-# _assert_required_field_present: navega node[path[0]][path[1]]... e falha
-# com o caminho completo (ex.: "user.address.zipCode") assim que uma chave
-# estiver ausente do dict corrente. Presença com valor null NUNCA falha —
-# "diferenciar campo ausente de presente com null" — e interrompe a
+# _assert_required_field_present (Parte 19): navega node[path[0]][path[1]]...
+# e falha com o caminho completo (ex.: "user.address.zipCode") assim que uma
+# chave estiver ausente do dict corrente. Presença com valor null NUNCA
+# falha — "diferenciar campo ausente de presente com null" — e interrompe a
 # navegação (nada abaixo de um nó null para checar, "respeitar nullable").
 # Um nó que não é mais um dict (não navegável) também interrompe sem falhar
-# — nunca uma validação de tipo (fora de escopo desta parte).
-#
-# _get_nested_value: mesma navegação seguem, mas devolve o valor (ou None)
-# em vez de fazer asserção — usado só para localizar um campo array já
-# comprovado presente, antes de iterar seus itens com segurança.
-_REQUIRED_FIELD_HELPERS_SOURCE = (
+# — nunca uma validação de tipo (fora de escopo da Parte 19).
+_ASSERT_REQUIRED_FIELD_PRESENT_SOURCE = (
     "def _assert_required_field_present(node, path):\n"
     "    for index, key in enumerate(path):\n"
     "        if not isinstance(node, dict):\n"
@@ -1255,8 +1254,12 @@ _REQUIRED_FIELD_HELPERS_SOURCE = (
     "        node = node[key]\n"
     "        if node is None:\n"
     "            return\n"
-    "\n"
-    "\n"
+)
+
+# _get_nested_value (Partes 19 e 20): mesma navegação, mas devolve o valor
+# (ou None) em vez de fazer asserção — usado só para localizar um campo
+# array já comprovado presente, antes de iterar seus itens com segurança.
+_GET_NESTED_VALUE_SOURCE = (
     "def _get_nested_value(node, path):\n"
     "    for key in path:\n"
     "        if not isinstance(node, dict) or key not in node:\n"
@@ -1355,9 +1358,12 @@ def _render_required_array_field_lines(array_field: _RequiredArrayField) -> tupl
 
 @dataclass(frozen=True)
 class _RequiredFieldsResolution:
-    # Bloco de funções auxiliares (module-level, uma vez por arquivo) — só
-    # emitido quando há pelo menos um campo obrigatório a validar.
-    helpers_block: str
+    # Nomes dos helpers module-level (ver _HELPER_SOURCES) que este bloco
+    # precisa ter emitidos no arquivo — vazio quando não há campo
+    # obrigatório a validar; a montagem final (uma vez só por arquivo,
+    # deduplicada com o que a Parte 20 também precisar) acontece em
+    # _generate_positive_success_test via _render_helpers_block.
+    helper_names: frozenset[str]
     lines: tuple[str, ...]
     docstring_note: str
 
@@ -1368,15 +1374,16 @@ def _resolve_required_fields_assertion(
     # Só faz sentido checar campos dentro de `body` quando a Parte 18 já
     # garantiu que essa variável existe (evidência de JSON) — nunca gerado
     # isoladamente.
+    empty = _RequiredFieldsResolution(helper_names=frozenset(), lines=(), docstring_note="")
     if not response_body_resolution.lines:
-        return _RequiredFieldsResolution(helpers_block="", lines=(), docstring_note="")
+        return empty
 
     schema_assertion = _find_schema_assertion(strategy)
     schema = schema_assertion.expected_value if schema_assertion is not None else None
     required_paths, required_arrays = _collect_required_structure(schema)
 
     if not required_paths and not required_arrays:
-        return _RequiredFieldsResolution(helpers_block="", lines=(), docstring_note="")
+        return empty
 
     assert schema_assertion is not None  # garantido por required_paths/arrays não vazios
 
@@ -1392,13 +1399,250 @@ def _resolve_required_fields_assertion(
         f"(origem: {schema_assertion.origin})\n"
     )
 
+    helper_names = {"assert_required_field_present"}
+    if required_arrays:
+        helper_names.add("get_nested_value")
+
     return _RequiredFieldsResolution(
-        # "\n\n" ao final: mesma separação de duas linhas em branco que o
-        # Python/ruff esperam entre defs de nível de módulo, antes da
-        # função de teste que vem a seguir.
-        helpers_block=f"{_REQUIRED_FIELD_HELPERS_SOURCE}\n\n",
+        helper_names=frozenset(helper_names),
         lines=tuple(lines),
         docstring_note=docstring_note,
+    )
+
+
+# --- Tipos (Parte 20) ---------------------------------------------------------
+
+# _assert_field_type: navega node/path (mesmo estilo de
+# _assert_required_field_present) mas NUNCA falha por ausência — presença é
+# escopo da Parte 19, não desta; um campo ausente simplesmente não tem nada
+# para validar aqui. Quando presente, classifica o valor recebido (bool
+# ANTES de int — regra 3: True/False nunca contam como integer/number,
+# mesmo isinstance(True, int) sendo True em Python) e compara contra
+# expected_type SEM NENHUMA CONVERSÃO (regra 1: "123" nunca é aceito como
+# integer só porque parece um). "number" aceita tanto integer quanto number
+# (JSON não distingue os dois; a distinção é só entre "integer" e "number"
+# no próprio JSON Schema). null só passa quando nullable é True (regra 5) —
+# senão é só mais um "tipo recebido" que não bate com o esperado. Mensagem
+# sempre com campo (caminho completo), tipo esperado e tipo recebido
+# (regra 6).
+_ASSERT_FIELD_TYPE_SOURCE = (
+    "def _assert_field_type(node, path, expected_type, nullable):\n"
+    "    for key in path[:-1]:\n"
+    "        if not isinstance(node, dict) or key not in node:\n"
+    "            return\n"
+    "        node = node[key]\n"
+    "    last_key = path[-1]\n"
+    "    if not isinstance(node, dict) or last_key not in node:\n"
+    "        return\n"
+    "    value = node[last_key]\n"
+    '    label = ".".join(path)\n'
+    "    if value is None:\n"
+    "        if nullable:\n"
+    "            return\n"
+    '        received = "null"\n'
+    "    elif isinstance(value, bool):\n"
+    '        received = "boolean"\n'
+    "    elif isinstance(value, int):\n"
+    '        received = "integer"\n'
+    "    elif isinstance(value, float):\n"
+    '        received = "number"\n'
+    "    elif isinstance(value, str):\n"
+    '        received = "string"\n'
+    "    elif isinstance(value, list):\n"
+    '        received = "array"\n'
+    "    elif isinstance(value, dict):\n"
+    '        received = "object"\n'
+    "    else:\n"
+    "        received = type(value).__name__\n"
+    '    if expected_type == "number":\n'
+    '        ok = received in ("integer", "number")\n'
+    "    else:\n"
+    "        ok = received == expected_type\n"
+    "    assert ok, (\n"
+    "        \"Tipo inválido para o campo '\" + label + \"': esperado \" + expected_type\n"
+    '        + ", recebido " + received + "."\n'
+    "    )\n"
+)
+
+# Nome do helper -> texto; ordem estável de emissão (nunca depende de ordem
+# de dict/set em runtime) para manter a geração determinística — usado
+# tanto pela Parte 19 quanto pela Parte 20, deduplicado por nome quando as
+# duas precisam do mesmo helper (get_nested_value).
+_HELPER_SOURCES: dict[str, str] = {
+    "get_nested_value": _GET_NESTED_VALUE_SOURCE,
+    "assert_required_field_present": _ASSERT_REQUIRED_FIELD_PRESENT_SOURCE,
+    "assert_field_type": _ASSERT_FIELD_TYPE_SOURCE,
+}
+_HELPER_ORDER: tuple[str, ...] = (
+    "get_nested_value",
+    "assert_required_field_present",
+    "assert_field_type",
+)
+
+
+def _render_helpers_block(needed: frozenset[str]) -> str:
+    if not needed:
+        return ""
+    parts = [_HELPER_SOURCES[name] for name in _HELPER_ORDER if name in needed]
+    # "\n\n" entre cada def e ao final: duas linhas em branco entre defs de
+    # nível de módulo (mesma convenção do resto do arquivo gerado), inclusive
+    # antes da função de teste que vem a seguir.
+    return "\n\n".join(parts) + "\n\n"
+
+
+def _normalize_field_type(raw_type: Any, nullable_flag: Any) -> tuple[str | None, bool]:
+    # (tipo único reconhecido ou None, nullable) — cobre tanto "nullable":
+    # true (OpenAPI 3.0) quanto "type": [<tipo>, "null"] (JSON Schema/
+    # OpenAPI 3.1). Uma lista com MAIS de um tipo não-null é ambígua — nunca
+    # inventa qual validar, devolve None (nada é gerado para esse campo).
+    nullable = nullable_flag is True
+    if isinstance(raw_type, str):
+        return raw_type, nullable
+    if isinstance(raw_type, list):
+        non_null = [t for t in raw_type if isinstance(t, str) and t != "null"]
+        if "null" in raw_type:
+            nullable = True
+        if len(non_null) == 1:
+            return non_null[0], nullable
+        return None, nullable
+    return None, nullable
+
+
+@dataclass(frozen=True)
+class _FieldTypeCheck:
+    path: tuple[str, ...]
+    json_type: str
+    nullable: bool
+
+
+@dataclass(frozen=True)
+class _ArrayItemTypeCheck:
+    # path até o campo array em si; campos que cada item deve ter, só
+    # quando o schema do "items" já documenta o tipo de cada um — nunca
+    # aplica a estrutura do array aos itens nem inventa uma para eles
+    # ("aplicar validação em estruturas aninhadas" só quando o schema
+    # determinar, mesmo critério já usado pela Parte 19 para "required").
+    array_path: tuple[str, ...]
+    item_fields: tuple[tuple[str, str, bool], ...]  # (nome, tipo, nullable)
+
+
+def _collect_field_types(
+    schema: Any, *, prefix: tuple[str, ...] = ()
+) -> tuple[list[_FieldTypeCheck], list[_ArrayItemTypeCheck]]:
+    # "Não inferir tipo de negócio a partir de um único exemplo sem
+    # classificação de evidência": só lê "type"/"nullable" já declarados no
+    # schema resolvido (AssertionType.SCHEMA) — nunca deriva um tipo daqui
+    # olhando um valor de exemplo. Só desce em propriedades cujo próprio
+    # schema documenta type=object, mesmo critério da Parte 19.
+    field_checks: list[_FieldTypeCheck] = []
+    array_checks: list[_ArrayItemTypeCheck] = []
+
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return field_checks, array_checks
+
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return field_checks, array_checks
+
+    for field_name, field_schema in properties.items():
+        if not isinstance(field_name, str) or not isinstance(field_schema, dict):
+            continue
+        path = (*prefix, field_name)
+        json_type, nullable = _normalize_field_type(
+            field_schema.get("type"), field_schema.get("nullable")
+        )
+        if json_type is not None:
+            field_checks.append(_FieldTypeCheck(path=path, json_type=json_type, nullable=nullable))
+
+        if json_type == "object":
+            nested_fields, nested_arrays = _collect_field_types(field_schema, prefix=path)
+            field_checks.extend(nested_fields)
+            array_checks.extend(nested_arrays)
+        elif json_type == "array":
+            items_schema = field_schema.get("items")
+            if isinstance(items_schema, dict) and items_schema.get("type") == "object":
+                item_properties = items_schema.get("properties")
+                item_fields: list[tuple[str, str, bool]] = []
+                if isinstance(item_properties, dict):
+                    for item_name, item_schema in item_properties.items():
+                        if not isinstance(item_name, str) or not isinstance(item_schema, dict):
+                            continue
+                        item_type, item_nullable = _normalize_field_type(
+                            item_schema.get("type"), item_schema.get("nullable")
+                        )
+                        if item_type is not None:
+                            item_fields.append((item_name, item_type, item_nullable))
+                if item_fields:
+                    array_checks.append(
+                        _ArrayItemTypeCheck(array_path=path, item_fields=tuple(item_fields))
+                    )
+
+    return field_checks, array_checks
+
+
+def _render_array_item_type_check_lines(array_check: _ArrayItemTypeCheck) -> tuple[str, ...]:
+    local_name = f"_{sanitize_identifier('_'.join(array_check.array_path))}_items"
+    path_literal = repr(array_check.array_path)
+    lines = [
+        f"    {local_name} = _get_nested_value(body, {path_literal})\n",
+        f"    if isinstance({local_name}, list):\n",
+        f"        for _item in {local_name}:\n",
+        "            if not isinstance(_item, dict):\n",
+        "                continue\n",
+    ]
+    for item_name, item_type, item_nullable in array_check.item_fields:
+        lines.append(
+            f"            _assert_field_type(_item, {(item_name,)!r}, "
+            f"{item_type!r}, {item_nullable!r})\n"
+        )
+    return tuple(lines)
+
+
+@dataclass(frozen=True)
+class _FieldTypesResolution:
+    helper_names: frozenset[str]
+    lines: tuple[str, ...]
+    docstring_note: str
+
+
+def _resolve_field_types_assertion(
+    strategy: TestStrategy, response_body_resolution: _BodyJsonResolution
+) -> _FieldTypesResolution:
+    # Mesmo pré-requisito da Parte 19: só existe `body` para inspecionar
+    # quando a Parte 18 já provou (por evidência) que a resposta é JSON.
+    empty = _FieldTypesResolution(helper_names=frozenset(), lines=(), docstring_note="")
+    if not response_body_resolution.lines:
+        return empty
+
+    schema_assertion = _find_schema_assertion(strategy)
+    schema = schema_assertion.expected_value if schema_assertion is not None else None
+    field_checks, array_checks = _collect_field_types(schema)
+
+    if not field_checks and not array_checks:
+        return empty
+
+    assert schema_assertion is not None  # garantido por field_checks/array_checks não vazios
+
+    lines: list[str] = []
+    for check in field_checks:
+        lines.append(
+            f"    _assert_field_type(body, {check.path!r}, {check.json_type!r}, "
+            f"{check.nullable!r})\n"
+        )
+    for array_check in array_checks:
+        lines.extend(_render_array_item_type_check_lines(array_check))
+
+    total = len(field_checks) + sum(len(a.item_fields) for a in array_checks)
+    docstring_note = (
+        f"    Field types: {total} campo(s) validados (origem: {schema_assertion.origin})\n"
+    )
+
+    helper_names = {"assert_field_type"}
+    if array_checks:
+        helper_names.add("get_nested_value")
+
+    return _FieldTypesResolution(
+        helper_names=frozenset(helper_names), lines=tuple(lines), docstring_note=docstring_note
     )
 
 
@@ -1414,6 +1658,7 @@ def _generate_positive_success_test(
     content_type_resolution = _resolve_content_type_assertion(strategy)
     response_body_resolution = _resolve_body_json_assertion(strategy, content_type_resolution)
     required_fields_resolution = _resolve_required_fields_assertion(strategy, response_body_resolution)
+    field_types_resolution = _resolve_field_types_assertion(strategy, response_body_resolution)
 
     # Já sabido "supported" (gate em _unsupported_reason); recomputado aqui
     # (puro, sem efeito colateral) com uma sessão NOVA — mesmo padrão já
@@ -1481,9 +1726,13 @@ def _generate_positive_success_test(
         body_resolution.multipart_fields,
     )
 
+    helpers_block = _render_helpers_block(
+        required_fields_resolution.helper_names | field_types_resolution.helper_names
+    )
+
     content = (
         f"{imports_block}"
-        f"{required_fields_resolution.helpers_block}"
+        f"{helpers_block}"
         f"def {function_name}(api_context):\n"
         '    """\n'
         f"    Request: {safe_request_name}\n"
@@ -1497,6 +1746,7 @@ def _generate_positive_success_test(
         f"{content_type_resolution.docstring_note}"
         f"{response_body_resolution.docstring_note}"
         f"{required_fields_resolution.docstring_note}"
+        f"{field_types_resolution.docstring_note}"
         '    """\n'
         "\n"
         f"{preamble}"
@@ -1506,6 +1756,7 @@ def _generate_positive_success_test(
         f"{''.join(content_type_resolution.lines)}"
         f"{''.join(response_body_resolution.lines)}"
         f"{''.join(required_fields_resolution.lines)}"
+        f"{''.join(field_types_resolution.lines)}"
     )
 
     warnings = header_resolution.warnings
