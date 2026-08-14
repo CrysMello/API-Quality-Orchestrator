@@ -107,6 +107,15 @@ MULTIPART_FILE_NOT_RESOLVED = "MULTIPART_FILE_NOT_RESOLVED"
 # geradores.
 EXPECTED_STATUS_NOT_DEFINED = "EXPECTED_STATUS_NOT_DEFINED"
 
+# Parte 18 — body JSON: parseado (uma única vez, guardado em `body`) só
+# quando há evidência de que a resposta É JSON (Content-Type compatível
+# e/ou AssertionType.VALID_JSON_BODY) — nunca "qualquer JSON é considerado
+# resposta funcionalmente correta" (regra 5): sem AssertionType.SCHEMA para
+# dizer o tipo do nível superior (dict/list/escalar/null), o parse ainda
+# acontece (prova que é JSON bem formado), mas nenhum isinstance é gerado —
+# e este warning registra que a estrutura não pôde ser validada.
+BODY_STRUCTURE_NOT_DETERMINED = "BODY_STRUCTURE_NOT_DETERMINED"
+
 
 def _media_type_only(content_type: str) -> str:
     # "application/json; charset=utf-8" -> "application/json" — separa o
@@ -1052,6 +1061,12 @@ class _ContentTypeAssertionResolution:
     # Linha de docstring registrando a origem da expectativa — string vazia
     # quando não há evidência (nada a registrar).
     docstring_note: str
+    # True só quando há evidência de Content-Type E ela é JSON-compatível
+    # (application/json ou +json) — uma das duas fontes que autorizam o
+    # parse do body na Parte 18 ("Content-Type compatível OU evidência
+    # explícita de body JSON"). False tanto quando não há evidência quanto
+    # quando ela aponta um media type não-JSON.
+    is_json_compatible: bool = False
 
 
 def _find_content_type_assertion(strategy: TestStrategy) -> AssertionDefinition | None:
@@ -1070,7 +1085,8 @@ def _resolve_content_type_assertion(strategy: TestStrategy) -> _ContentTypeAsser
     # completa do header (regra 5: charset nunca causa falso negativo).
     expected_media_type = _media_type_only(str(assertion.expected_value))
     expected_literal = _python_string_literal(expected_media_type)
-    kind = "JSON" if _is_json_content_type(expected_media_type) else "não-JSON"
+    is_json = _is_json_content_type(expected_media_type)
+    kind = "JSON" if is_json else "não-JSON"
 
     lines = (
         # .get(..., "") em vez de .get(...) cru: um header ausente em
@@ -1089,7 +1105,124 @@ def _resolve_content_type_assertion(strategy: TestStrategy) -> _ContentTypeAsser
     docstring_note = (
         f"    Content-Type: {expected_media_type} [{kind}] (origem: {assertion.origin})\n"
     )
-    return _ContentTypeAssertionResolution(lines=lines, docstring_note=docstring_note)
+    return _ContentTypeAssertionResolution(
+        lines=lines, docstring_note=docstring_note, is_json_compatible=is_json
+    )
+
+
+# --- Body JSON (Parte 18) -----------------------------------------------------
+
+
+def _find_valid_json_body_assertion(strategy: TestStrategy) -> AssertionDefinition | None:
+    return next(
+        (a for a in strategy.assertions if a.assertion_type is AssertionType.VALID_JSON_BODY),
+        None,
+    )
+
+
+def _find_schema_assertion(strategy: TestStrategy) -> AssertionDefinition | None:
+    return next((a for a in strategy.assertions if a.assertion_type is AssertionType.SCHEMA), None)
+
+
+# Nível superior apenas (regra 4) — nunca campos internos/schema completo
+# (fora de escopo desta parte). bool é subclasse de int em Python
+# (isinstance(True, int) é True) — sem o "and not isinstance(..., bool)" um
+# body `true` passaria por engano como "integer"/"number".
+_JSON_TOP_LEVEL_TYPE_EXPRESSIONS: dict[str, str] = {
+    "object": "isinstance(body, dict)",
+    "array": "isinstance(body, list)",
+    "string": "isinstance(body, str)",
+    "boolean": "isinstance(body, bool)",
+    "integer": "isinstance(body, int) and not isinstance(body, bool)",
+    "number": "isinstance(body, (int, float)) and not isinstance(body, bool)",
+}
+
+
+def _render_top_level_type_expression(json_type: Any) -> str | None:
+    # None quando o "type" não foi documentado ou não é um dos valores
+    # reconhecidos (ex.: uma lista de tipos do JSON Schema, "type":
+    # ["object", "null"]) — nunca inventa uma asserção para uma estrutura
+    # que não sabemos representar com segurança.
+    if json_type == "null":
+        return "body is None"
+    if isinstance(json_type, str):
+        return _JSON_TOP_LEVEL_TYPE_EXPRESSIONS.get(json_type)
+    return None
+
+
+@dataclass(frozen=True)
+class _BodyJsonResolution:
+    # Linhas extras a inserir depois da asserção de Content-Type — tupla
+    # vazia quando não há evidência de que a resposta é JSON (regra 1:
+    # "somente quando" Content-Type compatível OU AssertionType.
+    # VALID_JSON_BODY presente; nunca por padrão).
+    lines: tuple[str, ...]
+    docstring_note: str
+    warning: PlaywrightGenerationWarning | None
+    extra_imports: frozenset[str]
+
+
+def _resolve_body_json_assertion(
+    strategy: TestStrategy, content_type_resolution: _ContentTypeAssertionResolution
+) -> _BodyJsonResolution:
+    should_parse = content_type_resolution.is_json_compatible or (
+        _find_valid_json_body_assertion(strategy) is not None
+    )
+    if not should_parse:
+        return _BodyJsonResolution(
+            lines=(), docstring_note="", warning=None, extra_imports=frozenset()
+        )
+
+    # Corpo vazio é uma categoria própria (regra 3: objeto/array/escalar/
+    # null/vazio), nunca só tratado como "JSON inválido" — mensagem
+    # específica e identificável antes de sequer tentar json.loads.
+    # `body` fica disponível para reaproveitamento nas Partes 19-22 (regra
+    # 6); .text() lido só uma vez, nunca duas chamadas a response.json()/
+    # .text() (regra 7).
+    lines: list[str] = [
+        "    body_text = response.text()\n",
+        "    if not body_text.strip():\n",
+        '        pytest.fail("Corpo da resposta vazio; esperado um JSON válido.")\n',
+        "    try:\n",
+        "        body = json.loads(body_text)\n",
+        "    except json.JSONDecodeError as error:\n",
+        '        pytest.fail(f"Corpo da resposta não é um JSON válido: {error}")\n',
+    ]
+
+    schema_assertion = _find_schema_assertion(strategy)
+    schema = schema_assertion.expected_value if schema_assertion is not None else None
+    json_type = schema.get("type") if isinstance(schema, dict) else None
+    type_expression = _render_top_level_type_expression(json_type)
+
+    warning: PlaywrightGenerationWarning | None = None
+    docstring_extra = ""
+    if type_expression is not None:
+        # "Não considerar qualquer JSON válido como resposta funcionalmente
+        # correta" (regra 5): só o TIPO do nível superior é checado aqui —
+        # nunca campos, valores ou schema completo.
+        lines.append(f"    assert {type_expression}\n")
+        assert schema_assertion is not None  # garantido por type_expression não-None
+        docstring_extra = f" [estrutura: {json_type}, origem: {schema_assertion.origin}]"
+    else:
+        warning = PlaywrightGenerationWarning(
+            code=BODY_STRUCTURE_NOT_DETERMINED,
+            message=(
+                "Há evidência de que a resposta é JSON, mas nenhum schema documentado "
+                "define a estrutura do nível superior (objeto, array ou escalar); o body "
+                "foi parseado, mas nenhuma asserção de estrutura foi gerada."
+            ),
+            endpoint=strategy.endpoint_source,
+            scenario="success",
+        )
+
+    docstring_note = f"    Body: JSON parseado em `body`{docstring_extra}\n"
+
+    return _BodyJsonResolution(
+        lines=tuple(lines),
+        docstring_note=docstring_note,
+        warning=warning,
+        extra_imports=frozenset({"json", "pytest"}),
+    )
 
 
 def _generate_positive_success_test(
@@ -1102,6 +1235,7 @@ def _generate_positive_success_test(
     method = (request.method or "get").lower()
     status_resolution = _resolve_status_assertion(strategy)
     content_type_resolution = _resolve_content_type_assertion(strategy)
+    response_body_resolution = _resolve_body_json_assertion(strategy, content_type_resolution)
 
     # Já sabido "supported" (gate em _unsupported_reason); recomputado aqui
     # (puro, sem efeito colateral) com uma sessão NOVA — mesmo padrão já
@@ -1147,7 +1281,8 @@ def _generate_positive_success_test(
     else:
         body_origin_note = "sem body"
 
-    imports_block = "".join(f"import {name}\n" for name in sorted(session.extra_imports))
+    all_imports = session.extra_imports | response_body_resolution.extra_imports
+    imports_block = "".join(f"import {name}\n" for name in sorted(all_imports))
     if imports_block:
         imports_block += "\n\n"
 
@@ -1181,6 +1316,7 @@ def _generate_positive_success_test(
         f"{auth_origin_note}, sem variáveis não resolvidas)\n"
         f"{status_resolution.docstring_note}"
         f"{content_type_resolution.docstring_note}"
+        f"{response_body_resolution.docstring_note}"
         '    """\n'
         "\n"
         f"{preamble}"
@@ -1188,11 +1324,14 @@ def _generate_positive_success_test(
         "\n"
         f"{status_resolution.assertion_line}"
         f"{''.join(content_type_resolution.lines)}"
+        f"{''.join(response_body_resolution.lines)}"
     )
 
     warnings = header_resolution.warnings
     if status_resolution.warning is not None:
         warnings = warnings + (status_resolution.warning,)
+    if response_body_resolution.warning is not None:
+        warnings = warnings + (response_body_resolution.warning,)
 
     return GeneratedEndpointTest(
         endpoint_source=strategy.endpoint_source,
