@@ -24,7 +24,9 @@ _MANIFEST_FILE_NAME = "generation-manifest.json"
 # e do teste de caracterização que trava esse valor
 # (tests/characterization/test_execution_result_schema.py). Ver
 # tests/unit/test_playwright_manifest_schema.py para o equivalente aqui.
-_MANIFEST_SCHEMA_VERSION = "1.0"
+# 1.1 (Parte 23): acrescenta "assertion_classifications" — nunca remove
+# nem renomeia uma chave existente.
+_MANIFEST_SCHEMA_VERSION = "1.1"
 
 # Pode ser sobrescrito em tempo de execução sem regenerar a suíte (ex.:
 # apontar para staging/produção em CI) — nunca uma credencial, só a URL
@@ -215,6 +217,32 @@ def _warning_entries(
     return entries
 
 
+def _assertion_classifications_section(
+    endpoint_tests: Sequence[GeneratedEndpointTest],
+) -> dict[str, object]:
+    # Parte 23: "a classificação deve chegar... ao generation-manifest.json"
+    # — uma entrada por expectativa REALMENTE gerada (nunca uma para uma
+    # categoria sem evidência nenhuma) mais um resumo agregado por
+    # precisão. "BROAD não pode ser contabilizado como equivalente a EXACT"
+    # (regra 3): summary sempre mantém as três chaves separadas, nunca
+    # mescladas num único "passed"/"total".
+    summary = {"exact": 0, "derived": 0, "broad": 0}
+    entries: list[dict[str, object]] = []
+    for endpoint_test in endpoint_tests:
+        for classification in endpoint_test.assertion_classifications:
+            summary[classification.precision.value] += 1
+            entries.append(
+                {
+                    "endpoint": endpoint_test.endpoint_source,
+                    "assertion": classification.assertion,
+                    "precision": classification.precision.value,
+                    "source": classification.source,
+                    "justification": classification.justification,
+                }
+            )
+    return {"summary": summary, "entries": entries}
+
+
 def _render_manifest(
     endpoint_tests: Sequence[GeneratedEndpointTest],
     naming: ResolvedEndpointFileNames,
@@ -244,5 +272,6 @@ def _render_manifest(
         "required_environment_variables": _required_environment_variables(endpoint_tests),
         "resolved_variables": _resolved_variables(endpoint_tests),
         "warnings": _warning_entries(endpoint_tests, naming.warnings),
+        "assertion_classifications": _assertion_classifications_section(endpoint_tests),
     }
     return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"

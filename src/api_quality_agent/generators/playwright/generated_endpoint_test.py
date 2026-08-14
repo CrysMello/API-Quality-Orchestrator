@@ -1,5 +1,8 @@
 from dataclasses import dataclass
 
+from api_quality_agent.generators.playwright.assertion_classification import (
+    AssertionClassification,
+)
 from api_quality_agent.generators.playwright.playwright_generation_warning import (
     PlaywrightGenerationWarning,
 )
@@ -39,3 +42,11 @@ class GeneratedEndpointTest:
     # o campo onde apareceram (path, base_url, query, header, auth, body,
     # multipart_field).
     unresolved_variables: tuple[UnresolvedVariable, ...] = ()
+    # Nível de confiança (EXACT/DERIVED/BROAD) de cada expectativa
+    # realmente gerada no cenário "success" (Parte 23) — uma entrada por
+    # categoria de asserção (status/content_type/body/required_fields/
+    # field_types/json_schema/expected_values) que de fato produziu algum
+    # código; nunca uma entrada para uma categoria sem evidência nenhuma
+    # (nada gerado, nada a classificar). Consumida por
+    # DefaultPlaywrightTestSuiteBuilder para o generation-manifest.json.
+    assertion_classifications: tuple[AssertionClassification, ...] = ()

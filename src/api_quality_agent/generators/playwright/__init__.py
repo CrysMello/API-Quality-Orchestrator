@@ -1,3 +1,6 @@
+from api_quality_agent.generators.playwright.assertion_classification import (
+    AssertionClassification,
+)
 from api_quality_agent.generators.playwright.assertion_precision import AssertionPrecision
 from api_quality_agent.generators.playwright.base_url import derive_base_url
 from api_quality_agent.generators.playwright.default_playwright_test_suite_builder import (
@@ -26,6 +29,7 @@ from api_quality_agent.generators.playwright.playwright_endpoint_test_generator 
     BODY_JSON_INVALID,
     BODY_NOT_SUPPORTED,
     BODY_STRUCTURE_NOT_DETERMINED,
+    BROAD_STATUS_ASSERTION,
     DUPLICATE_HEADER_IGNORED,
     ENDPOINT_NOT_SUPPORTED_YET,
     EXPECTED_STATUS_NOT_DEFINED,
@@ -54,6 +58,7 @@ __all__ = [
     "BODY_JSON_INVALID",
     "BODY_NOT_SUPPORTED",
     "BODY_STRUCTURE_NOT_DETERMINED",
+    "BROAD_STATUS_ASSERTION",
     "DUPLICATE_HEADER_IGNORED",
     "ENDPOINT_NOT_SUPPORTED_YET",
     "EXPECTED_STATUS_NOT_DEFINED",
@@ -63,6 +68,7 @@ __all__ = [
     "RESERVED_HEADER_OMITTED",
     "SENSITIVE_HEADER_OMITTED",
     "UNRESOLVED_VARIABLE",
+    "AssertionClassification",
     "AssertionPrecision",
     "DefaultPlaywrightTestSuiteBuilder",
     "EndpointTestGenerator",

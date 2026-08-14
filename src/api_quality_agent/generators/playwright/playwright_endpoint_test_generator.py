@@ -19,6 +19,10 @@ from api_quality_agent.domain.models import (
     PostmanEnvironment,
     TestStrategy,
 )
+from api_quality_agent.generators.playwright.assertion_classification import (
+    AssertionClassification,
+)
+from api_quality_agent.generators.playwright.assertion_precision import AssertionPrecision
 from api_quality_agent.generators.playwright.endpoint_file_naming import (
     endpoint_source_to_file_name,
     endpoint_source_to_slug,
@@ -117,6 +121,17 @@ EXPECTED_STATUS_NOT_DEFINED = "EXPECTED_STATUS_NOT_DEFINED"
 # e este warning registra que a estrutura não pôde ser validada.
 BODY_STRUCTURE_NOT_DETERMINED = "BODY_STRUCTURE_NOT_DETERMINED"
 
+# Parte 23 — classificação EXACT/DERIVED/BROAD (AssertionPrecision, já
+# existente desde a Parte 03): o nome literalmente previsto desde então
+# (ver os fixtures de teste de Parte 03 em test_playwright_generation_
+# contracts.py, que já usavam "BROAD_STATUS_ASSERTION" como exemplo) para
+# quando a única asserção de status possível é a aproximação de sempre
+# ("assert response is not None", Parte 16) — emitido JUNTO com
+# EXPECTED_STATUS_NOT_DEFINED (que explica a ausência de evidência), nunca
+# no lugar dele: um explica o "por quê", o outro classifica o "o quê" foi
+# gerado no lugar.
+BROAD_STATUS_ASSERTION = "BROAD_STATUS_ASSERTION"
+
 
 def _media_type_only(content_type: str) -> str:
     # "application/json; charset=utf-8" -> "application/json" — separa o
@@ -143,6 +158,49 @@ def _single_line(text: str) -> str:
     # vêm do documento de origem (Collection/OpenAPI), não são controlados
     # por este código.
     return text.replace("\n", " ").replace("\r", " ").replace('"""', "'''")
+
+
+# --- Classificação EXACT/DERIVED/BROAD (Parte 23) ---------------------------
+
+# "Regra 5: não reclassificar uma expectativa apenas para reduzir warnings"
+# — por isso a classificação de cada asserção mora ao lado de onde ela é
+# decidida (mesma função que já resolve a asserção em si), nunca um
+# classificador genérico separado que poderia "ajustar" o resultado depois.
+
+
+def _classification_docstring_suffix(precision: AssertionPrecision) -> str:
+    # Anexado à mesma linha de docstring que cada parte (16-22) já escreve
+    # ("regra 4: a classificação deve chegar... aos metadados do cenário")
+    # — nunca uma linha extra separada, para manter uma leitura só por
+    # expectativa.
+    return f" [{precision.value.upper()}]"
+
+
+def _exact(assertion: str, *, source: str, justification: str) -> AssertionClassification:
+    return AssertionClassification(
+        assertion=assertion,
+        precision=AssertionPrecision.EXACT,
+        source=source,
+        justification=justification,
+    )
+
+
+def _derived(assertion: str, *, source: str, justification: str) -> AssertionClassification:
+    return AssertionClassification(
+        assertion=assertion,
+        precision=AssertionPrecision.DERIVED,
+        source=source,
+        justification=justification,
+    )
+
+
+def _broad(assertion: str, *, source: str, justification: str) -> AssertionClassification:
+    return AssertionClassification(
+        assertion=assertion,
+        precision=AssertionPrecision.BROAD,
+        source=source,
+        justification=justification,
+    )
 
 
 @dataclass(frozen=True)
@@ -991,15 +1049,14 @@ class _StatusAssertionResolution:
     # gerada — nunca as duas ao mesmo tempo, sempre uma ou outra.
     assertion_line: str
     # Linha de docstring registrando a origem da expectativa nos metadados
-    # do cenário ("Registrar a origem da expectativa de status") — o mesmo
-    # AssertionDefinition.origin já usado pelo gerador Postman
-    # (contract/example/configuration/context), reaproveitado aqui como a
-    # evidência que, numa etapa futura (Parte 23), vira a classificação
-    # EXACT/DERIVED/BROAD; nada disso é implementado ainda, só preparado.
+    # do cenário ("Registrar a origem da expectativa de status") — já inclui
+    # a tag [EXACT]/[BROAD] (Parte 23).
     docstring_note: str
-    # None quando um status confiável foi encontrado; presente (validação
-    # parcial) quando não havia nenhuma evidência para consultar.
-    warning: PlaywrightGenerationWarning | None
+    # Sempre ao menos um warning quando BROAD (regra 2 da Parte 23:
+    # BROAD_STATUS_ASSERTION obrigatório) — vazio quando um status
+    # confiável foi encontrado.
+    warnings: tuple[PlaywrightGenerationWarning, ...]
+    classification: AssertionClassification
 
 
 def _find_status_code_assertion(strategy: TestStrategy) -> AssertionDefinition | None:
@@ -1018,31 +1075,70 @@ def _resolve_status_assertion(strategy: TestStrategy) -> _StatusAssertionResolut
     assertion = _find_status_code_assertion(strategy)
     if assertion is not None:
         status_code = int(assertion.expected_value)
+        classification = _exact(
+            "status",
+            source=assertion.origin,
+            justification=(
+                f"Status HTTP {status_code} documentado explicitamente para este cenário "
+                f"(evidência: {assertion.origin})."
+            ),
+        )
         return _StatusAssertionResolution(
             assertion_line=f"    assert response.status == {status_code}\n",
-            docstring_note=f"    Status: {status_code} (origem: {assertion.origin})\n",
-            warning=None,
+            docstring_note=(
+                f"    Status: {status_code} (origem: {assertion.origin})"
+                f"{_classification_docstring_suffix(classification.precision)}\n"
+            ),
+            warnings=(),
+            classification=classification,
         )
 
     # Sem evidência confiável: mantém a validação temporária de sempre
-    # (Bloco 3) e registra por que — nunca 200/201 "adivinhado".
+    # (Bloco 3) — a aproximação "permitida quando não houver expectativa
+    # exata" da Parte 23 (BROAD), já autorizada pelo desenho da Parte 16.
+    # Nunca reclassifica para EXACT/DERIVED só para reduzir warnings (regra
+    # 5): os dois warnings sempre coexistem aqui — um explica a AUSÊNCIA de
+    # evidência (EXPECTED_STATUS_NOT_DEFINED, Parte 16), o outro classifica
+    # o que foi gerado no lugar (BROAD_STATUS_ASSERTION, regra 2 da Parte
+    # 23) — nunca um no lugar do outro.
+    classification = _broad(
+        "status",
+        source="none",
+        justification=(
+            "Nenhuma evidência de status disponível (estratégia de teste, Postman, OpenAPI, "
+            "contrato ou exemplo); mantida a validação aproximada de que a resposta existe."
+        ),
+    )
     return _StatusAssertionResolution(
         assertion_line="    assert response is not None\n",
         docstring_note=(
             "    Status: não determinado — validação parcial "
-            "(ver warning EXPECTED_STATUS_NOT_DEFINED)\n"
+            "(ver warning EXPECTED_STATUS_NOT_DEFINED)"
+            f"{_classification_docstring_suffix(classification.precision)}\n"
         ),
-        warning=PlaywrightGenerationWarning(
-            code=EXPECTED_STATUS_NOT_DEFINED,
-            message=(
-                "Nenhum status HTTP esperado pôde ser determinado a partir de evidência "
-                "disponível (estratégia de teste, Postman, OpenAPI, contrato ou exemplo); "
-                "a asserção de status não foi gerada — cenário mantido como validação parcial "
-                "('assert response is not None')."
+        warnings=(
+            PlaywrightGenerationWarning(
+                code=EXPECTED_STATUS_NOT_DEFINED,
+                message=(
+                    "Nenhum status HTTP esperado pôde ser determinado a partir de evidência "
+                    "disponível (estratégia de teste, Postman, OpenAPI, contrato ou exemplo); "
+                    "a asserção de status não foi gerada — cenário mantido como validação "
+                    "parcial ('assert response is not None')."
+                ),
+                endpoint=strategy.endpoint_source,
+                scenario="success",
             ),
-            endpoint=strategy.endpoint_source,
-            scenario="success",
+            PlaywrightGenerationWarning(
+                code=BROAD_STATUS_ASSERTION,
+                message=(
+                    "Asserção de status classificada como BROAD (aproximação): sem status "
+                    "exato disponível, o cenário valida apenas que a resposta não é nula."
+                ),
+                endpoint=strategy.endpoint_source,
+                scenario="success",
+            ),
         ),
+        classification=classification,
     )
 
 
@@ -1068,6 +1164,11 @@ class _ContentTypeAssertionResolution:
     # explícita de body JSON"). False tanto quando não há evidência quanto
     # quando ela aponta um media type não-JSON.
     is_json_compatible: bool = False
+    # None quando não há evidência (nada gerado, nada a classificar —
+    # ausência de Content-Type esperado é o caso normal para uma resposta
+    # sem corpo, não um caso degradado; Parte 23 só classifica expectativas
+    # realmente geradas).
+    classification: AssertionClassification | None = None
 
 
 def _find_content_type_assertion(strategy: TestStrategy) -> AssertionDefinition | None:
@@ -1103,11 +1204,23 @@ def _resolve_content_type_assertion(strategy: TestStrategy) -> _ContentTypeAsser
         # (.lower()) antes de comparar.
         f'    assert content_type.split(";")[0].strip().lower() == {expected_literal}\n',
     )
+    # Content-Type documentado explicitamente (JSON Schema/OpenAPI/contrato)
+    # — sempre EXACT quando gerado; nunca uma aproximação (o media type
+    # exigido é sempre o exato, nunca "algo parecido").
+    classification = _exact(
+        "content_type",
+        source=assertion.origin,
+        justification=f"Content-Type documentado explicitamente (evidência: {assertion.origin}).",
+    )
     docstring_note = (
-        f"    Content-Type: {expected_media_type} [{kind}] (origem: {assertion.origin})\n"
+        f"    Content-Type: {expected_media_type} [{kind}] (origem: {assertion.origin})"
+        f"{_classification_docstring_suffix(classification.precision)}\n"
     )
     return _ContentTypeAssertionResolution(
-        lines=lines, docstring_note=docstring_note, is_json_compatible=is_json
+        lines=lines,
+        docstring_note=docstring_note,
+        is_json_compatible=is_json,
+        classification=classification,
     )
 
 
@@ -1161,6 +1274,12 @@ class _BodyJsonResolution:
     docstring_note: str
     warning: PlaywrightGenerationWarning | None
     extra_imports: frozenset[str]
+    # None só quando nada foi gerado (sem evidência de JSON) — quando o
+    # parse acontece, sempre há uma classificação: EXACT com o tipo do
+    # nível superior conhecido, BROAD sem ele (regra 2 da Parte 23: mesmo
+    # warning BODY_STRUCTURE_NOT_DETERMINED já emitido serve como "warning
+    # equivalente ao tipo da asserção").
+    classification: AssertionClassification | None = None
 
 
 def _resolve_body_json_assertion(
@@ -1203,6 +1322,14 @@ def _resolve_body_json_assertion(
         # nunca campos, valores ou schema completo.
         lines.append(f"    assert {type_expression}\n")
         assert schema_assertion is not None  # garantido por type_expression não-None
+        classification = _exact(
+            "body",
+            source=schema_assertion.origin,
+            justification=(
+                f"Estrutura do nível superior ('{json_type}') documentada explicitamente no "
+                f"schema (evidência: {schema_assertion.origin})."
+            ),
+        )
         docstring_extra = f" [estrutura: {json_type}, origem: {schema_assertion.origin}]"
     else:
         warning = PlaywrightGenerationWarning(
@@ -1215,14 +1342,31 @@ def _resolve_body_json_assertion(
             endpoint=strategy.endpoint_source,
             scenario="success",
         )
+        # BROAD: só prova que o body é JSON bem formado, sem saber a
+        # estrutura — BODY_STRUCTURE_NOT_DETERMINED (acima) já é o "warning
+        # equivalente ao tipo da asserção" pedido pela regra 2 da Parte 23.
+        valid_json_body_assertion = _find_valid_json_body_assertion(strategy)
+        source = valid_json_body_assertion.origin if valid_json_body_assertion is not None else "none"
+        classification = _broad(
+            "body",
+            source=source,
+            justification=(
+                "Sem schema para determinar a estrutura do nível superior; validado apenas "
+                "que o corpo é JSON bem formado."
+            ),
+        )
 
-    docstring_note = f"    Body: JSON parseado em `body`{docstring_extra}\n"
+    docstring_note = (
+        f"    Body: JSON parseado em `body`{docstring_extra}"
+        f"{_classification_docstring_suffix(classification.precision)}\n"
+    )
 
     return _BodyJsonResolution(
         lines=tuple(lines),
         docstring_note=docstring_note,
         warning=warning,
         extra_imports=frozenset({"json", "pytest"}),
+        classification=classification,
     )
 
 
@@ -1366,6 +1510,7 @@ class _RequiredFieldsResolution:
     helper_names: frozenset[str]
     lines: tuple[str, ...]
     docstring_note: str
+    classification: AssertionClassification | None = None
 
 
 def _resolve_required_fields_assertion(
@@ -1394,9 +1539,21 @@ def _resolve_required_fields_assertion(
         lines.extend(_render_required_array_field_lines(array_field))
 
     total = len(required_paths) + len(required_arrays)
+    # Sempre EXACT quando gerado: cada campo é literalmente listado em
+    # "required" no schema — nunca uma aproximação (ausência de evidência
+    # não gera nada, ver "empty" acima, nunca um BROAD "talvez obrigatório").
+    classification = _exact(
+        "required_fields",
+        source=schema_assertion.origin,
+        justification=(
+            f"{total} campo(s) declarado(s) como 'required' no schema documentado "
+            f"(evidência: {schema_assertion.origin})."
+        ),
+    )
     docstring_note = (
         f"    Required fields: {total} campo(s) obrigatório(s) validados "
-        f"(origem: {schema_assertion.origin})\n"
+        f"(origem: {schema_assertion.origin})"
+        f"{_classification_docstring_suffix(classification.precision)}\n"
     )
 
     helper_names = {"assert_required_field_present"}
@@ -1407,6 +1564,7 @@ def _resolve_required_fields_assertion(
         helper_names=frozenset(helper_names),
         lines=tuple(lines),
         docstring_note=docstring_note,
+        classification=classification,
     )
 
 
@@ -1603,6 +1761,7 @@ class _FieldTypesResolution:
     helper_names: frozenset[str]
     lines: tuple[str, ...]
     docstring_note: str
+    classification: AssertionClassification | None = None
 
 
 def _resolve_field_types_assertion(
@@ -1633,8 +1792,21 @@ def _resolve_field_types_assertion(
         lines.extend(_render_array_item_type_check_lines(array_check))
 
     total = len(field_checks) + sum(len(a.item_fields) for a in array_checks)
+    # Sempre EXACT quando gerado: "type"/"nullable" vêm direto do schema,
+    # nunca uma aproximação de tipo (ver _normalize_field_type — tipo
+    # ambíguo/não documentado nunca gera checagem, então nunca chega BROAD
+    # aqui).
+    classification = _exact(
+        "field_types",
+        source=schema_assertion.origin,
+        justification=(
+            f"Tipo de {total} campo(s) documentado(s) explicitamente no schema "
+            f"(evidência: {schema_assertion.origin})."
+        ),
+    )
     docstring_note = (
-        f"    Field types: {total} campo(s) validados (origem: {schema_assertion.origin})\n"
+        f"    Field types: {total} campo(s) validados (origem: {schema_assertion.origin})"
+        f"{_classification_docstring_suffix(classification.precision)}\n"
     )
 
     helper_names = {"assert_field_type"}
@@ -1642,7 +1814,10 @@ def _resolve_field_types_assertion(
         helper_names.add("get_nested_value")
 
     return _FieldTypesResolution(
-        helper_names=frozenset(helper_names), lines=tuple(lines), docstring_note=docstring_note
+        helper_names=frozenset(helper_names),
+        lines=tuple(lines),
+        docstring_note=docstring_note,
+        classification=classification,
     )
 
 
@@ -1731,6 +1906,7 @@ class _JsonSchemaResolution:
     docstring_note: str
     warning: PlaywrightGenerationWarning | None
     extra_imports: frozenset[str]
+    classification: AssertionClassification | None = None
 
 
 def _resolve_json_schema_assertion(
@@ -1791,13 +1967,29 @@ def _resolve_json_schema_assertion(
         '            + "; mensagem: " + error.message\n',
         "        )\n",
     )
-    docstring_note = f"    JSON Schema: validado (origem: {schema_assertion.origin})\n"
+    # Sempre EXACT quando gerado: valida contra o schema REAL, completo —
+    # nunca uma aproximação (o $ref não suportado, o único jeito de ficar
+    # "menos que exato", já pula a validação inteira acima, nunca gera uma
+    # checagem parcial disfarçada de completa).
+    classification = _exact(
+        "json_schema",
+        source=schema_assertion.origin,
+        justification=(
+            "Validação estrutural completa contra o schema documentado (biblioteca "
+            f"jsonschema; evidência: {schema_assertion.origin})."
+        ),
+    )
+    docstring_note = (
+        f"    JSON Schema: validado (origem: {schema_assertion.origin})"
+        f"{_classification_docstring_suffix(classification.precision)}\n"
+    )
 
     return _JsonSchemaResolution(
         lines=lines,
         docstring_note=docstring_note,
         warning=None,
         extra_imports=frozenset({"jsonschema"}),
+        classification=classification,
     )
 
 
@@ -1958,6 +2150,11 @@ class _ExpectedValuesResolution:
     helper_names: frozenset[str]
     lines: tuple[str, ...]
     docstring_note: str
+    # Mais de uma entrada quando o cenário mistura precisões (ex.: um
+    # "const" EXACT e um "enum" de 2+ valores DERIVED no mesmo endpoint) —
+    # nunca uma única classificação "média" que esconderia a diferença
+    # (regra 3 da Parte 23: BROAD/DERIVED nunca contam como EXACT).
+    classifications: tuple[AssertionClassification, ...] = ()
 
 
 def _resolve_expected_values_assertion(
@@ -1989,15 +2186,53 @@ def _resolve_expected_values_assertion(
     for correlation_check in correlation_checks:
         lines.extend(_render_correlation_check_lines(correlation_check))
 
+    # "const"/enum de 1 valor e correlação são sempre EXACT (valor único,
+    # sem ambiguidade); "enum" de 2+ valores é DERIVED (conjunto de valores
+    # permitidos derivado do schema, sem um valor único garantido) — nunca
+    # os dois misturados numa única classificação (regra 3).
+    const_checks = [c for c in value_checks if c.kind == "const"]
+    enum_checks = [c for c in value_checks if c.kind == "enum"]
+
+    classifications: list[AssertionClassification] = []
+    tags: list[str] = []
+    exact_total = len(const_checks) + len(correlation_checks)
+    if exact_total:
+        classifications.append(
+            _exact(
+                "expected_values",
+                source=schema_assertion.origin,
+                justification=(
+                    f"{exact_total} campo(s) com valor único documentado explicitamente "
+                    "('const'/'enum' de 1 valor) e/ou correlação comprovada com o request "
+                    "('x-source-request-field')."
+                ),
+            )
+        )
+        tags.append(f"EXACT:{exact_total}")
+    if enum_checks:
+        classifications.append(
+            _derived(
+                "expected_values",
+                source=schema_assertion.origin,
+                justification=(
+                    f"{len(enum_checks)} campo(s) com conjunto de valores permitidos derivado "
+                    "do 'enum' documentado no schema, sem valor único garantido."
+                ),
+            )
+        )
+        tags.append(f"DERIVED:{len(enum_checks)}")
+
     total = len(value_checks) + len(correlation_checks)
     docstring_note = (
-        f"    Expected values: {total} campo(s) validados (origem: {schema_assertion.origin})\n"
+        f"    Expected values: {total} campo(s) validados (origem: {schema_assertion.origin}) "
+        f"[{', '.join(tags)}]\n"
     )
 
     return _ExpectedValuesResolution(
         helper_names=frozenset({"get_nested_value"}),
         lines=tuple(lines),
         docstring_note=docstring_note,
+        classifications=tuple(classifications),
     )
 
 
@@ -2128,13 +2363,29 @@ def _generate_positive_success_test(
         f"{''.join(expected_values_resolution.lines)}"
     )
 
-    warnings = header_resolution.warnings
-    if status_resolution.warning is not None:
-        warnings = warnings + (status_resolution.warning,)
+    warnings = header_resolution.warnings + status_resolution.warnings
     if response_body_resolution.warning is not None:
         warnings = warnings + (response_body_resolution.warning,)
     if json_schema_resolution.warning is not None:
         warnings = warnings + (json_schema_resolution.warning,)
+
+    # Parte 23: uma entrada por categoria de asserção que de fato gerou
+    # algo — nunca uma entrada "vazia" para uma categoria sem evidência
+    # nenhuma (content_type sem evidência, json_schema pulado por $ref não
+    # suportado etc. simplesmente não aparecem aqui).
+    assertion_classifications = tuple(
+        classification
+        for classification in (
+            status_resolution.classification,
+            content_type_resolution.classification,
+            response_body_resolution.classification,
+            required_fields_resolution.classification,
+            field_types_resolution.classification,
+            json_schema_resolution.classification,
+            *expected_values_resolution.classifications,
+        )
+        if classification is not None
+    )
 
     return GeneratedEndpointTest(
         endpoint_source=strategy.endpoint_source,
@@ -2146,4 +2397,5 @@ def _generate_positive_success_test(
         required_environment_variables=tuple(sorted(session.required_environment_variables)),
         resolved_variables=tuple(sorted(session.resolved_variables.items())),
         unresolved_variables=(),
+        assertion_classifications=assertion_classifications,
     )

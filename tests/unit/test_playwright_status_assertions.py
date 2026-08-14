@@ -135,9 +135,14 @@ def test_absence_of_known_status_never_invents_200_or_any_other_code():
 def test_absence_of_known_status_registers_a_traceable_warning():
     generated = _generate(_GET_USERS, ())
 
-    assert len(generated.warnings) == 1
-    warning = generated.warnings[0]
-    assert warning.code == EXPECTED_STATUS_NOT_DEFINED
+    # Parte 23: junto de EXPECTED_STATUS_NOT_DEFINED (por que não há
+    # evidência), também BROAD_STATUS_ASSERTION (o que foi gerado no lugar
+    # é uma aproximação) — os dois sempre coexistem, nunca um no lugar do
+    # outro.
+    assert len(generated.warnings) == 2
+    codes = {warning.code for warning in generated.warnings}
+    assert codes == {"EXPECTED_STATUS_NOT_DEFINED", "BROAD_STATUS_ASSERTION"}
+    warning = next(w for w in generated.warnings if w.code == EXPECTED_STATUS_NOT_DEFINED)
     assert warning.endpoint == "GET /users"
     assert warning.scenario == "success"
 

@@ -15,6 +15,8 @@ import json
 
 from api_quality_agent.domain.models import ExecutionContext, ExecutionMode
 from api_quality_agent.generators.playwright import (
+    AssertionClassification,
+    AssertionPrecision,
     DefaultPlaywrightTestSuiteBuilder,
     GeneratedEndpointTest,
     PlaywrightGenerationWarning,
@@ -34,9 +36,12 @@ _TOP_LEVEL_KEYS = {
     "required_environment_variables",
     "resolved_variables",
     "warnings",
+    "assertion_classifications",
 }
 
 _ENDPOINT_ENTRY_KEYS = {"endpoint", "method", "path", "file", "rendered"}
+
+_CLASSIFICATION_ENTRY_KEYS = {"endpoint", "assertion", "precision", "source", "justification"}
 
 # Duas formas de warning coexistem no mesmo array: um PlaywrightGenerationWarning
 # "de código" (code/endpoint/scenario/message) e o UNRESOLVED_VARIABLE "de
@@ -68,10 +73,12 @@ def _manifest_payload(endpoint_tests) -> dict:
     return json.loads(manifest_file.content)
 
 
-def test_schema_version_is_1_0():
+def test_schema_version_is_1_1():
+    # Bumpado conscientemente na Parte 23: acrescenta "assertion_
+    # classifications" (nunca remove/renomeia uma chave existente).
     payload = _manifest_payload([_endpoint_test("GET /pets")])
 
-    assert payload["schema_version"] == "1.0"
+    assert payload["schema_version"] == "1.1"
 
 
 def test_top_level_keys_match_exactly():
@@ -227,3 +234,79 @@ def test_empty_suite_produces_empty_but_well_shaped_manifest():
     assert payload["required_environment_variables"] == []
     assert payload["resolved_variables"] == {}
     assert payload["warnings"] == []
+    assert payload["assertion_classifications"] == {
+        "summary": {"exact": 0, "derived": 0, "broad": 0},
+        "entries": [],
+    }
+
+
+# --- Parte 23: classificação EXACT/DERIVED/BROAD -----------------------------
+
+
+def test_assertion_classification_entry_shape():
+    classification = AssertionClassification(
+        assertion="status",
+        precision=AssertionPrecision.EXACT,
+        source="contract",
+        justification="Status HTTP 200 documentado explicitamente.",
+    )
+    endpoint_tests = [
+        _endpoint_test("GET /pets", assertion_classifications=(classification,))
+    ]
+
+    payload = _manifest_payload(endpoint_tests)
+
+    entries = payload["assertion_classifications"]["entries"]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert set(entry.keys()) == _CLASSIFICATION_ENTRY_KEYS
+    assert entry == {
+        "endpoint": "GET /pets",
+        "assertion": "status",
+        "precision": "exact",
+        "source": "contract",
+        "justification": "Status HTTP 200 documentado explicitamente.",
+    }
+
+
+def test_assertion_classification_summary_counts_each_precision_separately():
+    # "BROAD não pode ser contabilizado como equivalente a EXACT" — as três
+    # chaves do resumo sempre presentes e nunca mescladas.
+    endpoint_tests = [
+        _endpoint_test(
+            "GET /pets",
+            assertion_classifications=(
+                AssertionClassification("status", AssertionPrecision.EXACT, "contract", "..."),
+                AssertionClassification("body", AssertionPrecision.BROAD, "none", "..."),
+                AssertionClassification(
+                    "expected_values", AssertionPrecision.DERIVED, "contract", "..."
+                ),
+            ),
+        ),
+        _endpoint_test(
+            "POST /pets",
+            assertion_classifications=(
+                AssertionClassification("status", AssertionPrecision.EXACT, "contract", "..."),
+            ),
+        ),
+    ]
+
+    payload = _manifest_payload(endpoint_tests)
+
+    assert payload["assertion_classifications"]["summary"] == {
+        "exact": 2,
+        "derived": 1,
+        "broad": 1,
+    }
+    assert len(payload["assertion_classifications"]["entries"]) == 4
+
+
+def test_no_classifications_produce_an_empty_but_well_shaped_section():
+    endpoint_tests = [_endpoint_test("GET /pets")]
+
+    payload = _manifest_payload(endpoint_tests)
+
+    assert payload["assertion_classifications"] == {
+        "summary": {"exact": 0, "derived": 0, "broad": 0},
+        "entries": [],
+    }
