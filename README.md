@@ -8,7 +8,7 @@ Este projeto nasceu como um espaço para aplicar, na prática, o que venho estud
 
 ## Estado atual
 
-Já implementados (com testes automatizados — 984 testes, incluindo uma suíte de aceitação ponta a ponta em `tests/acceptance/`; mypy limpo):
+Já implementados (com testes automatizados — 1523 testes, incluindo uma suíte de aceitação ponta a ponta em `tests/acceptance/`; mypy e ruff limpos):
 
 - **CLI instalável**: `--help`, `--version`, `config show`, `doctor`, `version`, `workspace list`, `workspace select`, `list`, `generate`, `update`, `run` e `report`. Todos reutilizam os use cases já existentes (nenhuma regra de negócio nova na CLI): `workspace select`/`generate`/`update`/`run` aceitam seleção de Collection por ID, nome, índice ou interativamente (lógica compartilhada em `cli/collection_selection.py`), com Ctrl+C/EOF cancelando de forma limpa em qualquer prompt (tratamento centralizado em `cli/interactive.py`). `generate --file`/`run --file <collection.json>` rodam sem `POSTMAN_API_KEY` e sem nenhuma chamada de rede (ver "Modo Offline"). `generate --openapi-file <spec.json>` converte uma especificação OpenAPI/Swagger local numa Collection Postman sintética (`OpenApiCollectionConverter`) e roda o mesmo pipeline de geração sem alterá-lo — o resultado é uma Collection completa (`collection.json`, com os testes já embutidos), pronta para importar no Postman ou rodar direto com `run --file`. `generate --contract-file <contrato.xlsx>` usa um contrato de API declarado numa planilha Excel (schema por campo, não inferido de Examples) como fonte de schema para as requests da Collection que forem pareadas com ele (`ExcelContractParser` + `ExcelContractValidator` + `CanonicalEndpointNormalizer` + `ContractEndpointMatcher` + `SchemaProvider`), combinável com a seleção normal (online) ou com `--file`; endpoints sem contrato pareado continuam com a inferência de sempre (`FallbackSchemaProvider`), e um `contract-match-report.json`/`.html` é salvo junto dos demais artefatos mostrando o que casou, o que não foi encontrado e o que ficou ambíguo (nunca escolhido automaticamente). `update` gera os testes novamente a partir do estado *atual* da Collection no Postman e aplica a atualização remota (com preview, backup e confirmação padrão negativa) — reutiliza `GenerateCollectionTestsUseCase` + `UpdateCollectionUseCase` como já existiam, sem depender de artefatos de uma execução anterior do `generate`; só funciona com uma Collection real no Postman (não há modo offline para `update` — ver "Modo Offline"). `run` executa a Collection via Newman (`RunCollectionUseCase`), com o executável resolvido por `--newman-executable` > `NEWMAN_EXECUTABLE` > `"newman"`, mapeia o `ExecutionResult` para o código de saída (sucesso/falhas de teste/falha de infraestrutura são distinguidos, nunca por exceção), e persiste um resumo estruturado em `artifacts/run_<timestamp>/result.json` (schema `1.1`, aditivo sobre o `1.0` original — `PersistExecutionResultUseCase` + `JsonExecutionResultRepository`; nunca stdout/stderr brutos nem a Collection completa). `report` lê esse `result.json` (o mais recente por padrão, ou um `--input` específico) e gera um relatório HTML autocontido (`JsonExecutionResultReader` + `ReportEngine.render_execution_summary_html()` + `HtmlReportWriter`) — nunca reexecuta o Newman nem acessa o Postman; o código de saída representa se o relatório foi gerado, não se os testes passaram; funciona igual para resultados de execuções online e offline. Snapshots de contrato já existem e são testados na camada de aplicação, mas ainda não têm comando de CLI dedicado — ver limitações.
 - **Entrada**: `InputResolver` (arquivo/stdin/conteúdo direto) e `JsonDocumentParser`.
@@ -18,6 +18,7 @@ Já implementados (com testes automatizados — 984 testes, incluindo uma suíte
 - **Schema Inference Engine**: gera JSON Schema determinístico a partir de exemplos, com políticas conservadoras (`required` só com evidência, sem inferir formatos por nome de campo).
 - **Test Strategy Engine**: converte a análise em uma estratégia de testes estruturada (asserções, extrações de variável, cenários negativos), cada decisão com origem rastreável.
 - **Postman Test Generator**: converte a estratégia em JavaScript comentado para o campo *Tests* do Postman, com resumo legível em português e warnings de inferências incertas.
+- **Playwright Test Generator** (`generate --target playwright`, ao lado ou no lugar do Postman — ver seção dedicada abaixo): gera uma suíte pytest + Playwright autocontida (nunca importa `api_quality_agent` em runtime; helpers reutilizados — ex.: validação de campo obrigatório/tipo — são embutidos como texto literal no próprio arquivo) a partir da MESMA `TestStrategy` que já alimenta o gerador Postman. Toda asserção só existe com evidência real (status HTTP, Content-Type, body JSON, campos obrigatórios, tipos, JSON Schema completo via `jsonschema`, valores esperados via `const`/`enum`/`x-source-request-field`) e é classificada como `EXACT`/`DERIVED`/`BROAD` (nunca reclassificada pra reduzir warnings) — sem evidência suficiente, o cenário permanece uma aproximação clara e sinalizada (`assert response is not None`, com warning obrigatório), nunca finge testar algo que não testa. Um catálogo de warnings estável (`warning_catalog.py`) cobre as limitações conhecidas (método/Content-Type/autenticação não suportados, variável não resolvida, `$ref` remoto em JSON Schema etc.), deduplicado e sem nunca expor secret; uma guarda interna (`scenario_quality_guard.py`) rejeita padrões conhecidos de falso positivo (ex.: `response.json() is not None` como única checagem, `response.ok` no lugar de um status exato) antes de qualquer arquivo ser persistido. Variáveis `{{...}}` resolvem, nesta ordem, por Environment informado (`-e`), variável de nível de Collection (`variable[]`), default de `url.variable[]` por segmento de path e, por fim, deferidas para `os.environ.get("AQO_<NOME>")` em runtime — nunca um secret embutido como literal. Só GET/POST geram teste real hoje (demais métodos e autenticação herdada da Collection/pasta caem no fallback com warning, nunca em código enganoso). Publica `conftest.py`, um arquivo por endpoint em `endpoints/` e `generation-manifest.json` (schema `1.2`, com cobertura `complete`/`partial`/`not_generated` por endpoint e o resumo de precisão das asserções) junto dos demais artefatos.
 - **Integração com a API do Postman**: `PostmanApiClient` (via `urllib`, sem dependências de runtime novas), com leitura (`PostmanWorkspaceRepository`/`PostmanCollectionRepository`) e atualização (`update`, HTTP PUT), testados contra um servidor HTTP local (sem mocks).
 - **Seleção de Workspace/Collection**: `CollectionSelectionService` (resolução por id/nome com precedência clara) e os use cases `SelectWorkspaceUseCase`/`SelectCollectionUseCase`/`ResolveCollectionUseCase`/`ClearWorkspaceUseCase`/`ClearCollectionUseCase`/`ListWorkspacesUseCase`/`ListCollectionsUseCase`. A seleção ativa é persistida localmente (`FileSelectionRepository`) guardando apenas `workspace_id`/`collection_id` — nunca API key ou nomes. Seleções temporárias (override por id/nome numa chamada pontual) nunca alteram a seleção ativa persistida.
 - **Managed Block Merger**: mescla blocos gerados (`// <api-quality-agent:block id="...">...`) preservando código manual ao redor, com detecção de blocos duplicados/não fechados/corrompidos.
@@ -29,7 +30,7 @@ Já implementados (com testes automatizados — 984 testes, incluindo uma suíte
 - **Snapshots de contrato** (`ContractSnapshot` + `ContractComparisonEngine`): persistem uma representação puramente estrutural (schema, status codes, content types — nunca valores reais) por Workspace/Collection/método/endpoint, e comparam duas versões de forma determinística (campo adicionado/removido, mudança de tipo/`required`/enum, status code, content type). Atualizar um baseline existente exige `overwrite=True` explícito.
 - **Testes de aceitação ponta a ponta** (`tests/acceptance/`): validam os fluxos completos do SAD compondo os componentes reais acima (sem mocks internos — só um servidor Postman local simulado e um processo Newman simulado), incluindo alternância entre Collections, isolamento de artefatos e confirmação de que a atualização remota simulada nunca atinge uma Collection não selecionada. Matriz requisito×teste e limitações conhecidas do MVP em `tests/acceptance/README.md`.
 
-Principais limitações atuais (detalhadas em `tests/acceptance/README.md`): não há comando de CLI para snapshots de contrato, já implementados e testados na camada de aplicação, mas hoje só acionáveis compondo as classes diretamente em Python; a geração de testes a partir de OpenAPI (`generate --openapi-file`) não mapeia `SecurityDefinition` para `auth` do Postman (configure via Environment depois de importar), não agrupa endpoints em pastas, só lê o campo `example` singular do OpenAPI 3 (não `examples`, plural — limitação do `OpenApiParser`), e nunca gera exemplo sintético a partir só de um `schema` sem `example` documentado (mesmo princípio de nunca inventar dado sem evidência real); **`update` não tem modo offline** — "atualizar" significa aplicar via PUT numa Collection real do Postman (o recibo de confirmação, com `status_code`/`request_id`, só existe numa chamada HTTP de verdade), então não há equivalente local sensato; `report` só gera HTML (`--format html` é a única opção nesta versão — Markdown/PDF/CSV ficam para depois) e só mostra contagens agregadas de falha (o `result.json` nunca guardou o detalhamento por request/teste, então o relatório não inventa uma tabela que não existe); snapshots de contrato ainda não estão conectados a nenhum fluxo de geração/atualização; `generate --contract-file` (schema declarado em planilha Excel) tem seu próprio conjunto de limitações de escopo — ver seção "Contrato declarado em planilha Excel"; sem relatório de cobertura de código configurado no projeto; sem lint automatizado configurado (só `mypy`).
+Principais limitações atuais (detalhadas em `tests/acceptance/README.md`): não há comando de CLI para snapshots de contrato, já implementados e testados na camada de aplicação, mas hoje só acionáveis compondo as classes diretamente em Python; a geração de testes a partir de OpenAPI (`generate --openapi-file`) não mapeia `SecurityDefinition` para `auth` do Postman (configure via Environment depois de importar), não agrupa endpoints em pastas, só lê o campo `example` singular do OpenAPI 3 (não `examples`, plural — limitação do `OpenApiParser`), e nunca gera exemplo sintético a partir só de um `schema` sem `example` documentado (mesmo princípio de nunca inventar dado sem evidência real); **`update` não tem modo offline** — "atualizar" significa aplicar via PUT numa Collection real do Postman (o recibo de confirmação, com `status_code`/`request_id`, só existe numa chamada HTTP de verdade), então não há equivalente local sensato; `report` só gera HTML (`--format html` é a única opção nesta versão — Markdown/PDF/CSV ficam para depois) e só mostra contagens agregadas de falha (o `result.json` nunca guardou o detalhamento por request/teste, então o relatório não inventa uma tabela que não existe); snapshots de contrato ainda não estão conectados a nenhum fluxo de geração/atualização; `generate --contract-file` (schema declarado em planilha Excel) tem seu próprio conjunto de limitações de escopo — ver seção "Contrato declarado em planilha Excel"; sem relatório de cobertura de código configurado no projeto; lint automatizado via `ruff` (além de `mypy`), com uma política inicial que ignora o que já era comum no código antes de existir lint automatizado — ver comentário em `pyproject.toml`.
 
 ## Instalação local
 
@@ -98,6 +99,13 @@ api-quality-orchestrator generate --file local/collections/minha_collection_expo
 # Gera uma Collection Postman completa (com os testes já embutidos) a partir
 # de uma especificação OpenAPI/Swagger local — também sem POSTMAN_API_KEY
 api-quality-orchestrator generate --openapi-file local/specs/minha_api.json
+
+# Gera uma suíte Playwright (pytest + Playwright) em vez dos scripts do
+# Postman — funciona com seleção online, --file ou --openapi-file, do
+# mesmo jeito. Use --target all para gerar os dois de uma vez. Ver seção
+# "Geração de testes Playwright" para o que fazer com o resultado.
+api-quality-orchestrator generate --file local/collections/minha_collection_exportada.json --target playwright
+api-quality-orchestrator generate --collection-id <id> --target all
 
 # Usa um contrato declarado numa planilha Excel como fonte de schema, em vez
 # de inferir de Examples salvos — combinável com a seleção online normal...
@@ -214,6 +222,75 @@ api-quality-orchestrator report                                  # gera o relat�
 
 **`update` não tem — e não terá — um modo offline.** "Atualizar" significa aplicar as mudanças via PUT numa Collection real do Postman; o retorno inclui um recibo de confirmação (`status_code`, `request_id`) que só existe numa chamada HTTP de verdade. Sem um destino remoto, não há o que "atualizar" — inventar esses campos pra uma operação puramente local violaria a mesma regra que o projeto segue desde o início (nunca inventar dado que não existe). Se um dia fizer sentido "aplicar os testes de volta no arquivo local", isso seria uma funcionalidade nova e diferente, não uma variação do `update` atual.
 
+### Geração de testes Playwright (`--target playwright`)
+
+`generate` aceita `--target {postman,playwright,all}` (padrão `postman`, comportamento inalterado para quem não usa a flag). Com `playwright` ou `all`, o mesmo pipeline de análise/estratégia (`ApiAnalysisEngine` + `TestStrategyEngine`) que já alimenta o gerador Postman também alimenta um `PlaywrightEndpointTestGenerator`, produzindo uma suíte **pytest + Playwright** completa e autocontida — funciona com seleção online, `--file` ou `--openapi-file`, exatamente como o `--target postman` (padrão):
+
+```bash
+api-quality-orchestrator generate --file collection.json --target playwright
+api-quality-orchestrator generate --collection-id <id> --target all -e ambiente.json
+```
+
+Os arquivos saem junto dos demais artefatos, em `artifacts/.../scripts/playwright/`:
+
+- `conftest.py` — fixture `api_context` (`playwright.sync_api.APIRequestContext`) compartilhada por toda a suíte, com `base_url` padrão resolvido da própria Collection (sobrescrevível em runtime via `PLAYWRIGHT_BASE_URL`, sem regenerar nada).
+- `endpoints/test_<endpoint>.py` — um arquivo por endpoint, cada um com um cenário positivo (`test_<algo>_success`).
+- `generation-manifest.json` (schema `1.2`) — todo endpoint processado, arquivo gerado, variável resolvida/pendente, warning e a classificação de precisão de cada asserção, nunca um resumo aproximado.
+
+**Toda asserção só existe com evidência — nunca uma suposição de "provavelmente é assim".** Cada expectativa gerada (status, Content-Type, estrutura do body, campos obrigatórios, tipos, JSON Schema completo, valores esperados) é classificada em `generation-manifest.json` como:
+
+- **EXACT** — a expectativa está documentada explicitamente (ex.: um status/Content-Type/schema salvo num Example, ou um contrato declarado).
+- **DERIVED** — deriva de evidência estruturada sem arbitrariedade (ex.: conjunto de valores permitidos a partir de um `enum` com 2+ opções).
+- **BROAD** — aproximação deliberada, usada só quando não há expectativa exata (ex.: sem nenhum status documentado, o cenário mantém `assert response is not None` em vez de inventar um `200`) — sempre acompanhada de um warning obrigatório (`BROAD_STATUS_ASSERTION` ou equivalente), nunca contabilizada como se fosse `EXACT`.
+
+Um exemplo real (endpoint com Example salvo — `POST /posts`, a partir da Collection pública JSONPlaceholder.dev):
+
+```python
+def test_post_posts_success(api_context):
+    """
+    Status: 201 (origem: contract) [EXACT]
+    Content-Type: application/json [JSON] (origem: contract) [EXACT]
+    Body: JSON parseado em `body` [estrutura: object, origem: contract] [EXACT]
+    Required fields: 4 campo(s) obrigatório(s) validados (origem: contract) [EXACT]
+    Field types: 4 campo(s) validados (origem: contract) [EXACT]
+    JSON Schema: validado (origem: contract) [EXACT]
+    """
+    request_body = {"userId": 1, "title": "My New Post", "body": "..."}
+    response = api_context.post("/posts", data=request_body)
+
+    assert response.status == 201
+    content_type = response.headers.get("content-type", "")
+    assert content_type.split(";")[0].strip().lower() == "application/json"
+    body = json.loads(response.text())
+    assert isinstance(body, dict)
+    _assert_required_field_present(body, ('id',))
+    _assert_field_type(body, ('id',), 'integer', False)
+    jsonschema.validate(instance=body, schema=_response_json_schema)
+```
+
+Um endpoint sem nenhum Example salvo ainda gera um teste real (nunca é pulado só por falta de evidência), mas fica honesto sobre o que sabe: `assert response is not None`, marcado `[BROAD]` na docstring, com os warnings correspondentes — nunca finge validar um status/schema que não foi documentado em lugar nenhum.
+
+**Resolução de `{{variáveis}}`** (path, host, query, header, auth, body — sempre pelo mesmo resolvedor central, nunca uma regra por campo), nesta ordem determinística:
+
+1. Environment informado via `-e/--environment` (só variáveis não marcadas `"type": "secret"`).
+2. Variável de nível de Collection — o array `variable[]` do topo do arquivo (ex.: `baseUrl` declarado uma única vez para toda a Collection).
+3. Default declarado em `url.variable[]` (o valor que o Postman guarda ao lado de um segmento de path `:nome`/`{nome}` — mecanismo próprio, separado do item 2).
+4. Variável de ambiente do sistema, lida só quando a suíte gerada roda de verdade — o código lê `os.environ.get("AQO_<NOME>")`, nunca embutindo o valor. É o que sempre acontece com uma variável marcada `secret` em qualquer uma das fontes acima, ou com qualquer nome que não resolva em 1-3.
+5. Sem resolução em nenhuma das anteriores — o endpoint cai no fallback (placeholder + warning `UNRESOLVED_VARIABLE`/`URL_NOT_RESOLVED`), nunca em código que finja usar um valor inventado.
+
+**Escopo desta versão** (limites deliberados, não bugs — ver "Limitações conhecidas"): só **GET/POST** geram teste real (demais métodos caem no fallback); autenticação suportada é **Bearer Token/API Key/Basic Auth**, e só quando o valor é uma referência pura a uma variável (`{{nome}}`, nunca um literal fixo nem herdado de Collection/pasta); body suportado é **JSON (raw) ou multipart/form-data**.
+
+**A suíte gerada não é executada pelo CLI** — não existe (ainda) um `run --target playwright`. Para rodar de verdade, num ambiente à parte (não precisa ser o mesmo usado para desenvolver este projeto):
+
+```bash
+pip install pytest playwright jsonschema   # jsonschema só é necessária se algum endpoint usar validação por JSON Schema
+playwright install                         # baixa o driver do Playwright, mesmo usando só APIRequestContext (sem browser)
+
+# exporte as variáveis AQO_* listadas em generation-manifest.json -> required_environment_variables
+cd artifacts/.../scripts/playwright
+pytest
+```
+
 ### Contrato declarado em planilha Excel (`--contract-file`)
 
 Times que mantêm o contrato de cada endpoint numa planilha (campo, formato, tamanho, obrigatoriedade — schema **declarado**, não inferido de um Example salvo) podem usar esse contrato como fonte de schema para `generate`, em vez de depender de haver um "Example Response" salvo no Postman:
@@ -327,6 +404,26 @@ A mesma composição, estendida com atualização remota (`UpdateCollectionUseCa
   resposta correta. Não é um bug a ser corrigido, mas um trade-off inerente
   a qualquer geração baseada em exemplo — usar mais exemplos reduz o risco,
   mas não o elimina.
+- **Playwright (`--target playwright`/`all`) só gera testes reais para
+  GET/POST** — PUT/PATCH/DELETE e demais métodos caem no fallback
+  (`@pytest.mark.skip` + warning `HTTP_METHOD_NOT_SUPPORTED`), sem gerar
+  nenhuma asserção enganosa. Autenticação herdada da Collection/pasta
+  ("Inherit auth from parent") não é resolvida (tratada como "sem
+  autenticação"); só Bearer Token/API Key/Basic Auth declarados
+  diretamente na request, com o valor sendo uma referência pura a
+  `{{variável}}`, são suportados.
+- **Sem `run`/`report` para a suíte Playwright** — diferente do fluxo
+  Postman (`run` via Newman), a suíte gerada em `--target playwright`
+  precisa ser executada manualmente (`pytest`, ver seção "Geração de
+  testes Playwright"); não há comando de CLI que a execute nem que gere
+  relatório a partir dela.
+- **`base_url` do `conftest.py` gerado fica vazio quando o objeto `url` da
+  request não declara `"protocol"` explicitamente** (comum em Collections
+  onde só `raw`/`host`/`path` foram preenchidos à mão, sem passar pelo
+  editor do Postman) — mesmo quando o host resolve corretamente. Nesse
+  caso, defina `PLAYWRIGHT_BASE_URL` manualmente antes de rodar `pytest`;
+  não é um bug de resolução de variável, é uma lacuna na composição do
+  `base_url` a partir de host+protocol.
 
 ## Comandos de qualidade
 
@@ -336,6 +433,9 @@ pytest
 
 # Verificação de tipos
 mypy src
+
+# Lint
+ruff check src tests
 ```
 
 ## Licença
