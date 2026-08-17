@@ -192,11 +192,11 @@ def test_catalog_still_contains_every_code_used_before_this_part():
 
 
 def test_http_method_not_supported_is_associated_with_endpoint_and_method():
-    generated = _generate({"request": {"method": "DELETE", "url": "https://api.exemplo.com/x"}})
+    generated = _generate({"request": {"method": "TRACE", "url": "https://api.exemplo.com/x"}})
 
     warning = next(w for w in generated.warnings if w.code == HTTP_METHOD_NOT_SUPPORTED)
-    assert warning.endpoint == "DELETE /x"
-    assert warning.method == "DELETE"
+    assert warning.endpoint == "TRACE /x"
+    assert warning.method == "TRACE"
     assert warning.location == "method"
     # Fallback: nunca um cenário de sucesso de verdade — scenario=None
     # (mesmo critério de "não gerado", distinto de um warning PARCIAL de um
@@ -219,7 +219,7 @@ def test_generator_no_longer_emits_the_generic_endpoint_not_supported_code():
     # HTTP_METHOD_NOT_SUPPORTED/URL_NOT_RESOLVED (mais específicos) o
     # substituem nos dois casos que ele cobria.
     scenarios = (
-        {"request": {"method": "DELETE", "url": "https://api.exemplo.com/x"}},
+        {"request": {"method": "TRACE", "url": "https://api.exemplo.com/x"}},
         {"request": {"method": "GET", "url": "https://api.exemplo.com/users/:id"}},
     )
     for request in scenarios:
@@ -445,7 +445,7 @@ def test_manifest_distinguishes_complete_partial_and_not_generated_coverage():
         {"request": {"method": "GET", "url": "https://api.exemplo.com/orders"}}
     )  # sem status assertion -> BROAD
     not_generated = _generate(
-        {"request": {"method": "DELETE", "url": "https://api.exemplo.com/x"}}
+        {"request": {"method": "TRACE", "url": "https://api.exemplo.com/x"}}
     )
 
     payload = _manifest_payload([complete, partial, not_generated])
@@ -453,7 +453,7 @@ def test_manifest_distinguishes_complete_partial_and_not_generated_coverage():
     coverage_by_endpoint = {entry["endpoint"]: entry["coverage"] for entry in payload["endpoints"]}
     assert coverage_by_endpoint["GET /users"] == "complete"
     assert coverage_by_endpoint["GET /orders"] == "partial"
-    assert coverage_by_endpoint["DELETE /x"] == "not_generated"
+    assert coverage_by_endpoint["TRACE /x"] == "not_generated"
 
 
 # --- fluxo Postman preservado -------------------------------------------------

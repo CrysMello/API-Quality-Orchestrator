@@ -91,10 +91,33 @@ _RESERVED_HEADER_NAMES = frozenset({"authorization", "content-type"})
 # variable_resolver.py.
 
 # Parte 13 — método passa a incluir POST (além de GET), principalmente
-# para poder carregar um body JSON. PUT/PATCH/DELETE continuam fora do
-# escopo (nenhum exemplo/critério desta parte os menciona) — mesma
-# incrementalidade conservadora das partes anteriores.
-_SUPPORTED_METHODS = frozenset({"GET", "POST"})
+# para poder carregar um body JSON.
+#
+# Parte 08A — mapeamento central e explícito dos métodos HTTP suportados,
+# reaproveitando toda a montagem de argumentos já existente (URL/params/
+# headers/auth/data/form/multipart) via _render_http_call: nenhum renderer
+# independente por método. GET/POST/PUT/PATCH/DELETE/HEAD têm um método
+# nativo dedicado em APIRequestContext (api_context.<verbo>); OPTIONS não
+# tem equivalente nativo no Playwright e é servido via fetch(...,
+# method="OPTIONS") — nunca fetch() liberado para qualquer verbo arbitrário
+# (whitelist explícita, ver _SUPPORTED_METHODS abaixo). A presença de body é
+# decidida por NormalizedRequest.body.has_content (ver _resolve_body),
+# nunca pelo verbo em si — DELETE com body ou GET sem body são igualmente
+# representáveis.
+_NATIVE_HTTP_METHODS: dict[str, str] = {
+    "GET": "get",
+    "POST": "post",
+    "PUT": "put",
+    "PATCH": "patch",
+    "DELETE": "delete",
+    "HEAD": "head",
+}
+# Métodos sem chamada nativa em APIRequestContext, mas explicitamente
+# habilitados via fetch(..., method=<verbo>) — só OPTIONS nesta etapa; um
+# verbo fora desta lista (ex.: TRACE, CONNECT) continua caindo no fallback
+# (HTTP_METHOD_NOT_SUPPORTED), nunca liberado silenciosamente por fetch().
+_FETCH_ONLY_METHODS: frozenset[str] = frozenset({"OPTIONS"})
+_SUPPORTED_METHODS: frozenset[str] = frozenset(_NATIVE_HTTP_METHODS) | _FETCH_ONLY_METHODS
 
 # Body: RAW + Content-Type de JSON (Parte 13) e multipart/form-data (Parte
 # 14) são suportados; qualquer outro modo (urlencoded, graphql, file) ou RAW
@@ -645,15 +668,27 @@ def _render_http_call(
     # este ponto só monta o texto, nunca decide como cada valor deve ser
     # representado. data e multipart são mutuamente exclusivos (JSON vs
     # multipart/form-data — nunca os dois ao mesmo tempo, ver _resolve_body).
-    call = f"api_context.{method}"
+    #
+    # Parte 08A — method já chega em maiúsculas (mesma convenção de
+    # _SUPPORTED_METHODS); um método nativo (_NATIVE_HTTP_METHODS) vira
+    # api_context.<verbo>(...), qualquer outro habilitado (só OPTIONS nesta
+    # etapa, ver _FETCH_ONLY_METHODS) vira api_context.fetch(..., method=
+    # "OPTIONS") — o argumento method= é sempre explícito, nunca deixado no
+    # default do fetch (que seria GET).
+    native_method = _NATIVE_HTTP_METHODS.get(method)
+    call = f"api_context.{native_method}" if native_method is not None else "api_context.fetch"
+    method_kwarg = None if native_method is not None else _python_string_literal(method)
+
     path_literal = _python_string_literal(path)
-    if not params and not headers and data is None and not multipart:
+    if method_kwarg is None and not params and not headers and data is None and not multipart:
         return f"    response = {call}({path_literal})\n"
 
     lines = [
         f"    response = {call}(\n",
         f"        {path_literal},\n",
     ]
+    if method_kwarg is not None:
+        lines.append(f"        method={method_kwarg},\n")
     if params:
         lines.append("        params={\n")
         for key, value in params.items():
@@ -2373,7 +2408,10 @@ def _generate_positive_success_test(
 ) -> GeneratedEndpointTest:
     slug = endpoint_source_to_slug(strategy.endpoint_source)
     function_name = f"test_{slug}_success"
-    method = (request.method or "get").lower()
+    # Maiúsculas: mesma convenção de _SUPPORTED_METHODS/_NATIVE_HTTP_METHODS
+    # (Parte 08A) — _render_http_call decide, a partir daqui, entre um
+    # método nativo (api_context.<verbo>) e fetch(..., method=...).
+    method = (request.method or "GET").upper()
     status_resolution = _resolve_status_assertion(strategy)
     content_type_resolution = _resolve_content_type_assertion(strategy)
     response_body_resolution = _resolve_body_json_assertion(strategy, content_type_resolution)

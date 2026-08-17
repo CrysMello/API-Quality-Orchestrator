@@ -141,11 +141,11 @@ def test_query_parameter_values_appear_structured_never_smashed_into_path_or_doc
 
 
 def test_unsupported_method_falls_back_to_placeholder_with_warning():
-    # A partir da Parte 13, POST também é suportado (para poder carregar
-    # body JSON) — DELETE continua fora do escopo, mesmo caso do teste
-    # original antes da Parte 13.
+    # A partir da Parte 08A, GET/POST/PUT/PATCH/DELETE/HEAD (nativos) e
+    # OPTIONS (via fetch) são suportados — TRACE fica fora da whitelist
+    # explícita e continua caindo no fallback.
     generated = _generate(
-        {"request": {"method": "DELETE", "url": "https://api.exemplo.com/users/1"}}
+        {"request": {"method": "TRACE", "url": "https://api.exemplo.com/users/1"}}
     )
 
     assert "@pytest.mark.skip" in generated.content
@@ -155,10 +155,10 @@ def test_unsupported_method_falls_back_to_placeholder_with_warning():
     # Parte 24: código específico (nunca mais o genérico ENDPOINT_NOT_
     # SUPPORTED_YET) para o motivo exato do fallback.
     assert warning.code == HTTP_METHOD_NOT_SUPPORTED
-    assert warning.endpoint == "DELETE /users/1"
-    assert warning.method == "DELETE"
+    assert warning.endpoint == "TRACE /users/1"
+    assert warning.method == "TRACE"
     assert warning.location == "method"
-    assert "método DELETE" in warning.message
+    assert "método TRACE" in warning.message
 
 
 def test_post_without_body_produces_a_real_positive_test():
@@ -244,7 +244,7 @@ def test_request_with_openapi_style_path_variable_falls_back_with_warning():
 
 def test_fallback_content_is_still_syntactically_valid_python():
     generated = _generate(
-        {"request": {"method": "DELETE", "url": "https://api.exemplo.com/users/1"}}
+        {"request": {"method": "TRACE", "url": "https://api.exemplo.com/users/1"}}
     )
 
     ast.parse(generated.content)
@@ -295,7 +295,7 @@ def test_environment_never_leaks_into_the_fallback_content_either():
     )
 
     generated = _generate(
-        {"request": {"method": "DELETE", "url": "https://api.exemplo.com/users/1"}}, environment
+        {"request": {"method": "TRACE", "url": "https://api.exemplo.com/users/1"}}, environment
     )
 
     assert "outro-segredo-456" not in generated.content
@@ -1435,3 +1435,231 @@ def test_required_environment_variables_are_deduplicated_and_sorted():
     )
 
     assert generated.required_environment_variables == ("AQO_ALPHA", "AQO_BETA")
+
+
+# --- Parte 08A: PUT/PATCH/DELETE/HEAD/OPTIONS --------------------------------
+# Nenhum renderer independente por método — todos reaproveitam a mesma
+# montagem de URL/params/headers/auth/data/multipart e o mesmo pipeline de
+# asserções já exercitado acima para GET/POST; só o verbo (e, para OPTIONS,
+# fetch(..., method=...) em vez de um método nativo) muda.
+
+
+def test_simple_put_produces_a_real_positive_test():
+    generated = _generate({"request": {"method": "PUT", "url": "https://api.exemplo.com/users/1"}})
+
+    assert "def test_put_users_1_success(api_context):" in generated.content
+    assert 'api_context.put("/users/1")' in generated.content
+    assert "@pytest.mark.skip" not in generated.content
+    ast.parse(generated.content)
+
+
+def test_simple_patch_produces_a_real_positive_test():
+    generated = _generate(
+        {"request": {"method": "PATCH", "url": "https://api.exemplo.com/users/1"}}
+    )
+
+    assert "def test_patch_users_1_success(api_context):" in generated.content
+    assert 'api_context.patch("/users/1")' in generated.content
+    assert "@pytest.mark.skip" not in generated.content
+    ast.parse(generated.content)
+
+
+def test_simple_delete_produces_a_real_positive_test():
+    generated = _generate(
+        {"request": {"method": "DELETE", "url": "https://api.exemplo.com/users/1"}}
+    )
+
+    assert "def test_delete_users_1_success(api_context):" in generated.content
+    assert 'api_context.delete("/users/1")' in generated.content
+    assert "@pytest.mark.skip" not in generated.content
+    ast.parse(generated.content)
+
+
+def test_simple_head_produces_a_real_positive_test():
+    generated = _generate({"request": {"method": "HEAD", "url": "https://api.exemplo.com/users"}})
+
+    assert "def test_head_users_success(api_context):" in generated.content
+    assert 'api_context.head("/users")' in generated.content
+    assert "@pytest.mark.skip" not in generated.content
+    ast.parse(generated.content)
+
+
+def test_simple_options_uses_fetch_with_an_explicit_method_kwarg():
+    # OPTIONS não tem um método nativo dedicado em APIRequestContext — é
+    # servido via fetch(..., method="OPTIONS"), nunca api_context.options(...)
+    # (que não existe) nem fetch() sem o argumento method= explícito.
+    generated = _generate(
+        {"request": {"method": "OPTIONS", "url": "https://api.exemplo.com/status"}}
+    )
+
+    assert "def test_options_status_success(api_context):" in generated.content
+    assert (
+        "    response = api_context.fetch(\n"
+        '        "/status",\n'
+        '        method="OPTIONS",\n'
+        "    )\n"
+    ) in generated.content
+    assert "api_context.options" not in generated.content
+    assert "@pytest.mark.skip" not in generated.content
+    ast.parse(generated.content)
+
+
+def test_put_with_json_body_produces_a_real_positive_test():
+    generated = _generate(
+        {
+            "request": {
+                "method": "PUT",
+                "url": "https://api.exemplo.com/users/1",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "body": {"mode": "raw", "raw": '{"name": "Ana"}'},
+            }
+        }
+    )
+
+    assert 'api_context.put(\n' in generated.content
+    assert '    request_body = {\n        "name": "Ana",\n    }\n' in generated.content
+    assert "data=request_body,\n" in generated.content
+    assert "@pytest.mark.skip" not in generated.content
+    ast.parse(generated.content)
+
+
+def test_patch_with_headers_auth_and_body_produces_a_real_positive_test():
+    generated = _generate(
+        {
+            "request": {
+                "method": "PATCH",
+                "url": "https://api.exemplo.com/users/1",
+                "header": [
+                    {"key": "Content-Type", "value": "application/json"},
+                    {"key": "X-Correlation-Id", "value": "abc-123"},
+                ],
+                "auth": {
+                    "type": "bearer",
+                    "bearer": [{"key": "token", "value": "{{accessToken}}"}],
+                },
+                "body": {"mode": "raw", "raw": '{"status": "active"}'},
+            }
+        },
+        _env(accessToken=("secret-token-value", True)),
+    )
+
+    assert "def test_patch_users_1_success(api_context):" in generated.content
+    assert "response = api_context.patch(\n" in generated.content
+    assert '"X-Correlation-Id": "abc-123",' in generated.content
+    assert '"Authorization": f"Bearer {token}",' in generated.content
+    assert "request_body = {" in generated.content
+    assert "data=request_body,\n" in generated.content
+    assert "secret-token-value" not in generated.content
+    assert "@pytest.mark.skip" not in generated.content
+    ast.parse(generated.content)
+
+
+def test_delete_with_query_parameters_produces_a_real_positive_test():
+    generated = _generate(
+        {
+            "request": {
+                "method": "DELETE",
+                "url": {
+                    "raw": "https://api.exemplo.com/users?soft=true",
+                    "protocol": "https",
+                    "host": ["api", "exemplo", "com"],
+                    "path": ["users"],
+                    "query": [{"key": "soft", "value": "true"}],
+                },
+            }
+        }
+    )
+
+    assert "response = api_context.delete(\n" in generated.content
+    assert '"soft": True,' in generated.content
+    assert "@pytest.mark.skip" not in generated.content
+    ast.parse(generated.content)
+
+
+def test_delete_with_json_body_is_supported_when_the_request_really_has_a_body():
+    # "Não assumir que somente POST/PUT/PATCH podem possuir body": a
+    # presença de body é decidida pelo NormalizedRequest (has_content),
+    # nunca pelo verbo — DELETE com body é tão suportado quanto sem.
+    generated = _generate(
+        {
+            "request": {
+                "method": "DELETE",
+                "url": "https://api.exemplo.com/users/1",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "body": {"mode": "raw", "raw": '{"reason": "duplicate"}'},
+            }
+        }
+    )
+
+    assert "response = api_context.delete(\n" in generated.content
+    assert '    request_body = {\n        "reason": "duplicate",\n    }\n' in generated.content
+    assert "data=request_body,\n" in generated.content
+    assert "@pytest.mark.skip" not in generated.content
+    ast.parse(generated.content)
+
+
+def test_options_with_headers_and_query_still_uses_fetch_with_method_kwarg():
+    generated = _generate(
+        {
+            "request": {
+                "method": "OPTIONS",
+                "url": {
+                    "raw": "https://api.exemplo.com/users?scope=admin",
+                    "protocol": "https",
+                    "host": ["api", "exemplo", "com"],
+                    "path": ["users"],
+                    "query": [{"key": "scope", "value": "admin"}],
+                },
+                "header": [{"key": "Accept", "value": "application/json"}],
+            }
+        }
+    )
+
+    assert (
+        "    response = api_context.fetch(\n"
+        '        "/users",\n'
+        '        method="OPTIONS",\n'
+        "        params={\n"
+        '            "scope": "admin",\n'
+        "        },\n"
+        "        headers={\n"
+        '            "Accept": "application/json",\n'
+        "        },\n"
+        "    )\n"
+    ) in generated.content
+    assert "@pytest.mark.skip" not in generated.content
+    ast.parse(generated.content)
+
+
+def test_head_does_not_attempt_to_parse_a_body_without_evidence():
+    # "Para HEAD, não gerar parsing ou validações de body quando não houver
+    # expectativa explícita de conteúdo": mesma regra genérica das Partes
+    # 17/18 (parse só com evidência de Content-Type/JSON), sem tratamento
+    # especial de método — este teste comprova o comportamento resultante.
+    generated = _generate({"request": {"method": "HEAD", "url": "https://api.exemplo.com/users"}})
+
+    assert "response.text()" not in generated.content
+    assert "json.loads" not in generated.content
+    assert "body = " not in generated.content
+    ast.parse(generated.content)
+
+
+def test_response_204_preserves_the_no_content_rule_for_a_newly_supported_method():
+    # Regra já existente (Parte 16/18) continua valendo para os métodos
+    # recém-suportados: 204 documentado não gera parsing/validação de body.
+    generated = _generate(
+        {"request": {"method": "DELETE", "url": "https://api.exemplo.com/users/1"}},
+        assertions=(
+            AssertionDefinition(
+                assertion_type=AssertionType.STATUS_CODE,
+                description="Status code da resposta deve ser 204.",
+                expected_value=204,
+                origin="contract",
+            ),
+        ),
+    )
+
+    assert "assert response.status == 204" in generated.content
+    assert "response.text()" not in generated.content
+    assert "json.loads" not in generated.content
+    ast.parse(generated.content)
