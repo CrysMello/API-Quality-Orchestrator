@@ -30,6 +30,11 @@ dev = [
     "types-PyYAML>=6.0",
     "types-openpyxl>=3.1",
     "ruff>=0.16",
+    # Nunca uma dependência do pacote principal (a geração em si não a usa,
+    # só emite texto que a referencia) — só de desenvolvimento, para os
+    # testes deste projeto executarem de verdade o helper de JSON Schema
+    # (Parte 21) embutido no arquivo Playwright gerado.
+    "jsonschema>=4.0",
 ]
 
 [tool.setuptools.packages.find]

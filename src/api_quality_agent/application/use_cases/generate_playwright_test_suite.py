@@ -16,6 +16,7 @@ from api_quality_agent.generators.playwright import (
     GeneratedEndpointTest,
     GeneratedTestSuite,
     PlaywrightTestSuiteBuilder,
+    merge_collection_variables,
 )
 from api_quality_agent.ports.outbound import ArtifactRepository, SchemaProvider
 from api_quality_agent.shared import sanitize_filename_component
@@ -102,6 +103,14 @@ class GeneratePlaywrightTestSuiteUseCase:
     ) -> list[GeneratedEndpointTest]:
         analyzed_requests = self._analysis_engine.analyze_collection_requests(document)
 
+        # Variáveis de nível de Collection (ex.: "baseUrl" declarado uma
+        # única vez no topo do arquivo) materializadas como Environment de
+        # prioridade mais baixa — sem isso, um host/segmento que só
+        # existisse ali nunca resolvia sem um Environment explícito. Nunca
+        # sobrescreve uma variável de Environment já definida (ver
+        # merge_collection_variables).
+        effective_environment = merge_collection_variables(environment, document.variables)
+
         endpoint_tests: list[GeneratedEndpointTest] = []
         for analyzed in analyzed_requests:
             resolution = self._schema_provider.resolve(analyzed.raw_request)
@@ -110,7 +119,7 @@ class GeneratePlaywrightTestSuiteUseCase:
             )
             endpoint_tests.append(
                 self._endpoint_test_generator.generate_endpoint(
-                    strategy, analyzed.normalized_request, environment
+                    strategy, analyzed.normalized_request, effective_environment
                 )
             )
         return endpoint_tests

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from api_quality_agent.generators.playwright.playwright_generation_warning import (
     PlaywrightGenerationWarning,
 )
+from api_quality_agent.generators.playwright.warning_catalog import FILE_NAME_COLLISION_RESOLVED
 from api_quality_agent.shared import sanitize_filename_component
 
 # Um parâmetro de path pode vir como :nome (Postman) ou {nome}/{{nome}}
@@ -26,8 +27,6 @@ _MAX_ENDPOINT_SLUG_LENGTH = 40
 _ENDPOINT_SLUG_HASH_LENGTH = 8
 _FALLBACK_SLUG = "endpoint"
 
-FILE_NAME_COLLISION_RESOLVED = "FILE_NAME_COLLISION_RESOLVED"
-
 
 def to_snake_case(name: str) -> str:
     # Público: reaproveitado fora deste módulo (ex.: resolução de
@@ -46,6 +45,25 @@ def is_parameterized_segment(segment: str) -> bool:
     # resolvido — mesmo reconhecimento de :nome/{nome}/{{nome}} usado aqui
     # para nomear arquivos.
     return bool(_COLON_PARAMETER.match(segment) or _BRACE_PARAMETER.match(segment))
+
+
+def parameterized_segment_key(segment: str) -> str | None:
+    # Nome declarado dentro de :nome ou {nome} (ex.: "id" em ":id"/"{id}")
+    # — usado pela Parte 15 (variable_resolver) para casar um segmento de
+    # path parametrizado com o default de mesmo "key" em
+    # NormalizedUrl.variables. None quando o segmento não é parametrizado
+    # (is_parameterized_segment(segment) é False) — {{nome}} (variável
+    # Postman "de verdade", nunca "produzida por outro teste") também
+    # combina com _BRACE_PARAMETER (um-ou-mais "{"), mas quem chama isto já
+    # deve ter descartado esse caso via variable_resolver.extract_pure_variable_name
+    # antes de chegar aqui.
+    colon_match = _COLON_PARAMETER.match(segment)
+    if colon_match:
+        return colon_match.group(1)
+    brace_match = _BRACE_PARAMETER.match(segment)
+    if brace_match:
+        return brace_match.group(1)
+    return None
 
 
 def _segment_to_slug_part(segment: str) -> str:
@@ -129,6 +147,7 @@ def resolve_endpoint_file_names(
                 ),
                 endpoint=endpoint_source,
                 scenario=None,
+                metadata=(("base_name", base_name), ("resolved_name", resolved_name)),
             )
         )
 
