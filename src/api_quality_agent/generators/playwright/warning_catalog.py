@@ -25,6 +25,16 @@ HTTP_METHOD_NOT_SUPPORTED = "HTTP_METHOD_NOT_SUPPORTED"
 URL_NOT_RESOLVED = "URL_NOT_RESOLVED"
 BODY_NOT_SUPPORTED = "BODY_NOT_SUPPORTED"
 BODY_JSON_INVALID = "BODY_JSON_INVALID"
+# Parte 08B: body presente, sintaticamente JSON válido (json.loads aceita),
+# mas contém um valor que o renderer de literais não consegue representar
+# como código Python executável — hoje só NaN/Infinity/-Infinity (extensão
+# não-padrão que json.loads aceita por padrão; repr(float("nan")) produz o
+# texto "nan", um NOME indefinido em Python, não um literal). Nunca
+# corrigido por inferência (arredondar, remover o campo, trocar por None) —
+# mesmo tratamento de BODY_JSON_INVALID: o endpoint inteiro cai no
+# fallback, nunca um body aparentemente válido que quebraria a suíte gerada
+# só ao rodar de verdade.
+REQUEST_BODY_NOT_RENDERED = "REQUEST_BODY_NOT_RENDERED"
 MULTIPART_FILE_NOT_RESOLVED = "MULTIPART_FILE_NOT_RESOLVED"
 AUTHENTICATION_NOT_SUPPORTED = "AUTHENTICATION_NOT_SUPPORTED"
 AUTHENTICATION_VALUE_NOT_RESOLVED = "AUTHENTICATION_VALUE_NOT_RESOLVED"
@@ -76,6 +86,10 @@ PLAYWRIGHT_WARNING_CODE_DESCRIPTIONS: dict[str, str] = {
     URL_NOT_RESOLVED: "URL (host, path ou query) contém variável(is) sem resolução conhecida.",
     BODY_NOT_SUPPORTED: "Modo/Content-Type do body do request ainda não suportado.",
     BODY_JSON_INVALID: "Body declarado como JSON, mas o conteúdo não é um JSON válido.",
+    REQUEST_BODY_NOT_RENDERED: (
+        "Body é JSON válido, mas contém um valor (ex.: NaN/Infinity) sem representação "
+        "como literal Python executável."
+    ),
     MULTIPART_FILE_NOT_RESOLVED: "Campo de arquivo multipart sem nome (key) resolvível.",
     AUTHENTICATION_NOT_SUPPORTED: "Tipo de autenticação ainda não suportado pela geração real.",
     AUTHENTICATION_VALUE_NOT_RESOLVED: (

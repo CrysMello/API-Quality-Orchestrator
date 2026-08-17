@@ -1,4 +1,5 @@
 import json
+import math
 import re
 from dataclasses import dataclass, replace
 
@@ -59,6 +60,7 @@ from api_quality_agent.generators.playwright.warning_catalog import (
     INFORMATION_INSUFFICIENT,
     JSON_SCHEMA_REF_NOT_SUPPORTED,
     MULTIPART_FILE_NOT_RESOLVED,
+    REQUEST_BODY_NOT_RENDERED,
     RESERVED_HEADER_OMITTED,
     SENSITIVE_HEADER_OMITTED,
     URL_NOT_RESOLVED,
@@ -327,7 +329,7 @@ def _unsupported_body_reason(body: NormalizedBody) -> _UnsupportedReason | None:
         )
 
     try:
-        json.loads(body.text_content or "")
+        parsed = json.loads(body.text_content or "")
     except json.JSONDecodeError:
         # Nunca tenta corrigir automaticamente — só registra que não deu
         # para confiar no conteúdo declarado como JSON.
@@ -337,7 +339,36 @@ def _unsupported_body_reason(body: NormalizedBody) -> _UnsupportedReason | None:
             location="body",
         )
 
+    if _contains_non_finite_number(parsed):
+        # Parte 08B: json.loads aceita NaN/Infinity/-Infinity (extensão
+        # não-padrão), mas repr(float("nan")) produz o texto "nan" — um
+        # NOME indefinido em Python, não um literal — o que quebraria a
+        # suíte gerada só ao rodar de verdade. Nunca corrigido por
+        # inferência (arredondar, remover o campo, trocar por null): o
+        # endpoint inteiro cai no fallback, mesmo tratamento de
+        # BODY_JSON_INVALID.
+        return _UnsupportedReason(
+            REQUEST_BODY_NOT_RENDERED,
+            "body contém um valor numérico não finito (NaN/Infinity) sem representação "
+            "como literal Python válido",
+            location="body",
+        )
+
     return None
+
+
+def _contains_non_finite_number(value: Any) -> bool:
+    if isinstance(value, bool):
+        # bool é subclasse de int em Python — nunca cai no ramo de float
+        # abaixo, mesmo critério já usado no restante do módulo.
+        return False
+    if isinstance(value, float):
+        return math.isnan(value) or math.isinf(value)
+    if isinstance(value, list):
+        return any(_contains_non_finite_number(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_non_finite_number(item) for item in value.values())
+    return False
 
 
 def _unsupported_multipart_reason(body: NormalizedBody) -> _UnsupportedReason | None:

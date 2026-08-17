@@ -11,6 +11,7 @@ from api_quality_agent.domain.services import ApiAnalysisEngine
 from api_quality_agent.generators.playwright import (
     HTTP_METHOD_NOT_SUPPORTED,
     PlaywrightEndpointTestGenerator,
+    REQUEST_BODY_NOT_RENDERED,
 )
 from api_quality_agent.parsers import PostmanCollectionParser
 
@@ -1662,4 +1663,519 @@ def test_response_204_preserves_the_no_content_rule_for_a_newly_supported_method
     assert "assert response.status == 204" in generated.content
     assert "response.text()" not in generated.content
     assert "json.loads" not in generated.content
+    ast.parse(generated.content)
+
+
+# --- Parte 08B: payload por método, reutilizando o mesmo renderer ------------
+# "if normalized_request.body is not None: render_body()" — nenhuma destas
+# regras é implementada de novo por método; todas exercitam o MESMO
+# _resolve_body/_render_json_literal já usado desde as Partes 13/14/15, só
+# variando o verbo (e, por consequência, api_context.<verbo> ou
+# fetch(method=...)) e o payload em si.
+
+
+def _json_body_request(method: str, url: str, payload) -> dict:
+    return {
+        "request": {
+            "method": method,
+            "url": url,
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {"mode": "raw", "raw": json.dumps(payload)},
+        }
+    }
+
+
+# --- POST -----------------------------------------------------------------
+
+
+def test_post_json_object_body_is_rendered():
+    generated = _generate(_json_body_request("POST", "https://api.exemplo.com/users", {"name": "Maria"}))
+
+    assert '    request_body = {\n        "name": "Maria",\n    }\n' in generated.content
+    assert "response = api_context.post(\n" in generated.content
+    assert "data=request_body,\n" in generated.content
+    ast.parse(generated.content)
+
+
+def test_post_json_array_body_is_not_converted_into_an_object():
+    generated = _generate(
+        _json_body_request("POST", "https://api.exemplo.com/batch", [{"id": 1}, {"id": 2}])
+    )
+
+    assert (
+        "    request_body = [\n"
+        "        {\n"
+        '            "id": 1,\n'
+        "        },\n"
+        "        {\n"
+        '            "id": 2,\n'
+        "        },\n"
+        "    ]\n"
+    ) in generated.content
+    assert "data=request_body,\n" in generated.content
+    ast.parse(generated.content)
+
+
+def test_post_without_body_never_emits_a_data_or_multipart_argument():
+    generated = _generate({"request": {"method": "POST", "url": "https://api.exemplo.com/users"}})
+
+    assert 'response = api_context.post("/users")' in generated.content
+    assert "data=" not in generated.content
+    assert "multipart=" not in generated.content
+
+
+def test_post_multipart_uses_the_same_multipart_renderer():
+    generated = _generate(
+        {
+            "request": {
+                "method": "POST",
+                "url": "https://api.exemplo.com/upload",
+                "body": {
+                    "mode": "formdata",
+                    "formdata": [{"key": "name", "value": "Rex", "type": "text"}],
+                },
+            }
+        }
+    )
+
+    assert "response = api_context.post(\n" in generated.content
+    assert '"name": "Rex",' in generated.content
+    assert "multipart={\n" in generated.content
+    assert "data=" not in generated.content
+    ast.parse(generated.content)
+
+
+# --- PUT --------------------------------------------------------------------
+
+
+def test_put_nested_object_preserves_the_full_hierarchy():
+    generated = _generate(
+        _json_body_request(
+            "PUT",
+            "https://api.exemplo.com/orders/1",
+            {"customer": {"name": "Maria", "address": {"city": "Brasília"}}},
+        )
+    )
+
+    assert (
+        "    request_body = {\n"
+        '        "customer": {\n'
+        '            "name": "Maria",\n'
+        '            "address": {\n'
+        '                "city": "Brasília",\n'
+        "            },\n"
+        "        },\n"
+        "    }\n"
+    ) in generated.content
+    ast.parse(generated.content)
+
+
+def test_put_array_body_is_not_converted_into_an_object():
+    generated = _generate(
+        _json_body_request("PUT", "https://api.exemplo.com/orders/1/items", ["a", "b"])
+    )
+
+    assert '    request_body = [\n        "a",\n        "b",\n    ]\n' in generated.content
+    assert "response = api_context.put(\n" in generated.content
+    ast.parse(generated.content)
+
+
+def test_put_without_body_never_emits_a_data_argument():
+    generated = _generate({"request": {"method": "PUT", "url": "https://api.exemplo.com/users/1"}})
+
+    assert 'response = api_context.put("/users/1")' in generated.content
+    assert "data=" not in generated.content
+
+
+def test_put_with_query_and_body_renders_both():
+    generated = _generate(
+        {
+            "request": {
+                "method": "PUT",
+                "url": {
+                    "raw": "https://api.exemplo.com/users/10?notify=true",
+                    "protocol": "https",
+                    "host": ["api", "exemplo", "com"],
+                    "path": ["users", "10"],
+                    "query": [{"key": "notify", "value": "true"}],
+                },
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "body": {"mode": "raw", "raw": '{"active": true}'},
+            }
+        }
+    )
+
+    assert '"notify": True,' in generated.content
+    assert '    request_body = {\n        "active": True,\n    }\n' in generated.content
+    assert "response = api_context.put(\n" in generated.content
+    ast.parse(generated.content)
+
+
+def test_put_with_auth_and_body_renders_both():
+    generated = _generate(
+        {
+            "request": {
+                "method": "PUT",
+                "url": "https://api.exemplo.com/users/10",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "auth": {
+                    "type": "bearer",
+                    "bearer": [{"key": "token", "value": "{{accessToken}}"}],
+                },
+                "body": {"mode": "raw", "raw": '{"active": true}'},
+            }
+        },
+        _env(accessToken=("token-value", False)),
+    )
+
+    assert '"Authorization": f"Bearer {token}",' in generated.content
+    assert '    request_body = {\n        "active": True,\n    }\n' in generated.content
+    assert "response = api_context.put(\n" in generated.content
+    ast.parse(generated.content)
+
+
+# --- PATCH --------------------------------------------------------------------
+
+
+def test_patch_partial_object_never_adds_the_other_fields():
+    # Regra principal desta parte: PATCH transporta exatamente o que o
+    # NormalizedRequest tem, nunca o recurso inteiro reconstruído — só
+    # "active" aparece, nunca "name"/"email"/outros campos do recurso.
+    generated = _generate(_json_body_request("PATCH", "https://api.exemplo.com/users/10", {"active": False}))
+
+    assert '    request_body = {\n        "active": False,\n    }\n' in generated.content
+    assert '"name"' not in generated.content
+    assert '"email"' not in generated.content
+    assert "response = api_context.patch(\n" in generated.content
+    ast.parse(generated.content)
+
+
+def test_patch_null_value_is_preserved_as_none_never_removed():
+    generated = _generate(
+        _json_body_request("PATCH", "https://api.exemplo.com/users/10", {"middleName": None})
+    )
+
+    assert '    request_body = {\n        "middleName": None,\n    }\n' in generated.content
+    ast.parse(generated.content)
+
+
+def test_patch_boolean_value_is_preserved_as_python_bool_never_a_string():
+    generated = _generate(
+        _json_body_request("PATCH", "https://api.exemplo.com/users/10", {"active": False})
+    )
+
+    assert '"active": False,' in generated.content
+    assert '"active": "false",' not in generated.content
+    ast.parse(generated.content)
+
+
+def test_patch_nested_structure_is_preserved():
+    generated = _generate(
+        _json_body_request(
+            "PATCH",
+            "https://api.exemplo.com/users/10",
+            {"address": {"city": "Brasília"}},
+        )
+    )
+
+    assert (
+        "    request_body = {\n"
+        '        "address": {\n'
+        '            "city": "Brasília",\n'
+        "        },\n"
+        "    }\n"
+    ) in generated.content
+    ast.parse(generated.content)
+
+
+# --- DELETE -------------------------------------------------------------------
+
+
+def test_delete_without_body_never_gains_an_artificial_body():
+    generated = _generate({"request": {"method": "DELETE", "url": "https://api.exemplo.com/users/10"}})
+
+    assert 'response = api_context.delete("/users/10")' in generated.content
+    assert generated.content.count("api_context.delete(") == 1
+    assert "data=" not in generated.content
+    assert "request_body" not in generated.content
+
+
+def test_delete_with_auth_preserves_auth_without_inventing_a_body():
+    generated = _generate(
+        {
+            "request": {
+                "method": "DELETE",
+                "url": "https://api.exemplo.com/users/1",
+                "auth": {
+                    "type": "bearer",
+                    "bearer": [{"key": "token", "value": "{{accessToken}}"}],
+                },
+            }
+        },
+        _env(accessToken=("token-value", False)),
+    )
+
+    assert '"Authorization": f"Bearer {token}",' in generated.content
+    assert "data=" not in generated.content
+    assert "request_body" not in generated.content
+    ast.parse(generated.content)
+
+
+# --- HEAD -----------------------------------------------------------------
+
+
+def test_head_with_headers_preserves_them():
+    generated = _generate(
+        {
+            "request": {
+                "method": "HEAD",
+                "url": "https://api.exemplo.com/users",
+                "header": [{"key": "Accept", "value": "application/json"}],
+            }
+        }
+    )
+
+    assert (
+        "    response = api_context.head(\n"
+        '        "/users",\n'
+        "        headers={\n"
+        '            "Accept": "application/json",\n'
+        "        },\n"
+        "    )\n"
+    ) in generated.content
+    ast.parse(generated.content)
+
+
+def test_head_with_query_preserves_it():
+    generated = _generate(
+        {
+            "request": {
+                "method": "HEAD",
+                "url": {
+                    "raw": "https://api.exemplo.com/users?active=true",
+                    "protocol": "https",
+                    "host": ["api", "exemplo", "com"],
+                    "path": ["users"],
+                    "query": [{"key": "active", "value": "true"}],
+                },
+            }
+        }
+    )
+
+    assert (
+        "    response = api_context.head(\n"
+        '        "/users",\n'
+        "        params={\n"
+        '            "active": True,\n'
+        "        },\n"
+        "    )\n"
+    ) in generated.content
+    ast.parse(generated.content)
+
+
+# --- OPTIONS --------------------------------------------------------------
+
+
+def test_options_with_headers_only():
+    generated = _generate(
+        {
+            "request": {
+                "method": "OPTIONS",
+                "url": "https://api.exemplo.com/users",
+                "header": [{"key": "Accept", "value": "application/json"}],
+            }
+        }
+    )
+
+    assert (
+        "    response = api_context.fetch(\n"
+        '        "/users",\n'
+        '        method="OPTIONS",\n'
+        "        headers={\n"
+        '            "Accept": "application/json",\n'
+        "        },\n"
+        "    )\n"
+    ) in generated.content
+    ast.parse(generated.content)
+
+
+def test_options_with_query_only():
+    generated = _generate(
+        {
+            "request": {
+                "method": "OPTIONS",
+                "url": {
+                    "raw": "https://api.exemplo.com/users?scope=admin",
+                    "protocol": "https",
+                    "host": ["api", "exemplo", "com"],
+                    "path": ["users"],
+                    "query": [{"key": "scope", "value": "admin"}],
+                },
+            }
+        }
+    )
+
+    assert (
+        "    response = api_context.fetch(\n"
+        '        "/users",\n'
+        '        method="OPTIONS",\n'
+        "        params={\n"
+        '            "scope": "admin",\n'
+        "        },\n"
+        "    )\n"
+    ) in generated.content
+    ast.parse(generated.content)
+
+
+def test_options_with_explicit_body_uses_the_same_body_renderer():
+    # "Não inventar payload": só quando o NormalizedRequest realmente tem um
+    # body — mesmo _resolve_body de sempre, nenhum caminho novo para OPTIONS.
+    generated = _generate(_json_body_request("OPTIONS", "https://api.exemplo.com/users", {"probe": True}))
+
+    assert '    request_body = {\n        "probe": True,\n    }\n' in generated.content
+    assert (
+        "    response = api_context.fetch(\n"
+        '        "/users",\n'
+        '        method="OPTIONS",\n'
+        "        data=request_body,\n"
+        "    )\n"
+    ) in generated.content
+    ast.parse(generated.content)
+
+
+# --- Tipos: preservação completa (regra: nunca converter/perder tipo) -------
+
+
+def test_all_scalar_and_null_types_are_preserved_in_the_same_object():
+    generated = _generate(
+        _json_body_request(
+            "POST",
+            "https://api.exemplo.com/users",
+            {
+                "name": "Maria",
+                "age": 35,
+                "score": 9.5,
+                "active": True,
+                "archived": False,
+                "middleName": None,
+            },
+        )
+    )
+
+    assert (
+        "    request_body = {\n"
+        '        "name": "Maria",\n'
+        '        "age": 35,\n'
+        '        "score": 9.5,\n'
+        '        "active": True,\n'
+        '        "archived": False,\n'
+        '        "middleName": None,\n'
+        "    }\n"
+    ) in generated.content
+    ast.parse(generated.content)
+
+
+def test_nested_objects_and_arrays_of_objects_are_preserved():
+    generated = _generate(
+        _json_body_request(
+            "PUT",
+            "https://api.exemplo.com/orders/1",
+            {"items": [{"sku": "x"}, {"sku": "y"}]},
+        )
+    )
+
+    assert (
+        "    request_body = {\n"
+        '        "items": [\n'
+        "            {\n"
+        '                "sku": "x",\n'
+        "            },\n"
+        "            {\n"
+        '                "sku": "y",\n'
+        "            },\n"
+        "        ],\n"
+        "    }\n"
+    ) in generated.content
+    ast.parse(generated.content)
+
+
+# --- Variáveis: resolução recursiva dentro do body --------------------------
+
+
+def test_body_root_level_variable_resolves_via_environment():
+    generated = _generate(
+        _json_body_request("POST", "https://api.exemplo.com/orders", {"region": "{{region}}"}),
+        _env(region=("us-east-1", False)),
+    )
+
+    assert '"region": "us-east-1",' in generated.content
+    assert "os.environ" not in generated.content
+    ast.parse(generated.content)
+
+
+def test_body_nested_object_variable_resolves_recursively():
+    generated = _generate(
+        _json_body_request(
+            "PUT", "https://api.exemplo.com/orders/1", {"customer": {"id": "{{customerId}}"}}
+        ),
+        _env(customerId=("cust-123", False)),
+    )
+
+    assert '"id": "cust-123",' in generated.content
+    assert "os.environ" not in generated.content
+    ast.parse(generated.content)
+
+
+def test_body_array_item_variable_resolves_recursively():
+    generated = _generate(
+        _json_body_request("POST", "https://api.exemplo.com/orders", {"tags": ["{{tag1}}", "fixed"]}),
+        _env(tag1=("urgent", False)),
+    )
+
+    assert '    request_body = {\n        "tags": [\n            "urgent",\n            "fixed",\n        ],\n    }\n' in (
+        generated.content
+    )
+    ast.parse(generated.content)
+
+
+# --- Segurança: secret no body nunca vira literal ----------------------------
+
+
+def test_body_secret_variable_never_appears_as_a_literal():
+    generated = _generate(
+        _json_body_request("POST", "https://api.exemplo.com/login", {"password": "{{password}}"}),
+        _env(password=("super-secret-pw", True)),
+    )
+
+    assert "super-secret-pw" not in generated.content
+    assert 'password = os.environ.get("AQO_PASSWORD")' in generated.content
+    assert '"password": password,' in generated.content
+    ast.parse(generated.content)
+
+
+# --- Body inválido: nunca corrigido por inferência, sempre com warning -----
+
+
+def test_body_with_non_finite_number_falls_back_with_request_body_not_rendered():
+    # json.loads aceita NaN/Infinity (extensão não-padrão), mas repr(float
+    # ("nan")) produz o texto "nan" — um NOME indefinido em Python, não um
+    # literal válido; nunca corrigido por inferência (arredondar, remover o
+    # campo) — o endpoint inteiro cai no fallback, nunca um body
+    # aparentemente válido que quebraria a suíte ao rodar de verdade.
+    generated = _generate(
+        {
+            "request": {
+                "method": "POST",
+                "url": "https://api.exemplo.com/measurements",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "body": {"mode": "raw", "raw": '{"temperature": NaN}'},
+            }
+        }
+    )
+
+    assert "@pytest.mark.skip" in generated.content
+    assert "response = api_context" not in generated.content
+    assert len(generated.warnings) == 1
+    assert generated.warnings[0].code == REQUEST_BODY_NOT_RENDERED
+    assert "nan" not in generated.content.lower()
     ast.parse(generated.content)
