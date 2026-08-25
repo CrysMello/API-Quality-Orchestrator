@@ -63,7 +63,7 @@ def test_persisted_json_has_expected_structure():
     assert location.path == "artifacts/run_fake/result.json"
     payload = json.loads(repository.captured_content)
     assert payload == {
-        "schema_version": "1.2",
+        "schema_version": "1.3",
         "execution": {
             "started_at": _STARTED_AT.isoformat(),
             "finished_at": _FINISHED_AT.isoformat(),
@@ -76,6 +76,7 @@ def test_persisted_json_has_expected_structure():
             "assertions": 312,
             "passed": 309,
             "failed": 3,
+            "skipped": 0,
         },
         "test_failures": [
             {"request_name": "Criar pet", "test_name": "Status 201", "error_message": "boom"},
@@ -83,6 +84,66 @@ def test_persisted_json_has_expected_structure():
         "success": True,
         "infrastructure_failure": None,
     }
+
+
+# --- P1.1: persistência de skipped_tests ----------------------------------------------------
+
+
+def test_skipped_tests_is_persisted_correctly():
+    repository = _CapturingRepository()
+    use_case = PersistExecutionResultUseCase(repository)
+    result = _success_result(skipped_tests=4)
+
+    use_case.execute(
+        result,
+        collection_id="col-1",
+        collection_name="PetStore",
+        started_at=_STARTED_AT,
+        finished_at=_FINISHED_AT,
+    )
+
+    payload = json.loads(repository.captured_content)
+    assert payload["summary"]["skipped"] == 4
+
+
+def test_skipped_tests_zero_is_persisted_correctly():
+    # skipped_tests=0 é o default de ExecutionResult (Newman nunca tem
+    # skipped) — precisa ser persistido como 0 explícito, nunca omitido.
+    repository = _CapturingRepository()
+    use_case = PersistExecutionResultUseCase(repository)
+    result = _success_result(skipped_tests=0)
+
+    use_case.execute(
+        result,
+        collection_id="col-1",
+        collection_name="PetStore",
+        started_at=_STARTED_AT,
+        finished_at=_FINISHED_AT,
+    )
+
+    payload = json.loads(repository.captured_content)
+    assert payload["summary"]["skipped"] == 0
+    assert "skipped" in payload["summary"]
+
+
+def test_skipped_tests_does_not_affect_other_summary_fields():
+    repository = _CapturingRepository()
+    use_case = PersistExecutionResultUseCase(repository)
+    result = _success_result(skipped_tests=7)
+
+    use_case.execute(
+        result,
+        collection_id="col-1",
+        collection_name="PetStore",
+        started_at=_STARTED_AT,
+        finished_at=_FINISHED_AT,
+    )
+
+    payload = json.loads(repository.captured_content)
+    assert payload["summary"]["requests"] == 28
+    assert payload["summary"]["assertions"] == 312
+    assert payload["summary"]["passed"] == 309
+    assert payload["summary"]["failed"] == 3
 
 
 def test_persisted_json_workspace_is_null_when_not_provided():

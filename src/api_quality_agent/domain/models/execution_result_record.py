@@ -26,6 +26,11 @@ class ExecutionResultRecord:
     success: bool
     infrastructure_failure: InfrastructureFailure | None
     test_failures: tuple[TestFailure, ...]
+    # Só existe a partir do schema 1.3 (ver JsonExecutionResultReader) —
+    # default 0 preserva toda construção existente (schema 1.0/1.1/1.2 lido,
+    # e os testes de ReportEngine/HTML renderer que constroem este record
+    # direto, sem passar por esse campo).
+    skipped_tests: int = 0
 
     @property
     def passed_assertions(self) -> int:

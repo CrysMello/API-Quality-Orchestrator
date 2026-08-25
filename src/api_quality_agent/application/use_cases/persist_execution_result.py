@@ -6,11 +6,11 @@ from api_quality_agent.domain.models import ExecutionResult, ExecutionResultLoca
 from api_quality_agent.ports.outbound import ExecutionResultRepository
 
 # "1.0" (sem schema_version/workspace no arquivo), "1.1" (schema_version +
-# workspace, aditivo) e "1.2" (test_failures, aditivo) são as versões que
-# api-quality-orchestrator report sabe ler — ver JsonExecutionResultReader. Mudanças
-# de schema são sempre aditivas; nenhum campo existente é removido ou
-# renomeado.
-EXECUTION_RESULT_SCHEMA_VERSION = "1.2"
+# workspace, aditivo), "1.2" (test_failures, aditivo) e "1.3" (summary.skipped,
+# aditivo — P1.1) são as versões que api-quality-orchestrator report sabe ler
+# — ver JsonExecutionResultReader. Mudanças de schema são sempre aditivas;
+# nenhum campo existente é removido ou renomeado.
+EXECUTION_RESULT_SCHEMA_VERSION = "1.3"
 
 
 class PersistExecutionResultUseCase:
@@ -80,6 +80,7 @@ def _serialize(
             "assertions": result.total_assertions,
             "passed": result.total_assertions - result.failed_assertions,
             "failed": result.failed_assertions,
+            "skipped": result.skipped_tests,
         },
         "test_failures": [
             {

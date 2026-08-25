@@ -19,10 +19,10 @@ from api_quality_agent.domain.models import (
 DEFAULT_EXECUTION_RESULTS_BASE_PATH = Path("artifacts")
 
 # "1.0" nunca teve schema_version no arquivo (assumido implicitamente) nem
-# workspace; "1.1" adiciona workspace; "1.2" adiciona test_failures. Cada
-# versão é aditiva sobre a anterior. Qualquer outra versão é recusada — nunca
-# interpretada parcialmente.
-_SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1", "1.2"})
+# workspace; "1.1" adiciona workspace; "1.2" adiciona test_failures; "1.3"
+# adiciona summary.skipped (P1.1). Cada versão é aditiva sobre a anterior.
+# Qualquer outra versão é recusada — nunca interpretada parcialmente.
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1", "1.2", "1.3"})
 _DEFAULT_SCHEMA_VERSION = "1.0"
 
 
@@ -94,6 +94,10 @@ def _deserialize(payload: dict[str, Any], *, schema_version: str, source_path: s
             for failure in payload.get("test_failures") or []
         )
 
+        # "summary.skipped" só existe a partir do schema 1.3 — ausente em
+        # 1.0/1.1/1.2, tratado como 0, nunca inventado.
+        skipped_tests = int(summary.get("skipped", 0))
+
         return ExecutionResultRecord(
             source_path=source_path,
             schema_version=schema_version,
@@ -107,6 +111,7 @@ def _deserialize(payload: dict[str, Any], *, schema_version: str, source_path: s
             total_requests=int(summary["requests"]),
             total_assertions=int(summary["assertions"]),
             failed_assertions=int(summary["failed"]),
+            skipped_tests=skipped_tests,
             success=success,
             infrastructure_failure=infrastructure_failure,
             test_failures=test_failures,

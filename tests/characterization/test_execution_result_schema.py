@@ -1,10 +1,14 @@
-"""Caracterização do schema de `result.json` (schema_version "1.2") exatamente
-como ele é serializado hoje — antes da Fase 9 do plano Playwright (que
-introduz o campo aditivo `tool` e bumpa para "1.3" deliberadamente).
+"""Caracterização do schema de `result.json` (schema_version "1.3") exatamente
+como ele é serializado hoje.
 
-Ver tests/characterization/README.md: se este teste quebrar durante a Fase
-9, é esperado — atualize-o conscientemente. Se quebrar em qualquer outro
-momento, é uma regressão real.
+"1.3" foi introduzida na P1.1 (persistência de `skipped_tests`, aditivo:
+`summary.skipped`) — bump anterior era "1.2" (test_failures). A Fase 9 do
+plano Playwright ainda vai introduzir o campo aditivo `tool` e bumpar de
+novo, deliberadamente.
+
+Ver tests/characterization/README.md: se este teste quebrar durante uma
+dessas mudanças planejadas, é esperado — atualize-o conscientemente. Se
+quebrar em qualquer outro momento, é uma regressão real.
 """
 
 from datetime import datetime
@@ -31,8 +35,8 @@ def _build_result(**overrides: object) -> ExecutionResult:
     return ExecutionResult(**defaults)  # type: ignore[arg-type]
 
 
-def test_schema_version_is_still_1_2() -> None:
-    assert persist_module.EXECUTION_RESULT_SCHEMA_VERSION == "1.2"
+def test_schema_version_is_now_1_3() -> None:
+    assert persist_module.EXECUTION_RESULT_SCHEMA_VERSION == "1.3"
 
 
 def test_serialized_top_level_keys_are_unchanged() -> None:
@@ -56,13 +60,19 @@ def test_serialized_top_level_keys_are_unchanged() -> None:
         "success",
         "infrastructure_failure",
     }
-    assert serialized["schema_version"] == "1.2"
+    assert serialized["schema_version"] == "1.3"
     assert set(serialized["execution"].keys()) == {
         "started_at",
         "finished_at",
         "duration_seconds",
     }
-    assert set(serialized["summary"].keys()) == {"requests", "assertions", "passed", "failed"}
+    assert set(serialized["summary"].keys()) == {
+        "requests",
+        "assertions",
+        "passed",
+        "failed",
+        "skipped",
+    }
     # stdout/stderr nunca são persistidos — contrato de segurança explícito.
     assert "stdout" not in serialized
     assert "stderr" not in serialized

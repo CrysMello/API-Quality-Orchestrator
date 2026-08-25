@@ -49,6 +49,13 @@ def _valid_payload_1_2(**overrides) -> dict:
     return payload
 
 
+def _valid_payload_1_3(**overrides) -> dict:
+    payload = _valid_payload_1_2(schema_version="1.3")
+    payload["summary"] = {**payload["summary"], "skipped": 2}
+    payload.update(overrides)
+    return payload
+
+
 def _valid_payload_1_0() -> dict:
     # Schema 1.0: sem schema_version e sem workspace no arquivo.
     return {
@@ -88,6 +95,7 @@ def test_read_schema_1_1_populates_workspace(tmp_path):
     assert record.finished_at == datetime(2026, 7, 20, 10, 35, 46, tzinfo=timezone.utc)
     assert record.source_path == str(path)
     assert record.test_failures == ()
+    assert record.skipped_tests == 0
 
 
 # --- Leitura: schema 1.2 ----------------------------------------------------------------
@@ -106,6 +114,47 @@ def test_read_schema_1_2_populates_test_failures(tmp_path):
     assert record.test_failures[0].error_message == "boom"
 
 
+def test_read_schema_1_2_defaults_skipped_tests_to_zero(tmp_path):
+    # "summary.skipped" só existe a partir do 1.3 — um result.json 1.2
+    # legado (sem essa chave) precisa continuar sendo lido, com 0.
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_2())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.skipped_tests == 0
+
+
+# --- Leitura: schema 1.3 ----------------------------------------------------------------
+
+
+def test_read_schema_1_3_populates_skipped_tests(tmp_path):
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_3())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.schema_version == "1.3"
+    assert record.skipped_tests == 2
+    # Demais campos continuam populados normalmente (regressão do que já
+    # existia no 1.2).
+    assert len(record.test_failures) == 1
+    assert record.total_requests == 28
+    assert record.total_assertions == 312
+    assert record.failed_assertions == 3
+
+
+def test_read_schema_1_3_with_zero_skipped_tests(tmp_path):
+    payload = _valid_payload_1_3()
+    payload["summary"]["skipped"] = 0
+    path = _write(tmp_path / "run_x" / "result.json", payload)
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.skipped_tests == 0
+
+
 # --- Leitura: schema 1.0 (retrocompatibilidade) ----------------------------------------------------------------
 
 
@@ -120,6 +169,7 @@ def test_read_schema_1_0_defaults_workspace_to_none(tmp_path):
     assert record.workspace_name is None
     assert record.collection_id == "col-1"
     assert record.success is True
+    assert record.skipped_tests == 0
 
 
 # --- Falha de infraestrutura persistida ----------------------------------------------------------------
