@@ -3,9 +3,10 @@ registrados hoje em `cli.main.build_parser()`.
 
 `--target` em `generate` foi adicionado deliberadamente na Parte 04 e
 `-e`/`--environment` na Parte 09 do plano Playwright (Bloco 2/3) — a
-asserção de `generate` já reflete esse estado. `run` ainda vai ganhar
-`--engine`/`--playwright-dir` numa etapa futura, o que exigirá uma
-atualização consciente análoga.
+asserção de `generate` já reflete esse estado. `run` ganhou `--target`
+(postman/playwright) e `--pytest-executable` na revisão de gaps do P0
+(equivalente a `--newman-executable`, para --target playwright) — a
+asserção de `run` já reflete esse estado.
 
 Se este teste quebrar fora de uma dessas mudanças planejadas, é regressão
 real (comando/flag removido ou renomeado sem querer).
@@ -86,7 +87,9 @@ def test_run_command_flags_are_unchanged() -> None:
         "--collection-name",
         "-f",
         "--file",
+        "--target",
         "--newman-executable",
+        "--pytest-executable",
         "-e",
         "--environment",
     }

@@ -20,11 +20,13 @@ from api_quality_agent.adapters.filesystem import (
     LocalBackupRepository,
 )
 from api_quality_agent.adapters.newman import NewmanAdapter
+from api_quality_agent.adapters.playwright import PlaywrightAdapter
 from api_quality_agent.adapters.postman import PostmanApiClient
 from api_quality_agent.cli import bootstrap
 from api_quality_agent.domain.models import ActiveSelection
 
 FAKE_NEWMAN_SCRIPT = Path(__file__).resolve().parent.parent / "fake_newman.py"
+FAKE_PYTEST_SCRIPT = Path(__file__).resolve().parent.parent / "fake_pytest.py"
 
 FAKE_API_KEY = "PMAK-cli-fake-key-0000000000000000000000"
 
@@ -254,6 +256,21 @@ def fake_newman(cli_env, monkeypatch):
     factory = _RecordingNewmanAdapterFactory()
     monkeypatch.setattr(bootstrap, "NewmanAdapter", factory)
     return factory
+
+
+@pytest.fixture
+def fake_pytest_offline(offline_env, monkeypatch):
+    # Equivalente a fake_newman_offline, para `run --target playwright`:
+    # substitui bootstrap.PlaywrightAdapter por uma versão apontada para o
+    # processo fake real (tests/fake_pytest.py), nunca o pytest de verdade
+    # nem um mock da chamada.
+    def _factory(**_kwargs) -> PlaywrightAdapter:
+        return PlaywrightAdapter(
+            pytest_executable=sys.executable, command_prefix=(str(FAKE_PYTEST_SCRIPT),)
+        )
+
+    monkeypatch.setattr(bootstrap, "PlaywrightAdapter", _factory)
+    return _factory
 
 
 @pytest.fixture

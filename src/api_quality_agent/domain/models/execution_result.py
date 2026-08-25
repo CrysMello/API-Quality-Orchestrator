@@ -17,3 +17,8 @@ class ExecutionResult:
     infrastructure_failure: InfrastructureFailure | None
     stdout: str
     stderr: str
+    # PlaywrightAdapter: pytest tem um conceito de "skipped" que o Newman não
+    # tem (ex.: endpoint que caiu no PlaceholderEndpointTestGenerator vira
+    # @pytest.mark.skip) — default 0 preserva, sem exceção, todo construtor
+    # existente do NewmanAdapter/testes, que nunca define este campo.
+    skipped_tests: int = 0

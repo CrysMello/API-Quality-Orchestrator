@@ -11,6 +11,7 @@ from api_quality_agent.adapters.filesystem import (
     LocalBackupRepository,
 )
 from api_quality_agent.adapters.newman import DEFAULT_NEWMAN_EXECUTABLE, NewmanAdapter
+from api_quality_agent.adapters.playwright import DEFAULT_PYTEST_EXECUTABLE, PlaywrightAdapter
 from api_quality_agent.adapters.postman import (
     PostmanApiClient,
     PostmanCollectionRepository,
@@ -73,6 +74,7 @@ from api_quality_agent.reporting import ReportEngine
 
 POSTMAN_API_KEY_ENV_VAR = "POSTMAN_API_KEY"
 NEWMAN_EXECUTABLE_ENV_VAR = "NEWMAN_EXECUTABLE"
+PYTEST_EXECUTABLE_ENV_VAR = "PYTEST_EXECUTABLE"
 
 
 @dataclass
@@ -326,6 +328,46 @@ def build_offline_run_context(
             execution_result_repository or JsonExecutionResultRepository()
         ),
     )
+
+
+@dataclass
+class OfflinePlaywrightRunCliContext:
+    # Composição paralela a OfflineRunCliContext, para `run --target
+    # playwright`: nunca requer POSTMAN_API_KEY. Deliberadamente mais
+    # enxuta — sem collection_parser/RunCollectionUseCase, porque não há um
+    # "collection.json" pra ler/nomear aqui, só um diretório com a suíte já
+    # gerada (tests_path). persist_execution_result_use_case é o MESMO tipo
+    # (PersistExecutionResultUseCase) usado pelo caminho Newman — nunca um
+    # pipeline de persistência paralelo. input_resolver é exposto aqui (não
+    # instanciado direto em run_command.py) para manter a regra "comandos só
+    # falam com adapters através do bootstrap" (ver test_cli_architecture.py)
+    # — run_command.py usa isto só para ler o -e/--environment opcional e
+    # decidir o que mascarar (Gap 1), nunca para a execução em si.
+    playwright_adapter: PlaywrightAdapter
+    persist_execution_result_use_case: PersistExecutionResultUseCase
+    input_resolver: InputResolver
+
+
+def build_offline_playwright_run_context(
+    *,
+    playwright_adapter: PlaywrightAdapter | None = None,
+    pytest_executable: str | None = None,
+    execution_result_repository: ExecutionResultRepository | None = None,
+) -> OfflinePlaywrightRunCliContext:
+    return OfflinePlaywrightRunCliContext(
+        playwright_adapter=playwright_adapter
+        or PlaywrightAdapter(pytest_executable=_resolve_pytest_executable(pytest_executable)),
+        persist_execution_result_use_case=PersistExecutionResultUseCase(
+            execution_result_repository or JsonExecutionResultRepository()
+        ),
+        input_resolver=InputResolver(),
+    )
+
+
+def _resolve_pytest_executable(cli_value: str | None) -> str:
+    # Mesma precedência de _resolve_newman_executable: flag >
+    # PYTEST_EXECUTABLE > "pytest" (padrão do PlaywrightAdapter).
+    return cli_value or os.environ.get(PYTEST_EXECUTABLE_ENV_VAR) or DEFAULT_PYTEST_EXECUTABLE
 
 
 @dataclass
