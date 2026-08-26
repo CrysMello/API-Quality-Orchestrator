@@ -57,6 +57,53 @@ class ReportInfrastructureFailure:
 
 
 @dataclass(frozen=True)
+class ReportHttpTransactionHeader:
+    name: str
+    value: str
+
+
+@dataclass(frozen=True)
+class ReportHttpTransaction:
+    # Espelha domain.models.HttpTransaction — nunca reaproveitado
+    # diretamente aqui (mesmo padrão já usado por ReportTestFailure/
+    # ReportInfrastructureFailure): o renderer HTML nunca importa domínio.
+    # Os valores já chegam mascarados (PlaywrightAdapter) — este módulo
+    # nunca tenta recuperar nem decidir o que é secret.
+    method: str
+    url: str
+    request_headers: tuple[ReportHttpTransactionHeader, ...]
+    request_body: str | None
+    response_status: int
+    response_headers: tuple[ReportHttpTransactionHeader, ...]
+    response_body: str | None
+
+
+@dataclass(frozen=True)
+class ReportAssertionResult:
+    # Espelha domain.models.AssertionResult — expected/actual preservam o
+    # tipo/formato já persistido em result.json (P1.2 do bloco de
+    # ReportEngine: nenhuma decisão nova sobre diff estruturado aqui).
+    name: str
+    expected: object
+    actual: object
+    status: str
+    precision: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class ReportTestExecution:
+    # Agrupamento por test_id (P1.2 do bloco de ReportEngine): correlaciona
+    # test_id -> HttpTransaction(s) -> AssertionResult(s) exatamente como já
+    # gravado em result.json — nunca reordenado, nunca misturado com outro
+    # test_id. `transactions`/`assertions` preservam a ordem original de
+    # execução.
+    test_id: str
+    transactions: tuple[ReportHttpTransaction, ...]
+    assertions: tuple[ReportAssertionResult, ...]
+
+
+@dataclass(frozen=True)
 class ReportExecutionSection:
     # executed=False representa "Newman não foi executado nesta operação" —
     # o relatório deve poder ser gerado normalmente mesmo assim.
@@ -74,6 +121,10 @@ class ReportExecutionSection:
     # generate/update/run nunca teve início/fim absolutos, só duration.
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    # Só existe a partir do schema 1.4/1.5 (http_transactions/
+    # assertion_results) — vazio para resultados antigos e para Newman
+    # (que nunca preenche esses campos), nunca inventado.
+    tests: tuple[ReportTestExecution, ...] = ()
 
 
 @dataclass(frozen=True)

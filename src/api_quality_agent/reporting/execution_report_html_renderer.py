@@ -1,7 +1,14 @@
 from datetime import datetime
 from html import escape
+from typing import Any
 
-from api_quality_agent.reporting.report import Report, ReportExecutionSection
+from api_quality_agent.reporting.report import (
+    Report,
+    ReportAssertionResult,
+    ReportExecutionSection,
+    ReportHttpTransaction,
+    ReportTestExecution,
+)
 
 _STATUS_LABELS = {
     "infrastructure_failure": "INFRASTRUCTURE FAILURE",
@@ -50,6 +57,7 @@ def render_execution_report_html(report: Report, *, source_path: str, schema_ver
 {_render_summary(execution)}
 {_render_information(report, execution)}
 {_render_failures(execution)}
+{_render_tests(execution)}
 {_render_metadata(source_path, report.generated_at, schema_version)}
 </main>
 </body>
@@ -145,6 +153,127 @@ def _render_failures(execution: ReportExecutionSection) -> str:
     )
 
 
+# --- P1.2 (integração com ReportEngine): request/response/assertions por --
+# --- teste, a partir de HttpTransaction/AssertionResult já persistidos ----
+# --- (ver ReportEngine._build_test_executions) — puramente apresentação: --
+# --- nenhum PASS/FAIL é decidido aqui, só exibido. Ausente (tests == ())  -
+# --- para resultados antigos (sem schema 1.4/1.5) e para Newman, que      -
+# --- nunca preenche isto — o restante do relatório continua idêntico.    --
+
+
+def _render_tests(execution: ReportExecutionSection) -> str:
+    if not execution.tests:
+        return ""
+    blocks = "".join(_render_test_execution(test) for test in execution.tests)
+    return f'<section aria-label="Testes"><h2>Testes</h2>{blocks}</section>'
+
+
+def _render_test_execution(test: ReportTestExecution) -> str:
+    status = _test_status(test.assertions)
+    status_badge = (
+        f'<span class="status status-{status}">'
+        f'<span aria-hidden="true">{_STATUS_ICONS[status]}</span> {_STATUS_LABELS[status]}</span>'
+        if status is not None
+        else '<span class="status">N/A</span>'
+    )
+    transactions_html = (
+        "".join(
+            _render_transaction(transaction, index, len(test.transactions))
+            for index, transaction in enumerate(test.transactions, start=1)
+        )
+        if test.transactions
+        else "<p>Nenhuma transação HTTP registrada para este teste.</p>"
+    )
+    assertions_html = _render_assertions(test.assertions)
+    return f"""<div class="test-block">
+  <div class="test-header"><h3>{_e(test.test_id) or "(sem test_id)"}</h3>{status_badge}</div>
+  {transactions_html}
+  {assertions_html}
+</div>"""
+
+
+def _test_status(assertions: tuple[ReportAssertionResult, ...]) -> str | None:
+    # Agregação de exibição apenas: cada AssertionResult.status já foi
+    # decidido durante a execução (o `assert` original do teste gerado) —
+    # aqui só resume "algum FAILED?" para o selo do teste, nunca uma nova
+    # comparação/validação.
+    if not assertions:
+        return None
+    return "failed" if any(a.status == "FAILED" for a in assertions) else "passed"
+
+
+def _render_transaction(transaction: ReportHttpTransaction, index: int, total: int) -> str:
+    label = f" #{index}" if total > 1 else ""
+    request_body = (
+        f"<pre>{_e(transaction.request_body)}</pre>"
+        if transaction.request_body
+        else "<p><em>No request body</em></p>"
+    )
+    response_body = (
+        f"<pre>{_e(transaction.response_body)}</pre>"
+        if transaction.response_body
+        else "<p><em>No response body</em></p>"
+    )
+    return f"""<div class="transaction">
+  <h4>Request{label} — O que foi enviado</h4>
+  <table>
+    <tr><th scope="row">Method</th><td>{_e(transaction.method)}</td></tr>
+    <tr><th scope="row">URL</th><td>{_e(transaction.url)}</td></tr>
+  </table>
+  {_render_headers("Request Headers", transaction.request_headers)}
+  {request_body}
+  <h4>Response{label} — O que a API devolveu</h4>
+  <table>
+    <tr><th scope="row">HTTP Status</th><td>{transaction.response_status}</td></tr>
+  </table>
+  {_render_headers("Response Headers", transaction.response_headers)}
+  {response_body}
+</div>"""
+
+
+def _render_headers(title: str, headers: tuple[Any, ...]) -> str:
+    if not headers:
+        return f"<p><strong>{_e(title)}:</strong> <em>Nenhum header registrado.</em></p>"
+    rows = "".join(
+        f"<tr><th scope='row'>{_e(header.name)}</th><td>{_e(header.value)}</td></tr>"
+        for header in headers
+    )
+    return f"<p><strong>{_e(title)}:</strong></p><table>{rows}</table>"
+
+
+def _render_assertions(assertions: tuple[ReportAssertionResult, ...]) -> str:
+    if not assertions:
+        return "<h4>Assertions — O que foi validado</h4><p>Nenhuma assertion registrada para este teste.</p>"
+    items = "".join(_render_assertion(assertion) for assertion in assertions)
+    return f"<h4>Assertions — O que foi validado</h4>{items}"
+
+
+def _render_assertion(assertion: ReportAssertionResult) -> str:
+    passed = assertion.status == "PASSED"
+    icon = "✓" if passed else "✗"
+    status_class = "passed" if passed else "failed"
+    return f"""<div class="assertion assertion-{status_class}">
+  <p class="assertion-name"><span aria-hidden="true">{icon}</span> {_e(assertion.name)}</p>
+  <table>
+    <tr><th scope="row">Expected</th><td>{_render_value(assertion.expected)}</td></tr>
+    <tr><th scope="row">Actual</th><td>{_render_value(assertion.actual)}</td></tr>
+    <tr><th scope="row">Precision</th><td>{_e(assertion.precision)}</td></tr>
+  </table>
+  <p class="assertion-reason"><strong>Reason:</strong> {_e(assertion.reason)}</p>
+</div>"""
+
+
+def _render_value(value: object) -> str:
+    # expected/actual podem ser escalares (int/bool/None/str) ou, quando o
+    # valor original não era um escalar simples, uma string JSON já
+    # serializada por PlaywrightAdapter (_masked_scalar) — nenhuma decisão
+    # de diff estruturado é tomada aqui (fora de escopo deste bloco), só
+    # apresentação legível do que já está persistido.
+    if value is None:
+        return "<em>null</em>"
+    return _e(str(value))
+
+
 def _render_metadata(source_path: str, generated_at: datetime, schema_version: str) -> str:
     rows = [
         ("Arquivo de origem", _e(source_path)),
@@ -200,4 +329,25 @@ section { background: #ffffff; border: 1px solid #e0e0e0; border-radius: 8px; pa
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid #eee; }
 @media (prefers-color-scheme: dark) { th, td { border-color: #333; } }
+.test-block { border: 1px solid #e0e0e0; border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
+@media (prefers-color-scheme: dark) { .test-block { border-color: #333; } }
+.test-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  margin-bottom: 0.75rem; }
+.test-header h3 { margin: 0; font-size: 1.05rem; font-family: ui-monospace, Consolas, monospace; }
+.transaction { background: #f9f9fa; border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 0.75rem; }
+@media (prefers-color-scheme: dark) { .transaction { background: #202124; } }
+.transaction h4 { margin: 0.6rem 0 0.4rem; font-size: 0.9rem; text-transform: uppercase;
+  letter-spacing: 0.03em; color: #6b6b6b; }
+.transaction h4:first-child { margin-top: 0; }
+.transaction pre { white-space: pre-wrap; word-break: break-word; background: #eee; padding: 0.5rem;
+  border-radius: 4px; margin: 0.3rem 0; }
+@media (prefers-color-scheme: dark) { .transaction pre { background: #111; } }
+.assertion { border-left: 4px solid #999; padding: 0.5rem 0.75rem; margin: 0.5rem 0; border-radius: 4px;
+  background: #f9f9fa; }
+@media (prefers-color-scheme: dark) { .assertion { background: #202124; } }
+.assertion-passed { border-left-color: #16a34a; }
+.assertion-failed { border-left-color: #dc2626; }
+.assertion-name { font-weight: 700; margin: 0 0 0.4rem; }
+.assertion-reason { margin: 0.4rem 0 0; color: #444; }
+@media (prefers-color-scheme: dark) { .assertion-reason { color: #ccc; } }
 """

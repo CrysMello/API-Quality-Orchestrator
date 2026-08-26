@@ -10,9 +10,11 @@ from api_quality_agent.application.orchestration.endpoint_generation_outcome imp
 from api_quality_agent.application.use_cases import CollectionUpdateResult
 from api_quality_agent.domain.models import (
     ArtifactLocation,
+    AssertionResult,
     ExecutionResult,
     ExecutionResultRecord,
     GeneratedArtifact,
+    HttpTransaction,
     SelectionOrigin,
 )
 from api_quality_agent.ports.outbound import ArtifactRepository
@@ -21,11 +23,15 @@ from api_quality_agent.reporting.execution_report_html_renderer import (
 )
 from api_quality_agent.reporting.report import (
     Report,
+    ReportAssertionResult,
     ReportDiffEntry,
     ReportDiffSection,
     ReportEndpointSummary,
     ReportExecutionSection,
+    ReportHttpTransaction,
+    ReportHttpTransactionHeader,
     ReportInfrastructureFailure,
+    ReportTestExecution,
     ReportTestFailure,
     ReportUpdateSection,
 )
@@ -297,6 +303,9 @@ def _build_execution_section(
             for failure in execution_result.test_failures
         ),
         infrastructure_failure=infrastructure_failure,
+        tests=_build_test_executions(
+            execution_result.http_transactions, execution_result.assertion_results
+        ),
     )
 
 
@@ -336,4 +345,78 @@ def _build_execution_section_from_record(record: ExecutionResultRecord) -> Repor
         infrastructure_failure=infrastructure_failure,
         started_at=record.started_at,
         finished_at=record.finished_at,
+        tests=_build_test_executions(record.http_transactions, record.assertion_results),
+    )
+
+
+def _build_test_executions(
+    http_transactions: tuple[HttpTransaction, ...],
+    assertion_results: tuple[AssertionResult, ...],
+) -> tuple[ReportTestExecution, ...]:
+    # P1.2 (integração com ReportEngine): agrupa por test_id, na ordem de
+    # primeira aparição em http_transactions — com fallback para
+    # assertion_results só para um test_id que não tenha nenhuma transação
+    # (ex.: asserção BROAD de status, que ainda assim registra um
+    # AssertionResult). Dentro de cada grupo, a ordem original de cada
+    # tupla é preservada — nunca reordenada, nunca misturada com outro
+    # test_id. Resultado antigo (sem estes campos) devolve () — nenhuma
+    # seção nova é inventada no relatório.
+    order: list[str] = []
+    seen: set[str] = set()
+    for transaction in http_transactions:
+        if transaction.test_id not in seen:
+            seen.add(transaction.test_id)
+            order.append(transaction.test_id)
+    for assertion in assertion_results:
+        if assertion.test_id not in seen:
+            seen.add(assertion.test_id)
+            order.append(assertion.test_id)
+
+    if not order:
+        return ()
+
+    return tuple(
+        ReportTestExecution(
+            test_id=test_id,
+            transactions=tuple(
+                _build_report_transaction(transaction)
+                for transaction in http_transactions
+                if transaction.test_id == test_id
+            ),
+            assertions=tuple(
+                _build_report_assertion(assertion)
+                for assertion in assertion_results
+                if assertion.test_id == test_id
+            ),
+        )
+        for test_id in order
+    )
+
+
+def _build_report_transaction(transaction: HttpTransaction) -> ReportHttpTransaction:
+    return ReportHttpTransaction(
+        method=transaction.method,
+        url=transaction.url,
+        request_headers=tuple(
+            ReportHttpTransactionHeader(name=header.name, value=header.value)
+            for header in transaction.request_headers
+        ),
+        request_body=transaction.request_body,
+        response_status=transaction.response_status,
+        response_headers=tuple(
+            ReportHttpTransactionHeader(name=header.name, value=header.value)
+            for header in transaction.response_headers
+        ),
+        response_body=transaction.response_body,
+    )
+
+
+def _build_report_assertion(assertion: AssertionResult) -> ReportAssertionResult:
+    return ReportAssertionResult(
+        name=assertion.name,
+        expected=assertion.expected,
+        actual=assertion.actual,
+        status=assertion.status,
+        precision=assertion.precision,
+        reason=assertion.reason,
     )
