@@ -1439,3 +1439,372 @@ def test_resource_body_inside_the_trace_is_masked(tmp_path, monkeypatch):
 
     texts = _read_trace_zip_texts(result.trace_artifacts[0].path)
     assert secret_value not in texts["resources/body.bin"]
+
+
+# --- P1.4 (hardening): masking falhando nunca persiste o bruto -------------
+
+
+def test_corrupted_zip_never_produces_a_trace_artifact(tmp_path, monkeypatch):
+    # "trace corrompido" (item 7/14): o manifesto aponta pra um arquivo que
+    # existe (não é o caso de "trace inexistente") mas não é um .zip
+    # válido — mask_trace_archive levanta zipfile.BadZipFile, nunca deve
+    # virar um TraceArtifact, e nunca deve persistir o bruto como
+    # fallback (regra crítica do bloco).
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    corrupted_path = tmp_path / "corrupted.zip"
+    corrupted_path.write_bytes(b"isto nao e um zip valido")
+    monkeypatch.setenv(
+        "FAKE_PYTEST_RAW_TRACE_MANIFEST",
+        json.dumps({"test_id": "test_post_users_fail", "path": str(corrupted_path)}) + "\n",
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path), known_secret_values=())
+
+    assert result.trace_artifacts == ()
+    # O "bruto" (que poderia conter dados sensíveis, mas aqui é só um
+    # arquivo de teste) nunca é promovido a artefato válido.
+
+
+def test_empty_zip_file_never_produces_a_trace_artifact(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    empty_path = tmp_path / "empty.zip"
+    empty_path.write_bytes(b"")
+    monkeypatch.setenv(
+        "FAKE_PYTEST_RAW_TRACE_MANIFEST",
+        json.dumps({"test_id": "test_post_users_fail", "path": str(empty_path)}) + "\n",
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path), known_secret_values=())
+
+    assert result.trace_artifacts == ()
+
+
+def test_masking_failure_never_leaves_an_orphaned_masked_file(tmp_path, monkeypatch):
+    # Item 5 (crítico) + item 11 (arquivos temporários): quando o masking
+    # falha, nenhum arquivo (mascarado parcial ou não) deveria sobreviver
+    # em disco fora do controle do processo — nem o diretório temporário
+    # "masked" usado internamente deveria persistir órfão.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    corrupted_path = tmp_path / "corrupted.zip"
+    corrupted_path.write_bytes(b"nao e um zip")
+    monkeypatch.setenv(
+        "FAKE_PYTEST_RAW_TRACE_MANIFEST",
+        json.dumps({"test_id": "test_post_users_fail", "path": str(corrupted_path)}) + "\n",
+    )
+    adapter = _build_adapter()
+
+    tmp_before = set(Path(tempfile.gettempdir()).glob("api-quality-agent-pytest-traces-masked-*"))
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path), known_secret_values=())
+    tmp_after = set(Path(tempfile.gettempdir()).glob("api-quality-agent-pytest-traces-masked-*"))
+
+    assert result.trace_artifacts == ()
+    assert tmp_after == tmp_before, "nenhum diretório 'masked' órfão deveria sobrar"
+
+
+def test_malformed_trace_manifest_entry_with_wrong_types_is_skipped(tmp_path, monkeypatch):
+    # "manifesto inválido" (item 7/16): JSON estruturalmente válido, mas
+    # com tipos errados nos campos esperados — nunca inventa um artefato.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    monkeypatch.setenv(
+        "FAKE_PYTEST_RAW_TRACE_MANIFEST",
+        json.dumps({"test_id": 123, "path": None}) + "\n",
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path), known_secret_values=())
+
+    assert result.trace_artifacts == ()
+
+
+def test_ndjson_manifest_with_mixed_valid_and_invalid_lines(tmp_path, monkeypatch):
+    # "NDJSON parcialmente inválido" (item 17): uma linha corrompida nunca
+    # invalida as demais — mesmo critério já usado por http_transactions/
+    # assertion_results.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    good_zip = tmp_path / "good.zip"
+    import zipfile as zipfile_module
+
+    with zipfile_module.ZipFile(good_zip, "w") as zip_file:
+        zip_file.writestr("trace.trace", "{}\n")
+        zip_file.writestr("trace.network", "{}\n")
+        zip_file.writestr("trace.stacks", "{}")
+    manifest_lines = "\n".join(
+        [
+            "isto nao e JSON",
+            json.dumps({"test_id": "test_a_fail", "path": str(good_zip)}),
+            "{\"path\": \"sem test_id\"}",
+            "",
+        ]
+    )
+    monkeypatch.setenv("FAKE_PYTEST_RAW_TRACE_MANIFEST", manifest_lines)
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path), known_secret_values=())
+
+    assert len(result.trace_artifacts) == 1
+    assert result.trace_artifacts[0].test_id == "test_a_fail"
+
+
+# --- P1.4 (hardening): falha durante request nunca inventa evidência -------
+
+
+def test_request_error_never_fabricates_an_http_transaction(tmp_path, monkeypatch):
+    # Item 1: quando a chamada HTTP em si falha (timeout/erro de conexão/
+    # transporte, nunca chega a existir uma resposta), o conftest.py real
+    # nunca grava HttpTransaction (a gravação só acontece DEPOIS de uma
+    # resposta ser obtida) — aqui simulado como "nenhuma transação
+    # registrada", com a assertion e o trace ainda presentes (o teste
+    # falhou por outro motivo que não uma assertion sobre a resposta).
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    _set_trace_artifacts(monkeypatch, [_trace_artifact_entry(test_id="test_post_orders_fail")])
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    # Nenhuma transação HTTP foi simulada (FAKE_PYTEST_TRANSACTIONS nunca
+    # setado) — nunca inventada mesmo com uma falha e um trace reais.
+    assert result.http_transactions == ()
+    assert len(result.trace_artifacts) == 1
+    assert result.trace_artifacts[0].test_id == "test_post_orders_fail"
+
+
+# --- P1.4 (hardening): múltiplas requests no mesmo teste --------------------
+
+
+def test_multiple_requests_in_the_same_test_share_test_id_and_a_single_trace(
+    tmp_path, monkeypatch
+):
+    # Item 3: test_create_user com POST + GET + PATCH, todas correlacionadas
+    # ao MESMO test_id, e no máximo um TraceArtifact para aquele teste.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    test_id = "test_create_user_fail"
+    _set_transactions(
+        monkeypatch,
+        [
+            _get_transaction(method="POST", url="https://api.exemplo.com/users", test_id=test_id),
+            _get_transaction(
+                method="GET", url="https://api.exemplo.com/users/1", test_id=test_id
+            ),
+            _get_transaction(
+                method="PATCH", url="https://api.exemplo.com/users/1", test_id=test_id
+            ),
+        ],
+    )
+    _set_assertion_results(monkeypatch, [_assertion_result_entry(test_id=test_id, status="FAILED")])
+    _set_trace_artifacts(monkeypatch, [_trace_artifact_entry(test_id=test_id)])
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert len(result.http_transactions) == 3
+    assert {t.test_id for t in result.http_transactions} == {test_id}
+    assert [t.method for t in result.http_transactions] == ["POST", "GET", "PATCH"]
+    assert len(result.assertion_results) == 1
+    assert result.assertion_results[0].test_id == test_id
+    assert len(result.trace_artifacts) == 1
+    assert result.trace_artifacts[0].test_id == test_id
+
+
+# --- P1.5 (infrastructure failure das evidências) ---------------------------
+
+
+def test_evidence_persistence_failed_type_is_used_for_masking_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    corrupted_path = tmp_path / "corrupted.zip"
+    corrupted_path.write_bytes(b"nao e um zip valido")
+    monkeypatch.setenv(
+        "FAKE_PYTEST_RAW_TRACE_MANIFEST",
+        json.dumps({"test_id": "test_post_orders_fail", "path": str(corrupted_path)}) + "\n",
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    # 3/12: masking falhou -> nenhum TraceArtifact bruto/parcial vira
+    # evidência válida, mas a falha em si é registrada explicitamente.
+    assert result.trace_artifacts == ()
+    assert len(result.evidence_failures) == 1
+    failure = result.evidence_failures[0]
+    from api_quality_agent.domain.models import InfrastructureFailureType
+
+    assert failure.failure_type == InfrastructureFailureType.EVIDENCE_PERSISTENCE_FAILED
+    assert failure.source == "playwright_trace"
+    assert failure.test_id == "test_post_orders_fail"
+    assert "mascarar" in failure.message.lower()
+
+
+def test_evidence_failure_recorded_when_trace_finalization_fails(tmp_path, monkeypatch):
+    # Item 1: falha em FINALIZAR o Trace (tracing.stop() levantando dentro
+    # do conftest.py gerado) — simulada via a forma "error" do manifesto
+    # (ver fake_pytest.py / _finish_trace no conftest.py real). Nenhum
+    # arquivo bruto chega a existir.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    _set_trace_artifacts(
+        monkeypatch, [{"test_id": "test_post_orders_fail", "error": "TimeoutError"}]
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.trace_artifacts == ()
+    assert len(result.evidence_failures) == 1
+    failure = result.evidence_failures[0]
+    assert failure.test_id == "test_post_orders_fail"
+    assert "TimeoutError" in failure.message
+    assert "finalizar" in failure.message.lower()
+
+
+def test_evidence_failure_recorded_when_raw_trace_file_is_missing(tmp_path, monkeypatch):
+    # Item 6: manifesto aponta um caminho que nunca chegou a existir de
+    # verdade (ex.: processo morto no meio do tracing.stop).
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    monkeypatch.setenv(
+        "FAKE_PYTEST_RAW_TRACE_MANIFEST",
+        json.dumps({"test_id": "test_post_orders_fail", "path": str(tmp_path / "nunca-existiu.zip")})
+        + "\n",
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.trace_artifacts == ()
+    assert len(result.evidence_failures) == 1
+    assert result.evidence_failures[0].test_id == "test_post_orders_fail"
+    assert "não foi encontrado" in result.evidence_failures[0].message.lower() or (
+        "nao foi encontrado" in result.evidence_failures[0].message.lower()
+    )
+
+
+def test_evidence_failure_recorded_for_an_empty_zip_file(tmp_path, monkeypatch):
+    # Item 7: ZIP corrompido (já coberto por
+    # test_evidence_persistence_failed_type_is_used_for_masking_failure) e
+    # vazio caem na mesma categoria de falha de masking.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    empty_path = tmp_path / "empty.zip"
+    empty_path.write_bytes(b"")
+    monkeypatch.setenv(
+        "FAKE_PYTEST_RAW_TRACE_MANIFEST",
+        json.dumps({"test_id": "test_post_orders_fail", "path": str(empty_path)}) + "\n",
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.trace_artifacts == ()
+    assert len(result.evidence_failures) == 1
+    assert result.evidence_failures[0].test_id == "test_post_orders_fail"
+
+
+def test_evidence_failure_never_alters_the_original_test_failure(tmp_path, monkeypatch):
+    # Item 8 (regra fundamental do bloco): a falha de infraestrutura de
+    # evidência NUNCA substitui/altera o resultado funcional do teste —
+    # test_failures/success continuam refletindo só o JUnit real.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    # "test_failures" no fake_pytest reporta o teste que de fato falhou no
+    # JUnit como "test_post_users_success" — usado aqui como test_id da
+    # falha de evidência pra correlacionar com o mesmo teste.
+    _set_trace_artifacts(
+        monkeypatch, [{"test_id": "test_post_users_success", "error": "TimeoutError"}]
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.success is False
+    assert len(result.test_failures) == 1
+    assert result.test_failures[0].test_name == "test_post_users_success"
+    assert "assert 500 == 201" in result.test_failures[0].error_message
+    # A falha de evidência é adicional, nunca uma substituição.
+    assert len(result.evidence_failures) == 1
+
+
+def test_evidence_failure_test_id_matches_a_real_evidence_failure_entry(tmp_path, monkeypatch):
+    # Item 9: test_id é sempre preservado corretamente.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    _set_trace_artifacts(
+        monkeypatch, [{"test_id": "test_delete_user_fail", "error": "Error"}]
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.evidence_failures[0].test_id == "test_delete_user_fail"
+
+
+def test_evidence_failure_without_test_id_is_never_fabricated(tmp_path, monkeypatch):
+    # Item 10: uma linha de manifesto sem test_id nunca vira uma
+    # InfrastructureFailure com um test_id inventado — é só descartada
+    # (mesmo critério de linha malformada).
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    monkeypatch.setenv(
+        "FAKE_PYTEST_RAW_TRACE_MANIFEST",
+        json.dumps({"error": "TimeoutError"}) + "\n",  # sem "test_id"
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.evidence_failures == ()
+
+
+def test_evidence_failure_message_never_contains_a_known_secret(tmp_path, monkeypatch):
+    # Item 11: a mensagem passa pelo MESMO masking de known_secret_values
+    # já usado no resto da evidência (defesa em profundidade — as
+    # mensagens em si são texto fixo, mas nunca confiar só nisso).
+    secret_value = "sk_live_super_secret_evidence_message"
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    corrupted_path = tmp_path / "corrupted.zip"
+    corrupted_path.write_bytes(b"nao e um zip valido")
+    monkeypatch.setenv(
+        "FAKE_PYTEST_RAW_TRACE_MANIFEST",
+        json.dumps({"test_id": "test_post_orders_fail", "path": str(corrupted_path)}) + "\n",
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(
+        tests_path=_minimal_suite_dir(tmp_path), known_secret_values=(secret_value,)
+    )
+
+    assert secret_value not in result.evidence_failures[0].message
+
+
+def test_passing_test_never_generates_an_evidence_failure(tmp_path, monkeypatch):
+    # Item 18: PASS sem nenhum problema real -> nenhuma InfrastructureFailure
+    # de evidência é fabricada (nem trace, nem evidence_failures).
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.trace_artifacts == ()
+    assert result.evidence_failures == ()
+
+
+def test_multiple_evidence_failures_keep_the_correct_test_id_each(tmp_path, monkeypatch):
+    # Item 17: múltiplos testes com falhas de evidência mantêm test_id
+    # correto (sem mistura entre eles).
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    corrupted_path = tmp_path / "corrupted.zip"
+    corrupted_path.write_bytes(b"nao e um zip valido")
+    manifest_lines = "\n".join(
+        [
+            json.dumps({"test_id": "test_a_fail", "path": str(corrupted_path)}),
+            json.dumps({"test_id": "test_b_fail", "error": "TimeoutError"}),
+            json.dumps(
+                {"test_id": "test_c_fail", "path": str(tmp_path / "nunca-existiu.zip")}
+            ),
+        ]
+    )
+    monkeypatch.setenv("FAKE_PYTEST_RAW_TRACE_MANIFEST", manifest_lines + "\n")
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert len(result.evidence_failures) == 3
+    by_test_id = {f.test_id: f for f in result.evidence_failures}
+    assert set(by_test_id) == {"test_a_fail", "test_b_fail", "test_c_fail"}
+    assert "mascarar" in by_test_id["test_a_fail"].message.lower()
+    assert "TimeoutError" in by_test_id["test_b_fail"].message
+    assert "encontrado" in by_test_id["test_c_fail"].message.lower()

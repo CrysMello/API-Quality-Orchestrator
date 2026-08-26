@@ -19,6 +19,11 @@ from typing import Any
 CREATED_CONTEXTS: list["APIRequestContext"] = []
 DISPOSED_CONTEXTS: list["APIRequestContext"] = []
 CALLS: list[dict[str, Any]] = []
+# P1.4 (hardening): quando definido, dispose() levanta esta exceção em vez
+# de descartar normalmente — usado só para provar que uma falha durante
+# dispose() nunca esconde a falha original de um teste (ver conftest.py
+# gerado, _render_conftest). Resetado a cada reset_state().
+DISPOSE_ERROR: Exception | None = None
 # Resposta usada pela PRÓXIMA chamada get/post/.../fetch — resetada a cada
 # reset_state(). Default cobre o caso comum (200, sem headers extras, corpo
 # JSON simples) sem exigir que todo teste configure isto.
@@ -30,11 +35,13 @@ NEXT_RESPONSE: dict[str, Any] = {
 
 
 def reset_state() -> None:
+    global DISPOSE_ERROR
     CREATED_CONTEXTS.clear()
     DISPOSED_CONTEXTS.clear()
     CALLS.clear()
     NEXT_RESPONSE.clear()
     NEXT_RESPONSE.update(status=200, headers={"content-type": "application/json"}, body='{"ok": true}')
+    DISPOSE_ERROR = None
 
 
 class APIRequestContext:
@@ -73,6 +80,8 @@ class APIRequestContext:
         return self._respond(kwargs.get("method", "GET"), url, kwargs)
 
     def dispose(self) -> None:
+        if DISPOSE_ERROR is not None:
+            raise DISPOSE_ERROR
         self.disposed = True
         DISPOSED_CONTEXTS.append(self)
 

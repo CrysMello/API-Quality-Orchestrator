@@ -80,6 +80,38 @@ def test_cookies_array_values_are_redacted(tmp_path):
     assert "abc123secret" not in result["trace.network"].decode("utf-8")
 
 
+def test_set_cookie_response_header_value_is_redacted(tmp_path):
+    line = json.dumps(
+        {
+            "type": "resource-snapshot",
+            "snapshot": {
+                "response": {
+                    "headers": [{"name": "Set-Cookie", "value": "session=abc123; Secure"}]
+                },
+            },
+        }
+    )
+    result = _mask(tmp_path, {"trace.network": line + "\n"}, known_secret_values=())
+
+    text = result["trace.network"].decode("utf-8")
+    assert "abc123" not in text
+    assert "[REDACTED]" in text
+
+
+def test_proxy_authorization_header_value_is_redacted(tmp_path):
+    line = json.dumps(
+        {
+            "type": "before",
+            "params": {"headers": [{"name": "Proxy-Authorization", "value": "Basic dGVzdDoxMjM="}]},
+        }
+    )
+    result = _mask(tmp_path, {"trace.trace": line + "\n"}, known_secret_values=())
+
+    text = result["trace.trace"].decode("utf-8")
+    assert "dGVzdDoxMjM=" not in text
+    assert "[REDACTED]" in text
+
+
 def test_non_sensitive_headers_are_never_redacted(tmp_path):
     line = json.dumps(
         {
@@ -169,6 +201,7 @@ def test_invalid_base64_post_data_never_crashes_the_export(tmp_path):
 
 
 def test_text_resource_is_masked_by_known_secret_value(tmp_path):
+    # Corpo de REQUEST (via resources/*.bin, formato real do Playwright).
     result = _mask(
         tmp_path,
         {"resources/abc.bin": json.dumps({"password": "hunter2"})},
@@ -176,6 +209,20 @@ def test_text_resource_is_masked_by_known_secret_value(tmp_path):
     )
 
     assert b"hunter2" not in result["resources/abc.bin"]
+
+
+def test_response_body_resource_is_masked_by_known_secret_value(tmp_path):
+    # Corpo de RESPONSE (via resources/*.json, referenciado por
+    # response.content._sha1 em trace.network) — mesmo mecanismo genérico
+    # de _mask_resource_member, exercitado aqui explicitamente para a
+    # direção de resposta (item 12 do bloco de hardening).
+    result = _mask(
+        tmp_path,
+        {"resources/response.json": json.dumps({"token": "sk_live_super_secret_e2e"})},
+        known_secret_values=("sk_live_super_secret_e2e",),
+    )
+
+    assert b"sk_live_super_secret_e2e" not in result["resources/response.json"]
 
 
 def test_genuinely_binary_resource_is_stripped_not_left_unverified(tmp_path):

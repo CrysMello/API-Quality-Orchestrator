@@ -213,6 +213,9 @@ class PlaywrightAdapter:
             # abruptamente) — o manifesto simplesmente não tem entrada para
             # ele, nunca um arquivo incompleto/corrompido é interpretado
             # como trace válido.
+            trace_artifacts, evidence_failures = _read_trace_artifacts(
+                trace_manifest_path, known_secret_values
+            )
             return _infrastructure_result(
                 tests_path,
                 InfrastructureFailureType.TIMEOUT,
@@ -224,7 +227,8 @@ class PlaywrightAdapter:
                 assertion_results=_read_assertion_results(
                     assertion_results_path, known_secret_values
                 ),
-                trace_artifacts=_read_trace_artifacts(trace_manifest_path, known_secret_values),
+                trace_artifacts=trace_artifacts,
+                evidence_failures=evidence_failures,
             )
         except OSError as exc:
             return _infrastructure_result(
@@ -243,7 +247,9 @@ class PlaywrightAdapter:
         stderr = mask_all_occurrences(completed.stderr or "", known_secret_values)
         http_transactions = _read_http_transactions(transactions_path, known_secret_values)
         assertion_results = _read_assertion_results(assertion_results_path, known_secret_values)
-        trace_artifacts = _read_trace_artifacts(trace_manifest_path, known_secret_values)
+        trace_artifacts, evidence_failures = _read_trace_artifacts(
+            trace_manifest_path, known_secret_values
+        )
 
         if completed.returncode == _PYTEST_EXIT_CODE_NO_TESTS_COLLECTED:
             # "Diferenciar: nenhum teste coletado" — nunca reportado como um
@@ -262,6 +268,7 @@ class PlaywrightAdapter:
                 http_transactions=http_transactions,
                 assertion_results=assertion_results,
                 trace_artifacts=trace_artifacts,
+                evidence_failures=evidence_failures,
             )
 
         try:
@@ -286,6 +293,7 @@ class PlaywrightAdapter:
                 http_transactions=http_transactions,
                 assertion_results=assertion_results,
                 trace_artifacts=trace_artifacts,
+                evidence_failures=evidence_failures,
             )
 
         failures = tuple(
@@ -308,6 +316,7 @@ class PlaywrightAdapter:
             http_transactions=http_transactions,
             assertion_results=assertion_results,
             trace_artifacts=trace_artifacts,
+            evidence_failures=evidence_failures,
             # total_requests e total_assertions recebem o MESMO número: o
             # JUnit do pytest só sabe contar "testes" (uma função de teste),
             # sem a granularidade de "requisição" vs. "assertion" que o
@@ -337,14 +346,15 @@ def _infrastructure_result(
     http_transactions: tuple[HttpTransaction, ...] = (),
     assertion_results: tuple[AssertionResult, ...] = (),
     trace_artifacts: tuple[TraceArtifact, ...] = (),
+    evidence_failures: tuple[InfrastructureFailure, ...] = (),
 ) -> ExecutionResult:
     # exit_code=None é o caso comum (nenhum processo chegou a rodar de
     # verdade: caminho inválido, executável ausente); NO_TESTS_COLLECTED é a
     # única chamada que informa um exit_code real (5), preservando-o como
     # pedido — nunca descartado silenciosamente. http_transactions=()/
-    # assertion_results=()/trace_artifacts=() são o caso comum pelo mesmo
-    # motivo (processo nunca rodou de verdade); TIMEOUT e NO_TESTS_COLLECTED
-    # passam evidência real quando ela existe.
+    # assertion_results=()/trace_artifacts=()/evidence_failures=() são o
+    # caso comum pelo mesmo motivo (processo nunca rodou de verdade);
+    # TIMEOUT e NO_TESTS_COLLECTED passam evidência real quando ela existe.
     return ExecutionResult(
         collection_source=tests_path,
         success=False,
@@ -361,6 +371,7 @@ def _infrastructure_result(
         http_transactions=http_transactions,
         assertion_results=assertion_results,
         trace_artifacts=trace_artifacts,
+        evidence_failures=evidence_failures,
     )
 
 
@@ -616,25 +627,57 @@ def _masked_scalar(value: object, known_secret_values: tuple[str, ...]) -> objec
 
 
 # --- P1.3 (Trace em falha): traces .zip (um por teste que falhou) ----------
+# --- P1.5 (infrastructure failure das evidências): toda falha REAL na ------
+# --- infraestrutura de captura/masking/leitura do Trace vira uma -----------
+# --- InfrastructureFailure explícita (nunca silenciosa), correlacionada ---
+# --- por test_id quando ele já é conhecido — nunca inventado. -------------
+
+# "source" da InfrastructureFailure (P1.5): identifica QUAL evidência
+# falhou — hoje só existe uma, mas o campo é aberto para futuras
+# evidências sem forçar todo consumidor a assumir que só existe uma.
+_EVIDENCE_SOURCE_PLAYWRIGHT_TRACE = "playwright_trace"
+
+
+def _evidence_failure(
+    test_id: str, message: str, known_secret_values: tuple[str, ...]
+) -> InfrastructureFailure:
+    # Mensagens são sempre texto fixo/genérico escrito por este módulo
+    # (nunca a mensagem bruta de uma exceção do Playwright, que poderia
+    # ecoar detalhes de uma chamada HTTP) — mesmo assim, passam pelo MESMO
+    # masking de known_secret_values usado no resto da evidência, como
+    # defesa em profundidade.
+    return InfrastructureFailure(
+        failure_type=InfrastructureFailureType.EVIDENCE_PERSISTENCE_FAILED,
+        message=mask_all_occurrences(message, known_secret_values),
+        source=_EVIDENCE_SOURCE_PLAYWRIGHT_TRACE,
+        test_id=test_id,
+    )
 
 
 def _read_trace_artifacts(
     manifest_path: str, known_secret_values: tuple[str, ...]
-) -> tuple[TraceArtifact, ...]:
+) -> tuple[tuple[TraceArtifact, ...], tuple[InfrastructureFailure, ...]]:
     # Mesmo raciocínio de _read_http_transactions/_read_assertion_results:
     # manifesto ausente (nenhum teste falhou, ou suíte gerada antes da
     # P1.3) nunca é erro, só "nada pra reportar" — e nunca cria a pasta de
     # saída mascarada à toa.
     path = Path(manifest_path)
     if not path.exists():
-        return ()
+        return (), ()
 
     try:
         raw_text = path.read_text(encoding="utf-8")
     except OSError:
-        return ()
+        return (), ()
 
-    entries: list[tuple[str, str]] = []
+    # Cada linha é ou um trace bem-sucedido ({"test_id":, "path":}) ou uma
+    # falha de captura/finalização já sinalizada pelo próprio conftest.py
+    # gerado ({"test_id":, "error": <nome da classe da exceção>} — ver
+    # _finish_trace). Uma linha sem nenhuma das duas formas reconhecidas,
+    # ou sem test_id, é descartada sem gerar InfrastructureFailure — nunca
+    # inventa um test_id (regra explícita do bloco).
+    success_entries: list[tuple[str, str]] = []
+    evidence_failures: list[InfrastructureFailure] = []
     for line in raw_text.splitlines():
         line = line.strip()
         if not line:
@@ -648,13 +691,24 @@ def _read_trace_artifacts(
         if not isinstance(entry, dict):
             continue
         test_id = entry.get("test_id")
-        raw_path = entry.get("path")
-        if not isinstance(test_id, str) or not isinstance(raw_path, str):
+        if not isinstance(test_id, str):
             continue
-        entries.append((test_id, raw_path))
+        raw_path = entry.get("path")
+        if isinstance(raw_path, str):
+            success_entries.append((test_id, raw_path))
+            continue
+        error_type = entry.get("error")
+        if isinstance(error_type, str):
+            evidence_failures.append(
+                _evidence_failure(
+                    test_id,
+                    f"Falha ao finalizar o Trace ({error_type}); nenhum artefato foi gerado.",
+                    known_secret_values,
+                )
+            )
 
-    if not entries:
-        return ()
+    if not success_entries:
+        return (), tuple(evidence_failures)
 
     # Diretório próprio (nunca dentro de report_dir, removido pelo
     # chamador de run() ao final): a posse passa para quem for persistir o
@@ -665,13 +719,21 @@ def _read_trace_artifacts(
     masked_dir = Path(tempfile.mkdtemp(prefix="api-quality-agent-pytest-traces-masked-"))
 
     artifacts: list[TraceArtifact] = []
-    for test_id, raw_path in entries:
+    for test_id, raw_path in success_entries:
         source = Path(raw_path)
         if not source.is_file():
             # Trace referenciado no manifesto mas nunca finalizado (ex.:
             # processo morto abruptamente por timeout no meio do
             # tracing.stop) — nunca inventa um artefato para um arquivo
-            # que não existe.
+            # que não existe; registra a falha de evidência explicitamente.
+            evidence_failures.append(
+                _evidence_failure(
+                    test_id,
+                    "Trace referenciado não foi encontrado após a execução; "
+                    "nenhum artefato foi persistido.",
+                    known_secret_values,
+                )
+            )
             continue
         destination = masked_dir / f"{uuid.uuid4().hex}.zip"
         try:
@@ -681,12 +743,36 @@ def _read_trace_artifacts(
                 known_secret_values=known_secret_values,
             )
         except Exception:  # noqa: S112, BLE001 - best-effort: só descarta este trace específico
-            # Mascaramento é evidência de segurança best-effort: uma falha
-            # aqui (.zip corrompido, disco cheio etc.) nunca derruba o
-            # ExecutionResult inteiro — só este trace específico é
-            # descartado, nunca persistido sem passar pelo masking.
+            # P1.4 (hardening) — CRÍTICO: se o masking falhar (.zip
+            # corrompido/vazio/truncado, disco cheio etc.), NUNCA persistir
+            # o bruto como fallback (fail-safe: "não consegui mascarar"
+            # nunca vira "persisto o original mesmo assim"). Também nunca
+            # deixa um .zip parcial (mesmo que só com conteúdo já
+            # mascarado até o ponto da falha) órfão em masked_dir — o
+            # zipfile finaliza um arquivo válido mas incompleto no
+            # __exit__ do "with" mesmo quando a exceção interrompe o loop
+            # de _mask_trace_archive, então o arquivo pode existir aqui.
+            # P1.5: a falha agora é registrada explicitamente, nunca só
+            # descartada em silêncio.
+            destination.unlink(missing_ok=True)
+            evidence_failures.append(
+                _evidence_failure(
+                    test_id,
+                    "Falha ao mascarar o Trace; artefato não persistido por segurança.",
+                    known_secret_values,
+                )
+            )
             continue
         artifacts.append(
             TraceArtifact(type="playwright-trace", test_id=test_id, path=str(destination))
         )
-    return tuple(artifacts)
+
+    if not artifacts:
+        # Nenhum trace deste manifesto sobreviveu ao masking — masked_dir
+        # nunca chega a ser referenciado por nenhum TraceArtifact, então
+        # nunca seria limpo por quem persiste o ExecutionResult
+        # (PersistExecutionResultUseCase só move/limpa o que está
+        # referenciado). Remove aqui para nunca deixar um diretório
+        # temporário órfão.
+        shutil.rmtree(masked_dir, ignore_errors=True)
+    return tuple(artifacts), tuple(evidence_failures)

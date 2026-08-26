@@ -104,6 +104,20 @@ def _valid_payload_1_6(**overrides) -> dict:
     return payload
 
 
+def _valid_payload_1_7(**overrides) -> dict:
+    payload = _valid_payload_1_6(schema_version="1.7")
+    payload["evidence_failures"] = [
+        {
+            "type": "evidence_persistence_failed",
+            "source": "playwright_trace",
+            "test_id": "test_post_orders_fail",
+            "message": "Falha ao mascarar o Trace; artefato não persistido por segurança.",
+        },
+    ]
+    payload.update(overrides)
+    return payload
+
+
 def _valid_payload_1_0() -> dict:
     # Schema 1.0: sem schema_version e sem workspace no arquivo.
     return {
@@ -340,6 +354,47 @@ def test_read_schema_1_6_with_no_trace_artifacts(tmp_path):
     record = reader.read(path=path)
 
     assert record.trace_artifacts == ()
+
+
+def test_read_schema_1_6_defaults_evidence_failures_to_empty(tmp_path):
+    # "evidence_failures" só existe a partir do schema 1.7 — ausente em
+    # 1.6, tratado como tupla vazia, nunca inventado (item 15).
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_6())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.evidence_failures == ()
+
+
+# --- Leitura: schema 1.7 (P1.5 — infrastructure failure das evidências) -----------------
+
+
+def test_read_schema_1_7_populates_evidence_failures(tmp_path):
+    from api_quality_agent.domain.models import InfrastructureFailureType
+
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_7())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.schema_version == "1.7"
+    assert len(record.evidence_failures) == 1
+    failure = record.evidence_failures[0]
+    assert failure.failure_type == InfrastructureFailureType.EVIDENCE_PERSISTENCE_FAILED
+    assert failure.source == "playwright_trace"
+    assert failure.test_id == "test_post_orders_fail"
+    assert "mascarar" in failure.message.lower()
+
+
+def test_read_schema_1_7_with_no_evidence_failures(tmp_path):
+    payload = _valid_payload_1_7(evidence_failures=[])
+    path = _write(tmp_path / "run_x" / "result.json", payload)
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.evidence_failures == ()
 
 
 # --- Leitura: schema 1.0 (retrocompatibilidade) ----------------------------------------------------------------

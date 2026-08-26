@@ -98,6 +98,19 @@ def _maybe_write_trace_artifacts() -> None:
     artifacts = json.loads(raw_artifacts)
     manifest_lines = []
     for artifact in artifacts:
+        # P1.5 (infrastructure failure das evidências): "error" simula uma
+        # falha de CAPTURA/FINALIZAÇÃO do Trace em si (tracing.stop()
+        # levantando, ver _finish_trace no conftest.py gerado) — nenhum
+        # .zip é criado, mesma forma de entrada do manifesto que o
+        # conftest.py real escreveria nesse caso.
+        error_type = artifact.get("error")
+        if error_type:
+            manifest_lines.append(
+                json.dumps(
+                    {"test_id": artifact["test_id"], "error": error_type}, ensure_ascii=False
+                )
+            )
+            continue
         zip_path = os.path.join(trace_dir, uuid.uuid4().hex + ".zip")
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
             for member_name, content in artifact.get("files", {}).items():

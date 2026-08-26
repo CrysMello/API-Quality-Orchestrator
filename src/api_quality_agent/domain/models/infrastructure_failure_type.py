@@ -20,3 +20,9 @@ class InfrastructureFailureType(str, Enum):
     # como total_requests=0/success=false silenciosamente, sempre como esta
     # falha de infraestrutura explícita, com o exit code original preservado.
     NO_TESTS_COLLECTED = "no_tests_collected"
+    # P1.5 (infrastructure failure das evidências): a infraestrutura de
+    # captura/mascaramento/persistência de uma EVIDÊNCIA (hoje só o
+    # Playwright Trace) falhou para um teste específico — nunca uma falha
+    # funcional do teste em si (assertion, status HTTP, schema). Ver
+    # InfrastructureFailure.source/test_id para o contexto específico.
+    EVIDENCE_PERSISTENCE_FAILED = "evidence_persistence_failed"

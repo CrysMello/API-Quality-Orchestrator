@@ -109,15 +109,52 @@ def test_conftest_calls_dispose_inside_a_finally_block():
     try_nodes = [node for node in ast.walk(fixture_function) if isinstance(node, ast.Try)]
     assert try_nodes, "esperava um bloco try/finally dentro da fixture"
 
+    # P1.4 (hardening): dispose() agora fica dentro do finally, mas
+    # envolvido no próprio try/except (nunca pode esconder a falha
+    # original do teste — ver _render_conftest) — por isso a busca varre
+    # toda a subárvore do finally (ast.walk), não só uma chamada direta.
     dispose_in_finally = any(
-        isinstance(stmt, ast.Expr)
-        and isinstance(stmt.value, ast.Call)
-        and isinstance(stmt.value.func, ast.Attribute)
-        and stmt.value.func.attr == "dispose"
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "dispose"
         for try_node in try_nodes
         for stmt in try_node.finalbody
+        for node in ast.walk(stmt)
     )
     assert dispose_in_finally
+
+
+def test_conftest_dispose_inside_the_finally_is_wrapped_in_its_own_try_except():
+    # P1.4 (hardening): se dispose() levantar durante o teardown de um
+    # teste que já falhou, essa exceção do finally NUNCA pode substituir a
+    # falha original do teste na saída do pytest — precisa estar dentro do
+    # próprio try/except, nunca solta dentro do finally.
+    content = _conftest_content()
+    tree = ast.parse(content)
+
+    fixture_function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "api_context"
+    )
+    outer_try = next(
+        node for node in ast.walk(fixture_function) if isinstance(node, ast.Try)
+    )
+
+    dispose_try_nodes = [
+        stmt
+        for stmt in outer_try.finalbody
+        if isinstance(stmt, ast.Try)
+        and any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "dispose"
+            for inner_stmt in stmt.body
+            for node in ast.walk(inner_stmt)
+        )
+    ]
+    assert dispose_try_nodes, "dispose() deveria estar dentro do seu próprio try/except"
+    assert dispose_try_nodes[0].handlers, "o try ao redor de dispose() precisa ter um except"
 
 
 def test_conftest_base_url_is_configurable_via_environment_variable():
@@ -245,6 +282,33 @@ def test_api_context_disposes_even_when_the_test_raises(tmp_path, fake_playwrigh
         generator.throw(RuntimeError("falha simulada do teste"))
 
     assert context.disposed is True
+
+
+def test_dispose_raising_never_shadows_the_original_test_exception(tmp_path, fake_playwright):
+    # P1.4 (hardening): se dispose() TAMBÉM levantar durante o teardown de
+    # um teste que já falhou, a exceção original ("falha real do teste")
+    # precisa continuar sendo o que o pytest reporta — nunca substituída
+    # pela exceção de dispose().
+    fake_playwright.DISPOSE_ERROR = RuntimeError("dispose falhou também")
+    module_path = tmp_path / "generated_conftest_dispose_error.py"
+    module_path.write_text(_conftest_content(), encoding="utf-8")
+
+    spec = importlib.util.spec_from_file_location(
+        "generated_conftest_dispose_error", module_path
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    generator = module.api_context.__wrapped__(_fake_request())
+    context = next(generator)
+
+    with pytest.raises(RuntimeError, match="falha real do teste"):
+        generator.throw(RuntimeError("falha real do teste"))
+
+    # dispose() foi de fato chamado e levantou (não foi pulado) — só não
+    # deveria ter conseguido esconder a exceção original acima.
+    assert context.disposed is False
 
 
 # --- P1.2: captura de transação HTTP (contra o fake, nunca o playwright real) --------------

@@ -43,6 +43,9 @@ class ExecutionResultRecord:
     # P1.3 (Trace em falha): só existe a partir do schema 1.6 — mesmo
     # raciocínio aditivo.
     trace_artifacts: tuple[TraceArtifact, ...] = ()
+    # P1.5 (infrastructure failure das evidências): só existe a partir do
+    # schema 1.7 — mesmo raciocínio aditivo.
+    evidence_failures: tuple[InfrastructureFailure, ...] = ()
 
     @property
     def passed_assertions(self) -> int:

@@ -37,3 +37,13 @@ class ExecutionResult:
     # FALHOU (nunca por um que passou) — Newman nunca preenche isto, mesmo
     # raciocínio aditivo de http_transactions/assertion_results.
     trace_artifacts: tuple[TraceArtifact, ...] = ()
+    # P1.5 (infrastructure failure das evidências): uma entrada por falha
+    # real na INFRAESTRUTURA de captura de evidência (nunca uma falha
+    # funcional do teste) — ex.: Trace que não pôde ser mascarado/movido.
+    # Independente de infrastructure_failure (singular, acima): aquele
+    # marca a EXECUÇÃO INTEIRA como não confiável (executável ausente,
+    # timeout); isto aqui coexiste com uma execução normal, só sinalizando
+    # que UMA evidência específica não pôde ser persistida com segurança.
+    # Newman nunca preenche isto, mesmo raciocínio aditivo dos campos
+    # acima.
+    evidence_failures: tuple[InfrastructureFailure, ...] = ()

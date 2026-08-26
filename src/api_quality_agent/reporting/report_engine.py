@@ -15,6 +15,7 @@ from api_quality_agent.domain.models import (
     ExecutionResultRecord,
     GeneratedArtifact,
     HttpTransaction,
+    InfrastructureFailure,
     SelectionOrigin,
     TraceArtifact,
 )
@@ -309,6 +310,7 @@ def _build_execution_section(
             execution_result.http_transactions,
             execution_result.assertion_results,
             execution_result.trace_artifacts,
+            execution_result.evidence_failures,
             # Fluxo "ao vivo" (generate/update): nunca houve persistência
             # ainda, então TraceArtifact.path já é um caminho ABSOLUTO de
             # arquivo temporário (ver PlaywrightAdapter) — nada a resolver
@@ -358,6 +360,7 @@ def _build_execution_section_from_record(record: ExecutionResultRecord) -> Repor
             record.http_transactions,
             record.assertion_results,
             record.trace_artifacts,
+            record.evidence_failures,
             # Fluxo persistido (report): TraceArtifact.path já vem RELATIVO
             # ao diretório de result.json (ver PersistExecutionResultUseCase)
             # — resolvido aqui contra esse diretório, nunca contra o
@@ -372,6 +375,7 @@ def _build_test_executions(
     http_transactions: tuple[HttpTransaction, ...],
     assertion_results: tuple[AssertionResult, ...],
     trace_artifacts: tuple[TraceArtifact, ...],
+    evidence_failures: tuple[InfrastructureFailure, ...],
     *,
     source_dir: Path | None,
 ) -> tuple[ReportTestExecution, ...]:
@@ -393,6 +397,25 @@ def _build_test_executions(
         if assertion.test_id not in seen:
             seen.add(assertion.test_id)
             order.append(assertion.test_id)
+    # P1.4 (hardening): um teste que falha por erro de TRANSPORTE (nunca
+    # chega a existir uma resposta, logo nenhuma HttpTransaction nem
+    # AssertionResult é registrada) ainda assim gera um trace — sem este
+    # fallback, o trace desse teste nunca apareceria em lugar nenhum do
+    # relatório, mesmo tendo sido persistido corretamente.
+    for artifact in trace_artifacts:
+        if artifact.test_id not in seen:
+            seen.add(artifact.test_id)
+            order.append(artifact.test_id)
+    # P1.5 (infrastructure failure das evidências): mesmo raciocínio — uma
+    # falha de evidência sem HttpTransaction/AssertionResult/TraceArtifact
+    # (ex.: mkdir do diretório de destino falhou antes de qualquer trace
+    # existir) nunca pode desaparecer do relatório. test_id=None (falha
+    # sem correlação conhecida) nunca entra aqui — nunca inventa um
+    # test_id só para exibir.
+    for failure in evidence_failures:
+        if failure.test_id is not None and failure.test_id not in seen:
+            seen.add(failure.test_id)
+            order.append(failure.test_id)
 
     if not order:
         return ()
@@ -418,8 +441,22 @@ def _build_test_executions(
                 if assertion.test_id == test_id
             ),
             trace=_build_report_trace(trace_by_test_id.get(test_id), source_dir=source_dir),
+            evidence_failures=tuple(
+                _build_report_evidence_failure(failure)
+                for failure in evidence_failures
+                if failure.test_id == test_id
+            ),
         )
         for test_id in order
+    )
+
+
+def _build_report_evidence_failure(failure: InfrastructureFailure) -> ReportInfrastructureFailure:
+    return ReportInfrastructureFailure(
+        failure_type=failure.failure_type.value,
+        message=failure.message,
+        source=failure.source,
+        test_id=failure.test_id,
     )
 
 
@@ -431,7 +468,14 @@ def _build_report_trace(
     candidate = Path(artifact.path)
     if source_dir is not None and not candidate.is_absolute():
         candidate = source_dir / candidate
-    return ReportTraceArtifact(test_id=artifact.test_id, path=str(candidate.resolve()))
+    resolved = candidate.resolve()
+    # P1.4 (hardening): a referência nunca é apagada (result.json/histórico
+    # continuam intactos) — só marcada como indisponível quando o arquivo
+    # físico não existe mais (movido, apagado, disco diferente etc.), pra
+    # o renderer nunca produzir um link morto silenciosamente.
+    return ReportTraceArtifact(
+        test_id=artifact.test_id, path=str(resolved), available=resolved.is_file()
+    )
 
 
 def _build_report_transaction(transaction: HttpTransaction) -> ReportHttpTransaction:

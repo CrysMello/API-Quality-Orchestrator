@@ -27,10 +27,13 @@ DEFAULT_EXECUTION_RESULTS_BASE_PATH = Path("artifacts")
 # adiciona summary.skipped (P1.1/skipped_tests); "1.4" adiciona
 # http_transactions (P1.2); "1.5" adiciona http_transactions[].test_id e
 # assertion_results (P1.1/detalhamento de assertions); "1.6" adiciona
-# trace_artifacts (P1.3/Trace em falha). Cada versão é aditiva sobre a
-# anterior. Qualquer outra versão é recusada — nunca interpretada
+# trace_artifacts (P1.3/Trace em falha); "1.7" adiciona evidence_failures
+# (P1.5/infrastructure failure das evidências). Cada versão é aditiva
+# sobre a anterior. Qualquer outra versão é recusada — nunca interpretada
 # parcialmente.
-_SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6"})
+_SUPPORTED_SCHEMA_VERSIONS = frozenset(
+    {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6", "1.7"}
+)
 _DEFAULT_SCHEMA_VERSION = "1.0"
 
 
@@ -150,6 +153,18 @@ def _deserialize(payload: dict[str, Any], *, schema_version: str, source_path: s
             for trace_artifact in payload.get("trace_artifacts") or []
         )
 
+        # "evidence_failures" só existe a partir do schema 1.7 — ausente em
+        # 1.0-1.6, tratado como tupla vazia, nunca inventado.
+        evidence_failures = tuple(
+            InfrastructureFailure(
+                failure_type=InfrastructureFailureType(evidence_failure["type"]),
+                message=evidence_failure["message"],
+                source=evidence_failure.get("source"),
+                test_id=evidence_failure.get("test_id"),
+            )
+            for evidence_failure in payload.get("evidence_failures") or []
+        )
+
         return ExecutionResultRecord(
             source_path=source_path,
             schema_version=schema_version,
@@ -170,6 +185,7 @@ def _deserialize(payload: dict[str, Any], *, schema_version: str, source_path: s
             http_transactions=http_transactions,
             assertion_results=assertion_results,
             trace_artifacts=trace_artifacts,
+            evidence_failures=evidence_failures,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise InvalidExecutionResultError(

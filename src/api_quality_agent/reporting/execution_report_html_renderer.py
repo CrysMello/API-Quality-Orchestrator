@@ -8,6 +8,7 @@ from api_quality_agent.reporting.report import (
     ReportAssertionResult,
     ReportExecutionSection,
     ReportHttpTransaction,
+    ReportInfrastructureFailure,
     ReportTestExecution,
 )
 
@@ -187,12 +188,35 @@ def _render_test_execution(test: ReportTestExecution) -> str:
     )
     assertions_html = _render_assertions(test.assertions)
     trace_html = _render_trace_link(test)
+    evidence_failures_html = _render_evidence_failures(test)
     return f"""<div class="test-block">
   <div class="test-header"><h3>{_e(test.test_id) or "(sem test_id)"}</h3>{status_badge}</div>
   {trace_html}
+  {evidence_failures_html}
   {transactions_html}
   {assertions_html}
 </div>"""
+
+
+def _render_evidence_failures(test: ReportTestExecution) -> str:
+    # P1.5 (infrastructure failure das evidências): NUNCA apresentado como
+    # uma assertion (bloco visualmente distinto, nunca dentro de
+    # _render_assertions) — o resultado FUNCIONAL do teste (status_badge/
+    # assertions acima) já foi decidido e permanece intacto independente
+    # disto; isto só sinaliza que uma evidência (hoje, o Trace) não pôde
+    # ser capturada/mascarada/persistida com segurança.
+    if not test.evidence_failures:
+        return ""
+    items = "".join(
+        f"<li>{_e(failure.message)}</li>" for failure in test.evidence_failures
+    )
+    return (
+        '<div class="evidence-failures">'
+        '<p class="evidence-failures-title">'
+        '<span aria-hidden="true">⚠</span> Infraestrutura de evidências</p>'
+        f"<ul>{items}</ul>"
+        "</div>"
+    )
 
 
 def _render_trace_link(test: ReportTestExecution) -> str:
@@ -201,6 +225,14 @@ def _render_trace_link(test: ReportTestExecution) -> str:
     # um teste que passou, ou para um resultado antigo sem trace algum.
     if test.trace is None:
         return ""
+    if not test.trace.available:
+        # P1.4 (hardening): arquivo referenciado não existe mais (movido/
+        # apagado) — nunca um link morto silencioso; a referência em si
+        # (test_id) continua visível, nunca apagada.
+        return (
+            '<p class="trace-link trace-link-unavailable">'
+            "Trace indisponível (arquivo não encontrado).</p>"
+        )
     href = _e(_file_uri(test.trace.path))
     return f'<p class="trace-link">Trace disponível: <a href="{href}">Ver Trace</a></p>'
 
@@ -376,4 +408,12 @@ th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid #eee
 @media (prefers-color-scheme: dark) { .assertion-reason { color: #ccc; } }
 .trace-link { background: #fef3c7; border-radius: 6px; padding: 0.5rem 0.75rem; margin: 0 0 0.75rem; }
 @media (prefers-color-scheme: dark) { .trace-link { background: #78350f; } }
+.trace-link-unavailable { background: #f2f2f3; color: #6b6b6b; }
+@media (prefers-color-scheme: dark) { .trace-link-unavailable { background: #2a2b2f; color: #aaa; } }
+.evidence-failures { border: 1px dashed #d97706; border-radius: 6px; padding: 0.5rem 0.75rem;
+  margin: 0 0 0.75rem; background: #fffbeb; }
+@media (prefers-color-scheme: dark) { .evidence-failures { background: #3a2e0f; border-color: #d97706; } }
+.evidence-failures-title { font-weight: 700; margin: 0 0 0.3rem; color: #92400e; }
+@media (prefers-color-scheme: dark) { .evidence-failures-title { color: #fde68a; } }
+.evidence-failures ul { margin: 0; padding-left: 1.25rem; }
 """

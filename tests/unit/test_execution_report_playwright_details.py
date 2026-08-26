@@ -20,6 +20,8 @@ from api_quality_agent.domain.models import (
     ExecutionResultRecord,
     HttpTransaction,
     HttpTransactionHeader,
+    InfrastructureFailure,
+    InfrastructureFailureType,
     TraceArtifact,
 )
 from api_quality_agent.reporting import ReportEngine, render_execution_report_html
@@ -87,6 +89,17 @@ def _trace_artifact(**overrides) -> TraceArtifact:
     )
     defaults.update(overrides)
     return TraceArtifact(**defaults)
+
+
+def _evidence_failure(**overrides) -> InfrastructureFailure:
+    defaults = dict(
+        failure_type=InfrastructureFailureType.EVIDENCE_PERSISTENCE_FAILED,
+        message="Falha ao mascarar o Trace; artefato não persistido por segurança.",
+        source="playwright_trace",
+        test_id="test_post_orders_fail",
+    )
+    defaults.update(overrides)
+    return InfrastructureFailure(**defaults)
 
 
 def _render(record: ExecutionResultRecord) -> str:
@@ -346,6 +359,30 @@ def test_correlation_groups_a_test_id_that_only_has_assertions_no_transaction():
     assert report.execution.tests[0].transactions == ()
 
 
+def test_correlation_groups_a_test_id_that_only_has_a_trace_no_transaction_or_assertion():
+    # P1.4 (hardening): um teste que falha por erro de TRANSPORTE (timeout/
+    # connection error — nunca chega a existir uma resposta) não registra
+    # HttpTransaction nem AssertionResult, só o trace — sem este caso, o
+    # test_id (e o trace) desapareceriam completamente do relatório.
+    record = _record(
+        http_transactions=(),
+        assertion_results=(),
+        trace_artifacts=(_trace_artifact(test_id="test_transport_error_only"),),
+        success=False,
+        failed_assertions=1,
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+
+    assert len(report.execution.tests) == 1
+    test = report.execution.tests[0]
+    assert test.test_id == "test_transport_error_only"
+    assert test.transactions == ()
+    assert test.assertions == ()
+    assert test.trace is not None
+    assert test.trace.test_id == "test_transport_error_only"
+
+
 # --- 15/16. Resultado antigo sem http_transactions / sem assertion_results --
 
 
@@ -420,18 +457,35 @@ def test_report_engine_never_generates_a_trace_itself():
     assert report.execution.tests[0].trace is None
 
 
-def test_html_shows_the_trace_link_when_available():
+def _write_real_result_with_trace_file(tmp_path):
+    # P1.4 (hardening): "available" agora depende do arquivo existir de
+    # verdade no disco — helper compartilhado que cria um result.json real
+    # num diretório real, com o .zip referenciado realmente presente ao
+    # lado (traces/...), pra exercitar o caminho feliz.
+    run_dir = tmp_path / "run_x"
+    run_dir.mkdir()
+    traces_dir = run_dir / "traces"
+    traces_dir.mkdir()
+    (traces_dir / "00-test_post_users_success.zip").write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    source_path = str(run_dir / "result.json")
     record = _record(
+        source_path=source_path,
         assertion_results=(_assertion(status="FAILED", actual=500),),
         trace_artifacts=(_trace_artifact(),),
         success=False,
         failed_assertions=1,
     )
+    return record
+
+
+def test_html_shows_the_trace_link_when_available(tmp_path):
+    record = _write_real_result_with_trace_file(tmp_path)
 
     html = _render(record)
 
     assert "Ver Trace" in html
     assert "Trace dispon" in html  # "Trace disponível" (acento pode variar por escaping)
+    assert "indispon" not in html
 
 
 def test_html_never_shows_a_trace_link_for_a_passing_test():
@@ -456,17 +510,190 @@ def test_old_result_without_trace_artifacts_still_renders():
     assert "<h1>Execution Report</h1>" in html
 
 
-def test_trace_link_is_a_clickable_file_uri():
+def test_trace_link_is_a_clickable_file_uri(tmp_path):
+    record = _write_real_result_with_trace_file(tmp_path)
+
+    html = _render(record)
+
+    assert 'href="file://' in html
+
+
+def test_html_shows_trace_unavailable_when_the_file_no_longer_exists():
+    # P1.4 (hardening) — item 8: result.json aponta pra um arquivo que não
+    # existe (movido/apagado depois). Nunca um link morto silencioso, nunca
+    # apaga a referência, nunca quebra o restante do relatório.
     record = _record(
         assertion_results=(_assertion(status="FAILED", actual=500),),
-        trace_artifacts=(_trace_artifact(),),
+        trace_artifacts=(_trace_artifact(),),  # aponta pra um caminho que nunca existiu
+        success=False,
+        failed_assertions=1,
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+    html = _render(record)
+
+    assert report.execution.tests[0].trace is not None
+    assert report.execution.tests[0].trace.available is False
+    assert "Ver Trace" not in html
+    assert "indispon" in html
+    # o restante do relatório continua presente.
+    assert "<h1>Execution Report</h1>" in html
+    assert "test_post_users_success" in html
+
+
+# --- P1.5 (infrastructure failure das evidências) --------------------------
+
+
+def test_report_engine_groups_evidence_failure_under_its_test_id():
+    record = _record(
+        assertion_results=(_assertion(test_id="test_post_orders_fail", status="FAILED", actual=500),),
+        evidence_failures=(_evidence_failure(),),
+        success=False,
+        failed_assertions=1,
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+
+    test = report.execution.tests[0]
+    assert len(test.evidence_failures) == 1
+    failure = test.evidence_failures[0]
+    assert failure.test_id == "test_post_orders_fail"
+    assert failure.source == "playwright_trace"
+    assert "mascarar" in failure.message.lower()
+    # A falha de evidência nunca altera o status FUNCIONAL do teste
+    # (decidido só pelas assertions).
+    assert test.assertions[0].status == "FAILED"
+
+
+def test_report_engine_never_generates_an_evidence_failure_itself():
+    # Item 18: teste PASS sem nenhum evidence_failures real -> nunca
+    # inventado.
+    record = _record(assertion_results=(_assertion(status="PASSED"),), evidence_failures=())
+
+    report = ReportEngine().generate_from_execution_summary(record)
+
+    assert report.execution.tests[0].evidence_failures == ()
+
+
+def test_correlation_groups_a_test_id_that_only_has_an_evidence_failure():
+    # Uma falha de evidência sem HttpTransaction/AssertionResult/
+    # TraceArtifact (ex.: mkdir falhou antes de qualquer trace existir)
+    # nunca desaparece do relatório.
+    record = _record(
+        http_transactions=(),
+        assertion_results=(),
+        evidence_failures=(_evidence_failure(test_id="test_transport_error_only"),),
+        success=False,
+        failed_assertions=1,
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+
+    assert len(report.execution.tests) == 1
+    test = report.execution.tests[0]
+    assert test.test_id == "test_transport_error_only"
+    assert test.transactions == ()
+    assert test.assertions == ()
+    assert len(test.evidence_failures) == 1
+
+
+def test_evidence_failure_without_test_id_is_never_associated_with_any_test():
+    # Item 10: uma InfrastructureFailure sem test_id (falha ocorrida antes
+    # de existir um) nunca é inventada nem associada a um teste qualquer.
+    record = _record(
+        assertion_results=(_assertion(status="PASSED"),),
+        evidence_failures=(_evidence_failure(test_id=None),),
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+
+    assert len(report.execution.tests) == 1
+    assert report.execution.tests[0].evidence_failures == ()
+
+
+def test_html_shows_the_infrastructure_evidence_failure_block():
+    record = _record(
+        assertion_results=(_assertion(test_id="test_post_orders_fail", status="FAILED", actual=500),),
+        evidence_failures=(_evidence_failure(),),
         success=False,
         failed_assertions=1,
     )
 
     html = _render(record)
 
-    assert 'href="file://' in html
+    assert "Infraestrutura de evidências" in html
+    assert "Falha ao mascarar o Trace" in html
+
+
+def test_html_never_shows_the_evidence_failure_block_when_there_is_none():
+    record = _record(assertion_results=(_assertion(status="PASSED"),), evidence_failures=())
+
+    html = _render(record)
+
+    assert "Infraestrutura de evidências" not in html
+
+
+def test_html_never_presents_an_evidence_failure_as_an_assertion():
+    # O bloco de evidence_failures nunca deve usar as classes CSS de
+    # assertion (assertion/assertion-passed/assertion-failed) — é
+    # visualmente e semanticamente distinto.
+    record = _record(
+        assertion_results=(_assertion(test_id="test_post_orders_fail", status="FAILED", actual=500),),
+        evidence_failures=(_evidence_failure(),),
+        success=False,
+        failed_assertions=1,
+    )
+
+    html = _render(record)
+
+    evidence_start = html.index("Infraestrutura de evidências")
+    evidence_block_start = html.rindex("<div", 0, evidence_start)
+    evidence_block_end = html.index("</div>", evidence_start)
+    evidence_block = html[evidence_block_start:evidence_block_end]
+    assert "assertion-passed" not in evidence_block
+    assert "assertion-failed" not in evidence_block
+
+
+def test_evidence_failure_message_secrets_are_preserved_as_already_masked():
+    # ReportEngine nunca reprocessa masking — a mensagem já chega pronta
+    # do result.json (mesmo contrato do resto da evidência).
+    record = _record(
+        assertion_results=(_assertion(test_id="test_post_orders_fail", status="FAILED", actual=500),),
+        evidence_failures=(
+            _evidence_failure(message="Falha ao mover artefato. Token: sk_l****3456"),
+        ),
+        success=False,
+        failed_assertions=1,
+    )
+
+    html = _render(record)
+
+    assert "sk_l****3456" in html
+    assert "sk_live" not in html
+
+
+def test_old_result_without_evidence_failures_still_renders():
+    # schema 1.6 (evidence_failures ainda não existe) — compatibilidade.
+    record = _record(
+        assertion_results=(_assertion(status="PASSED"),),
+        evidence_failures=(),
+        schema_version="1.6",
+    )
+
+    html = _render(record)
+
+    assert "Infraestrutura de evidências" not in html
+    assert "<h1>Execution Report</h1>" in html
+
+
+def test_newman_result_never_shows_any_evidence_failure_block():
+    # Newman nunca preenche evidence_failures — o default (()) já cobre
+    # isso; aqui só confirma que o bloco nunca aparece.
+    record = _record()
+
+    html = _render(record)
+
+    assert "Infraestrutura de evidências" not in html
 
 
 # --- Masking: dados já chegam mascarados, nunca reprocessados aqui ----------

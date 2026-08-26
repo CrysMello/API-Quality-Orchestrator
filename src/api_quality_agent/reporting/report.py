@@ -54,6 +54,14 @@ class ReportTestFailure:
 class ReportInfrastructureFailure:
     failure_type: str
     message: str
+    # P1.5 (infrastructure failure das evidências): source/test_id só são
+    # preenchidos quando esta instância representa a falha de uma
+    # EVIDÊNCIA específica (ver ReportTestExecution.evidence_failures) —
+    # a falha "de execução inteira" (ReportExecutionSection.
+    # infrastructure_failure, singular) continua com os dois em None,
+    # exatamente como antes.
+    source: str | None = None
+    test_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -95,12 +103,19 @@ class ReportAssertionResult:
 class ReportTraceArtifact:
     # Espelha domain.models.TraceArtifact — só a referência (nunca o
     # conteúdo binário do .zip). `path` aqui já é o caminho ABSOLUTO
-    # resolvido pelo ReportEngine (ver _resolve_trace_href), pronto para
+    # resolvido pelo ReportEngine (ver _build_report_trace), pronto para
     # virar um link clicável no HTML independente de onde o próprio
     # report.html for escrito (--output pode apontar para outro
     # diretório).
     test_id: str
     path: str
+    # P1.4 (hardening): True só quando o arquivo referenciado por `path`
+    # existe fisicamente no momento em que o relatório é gerado (checado
+    # por ReportEngine) — False para uma referência histórica cujo
+    # arquivo foi movido/apagado depois. Nunca decide apagar a referência
+    # em si (preserva a informação histórica), só evita apresentar um link
+    # clicável para algo que não existe.
+    available: bool = True
 
 
 @dataclass(frozen=True)
@@ -117,6 +132,12 @@ class ReportTestExecution:
     # antes da P1.3) — nunca inventado; ReportEngine nunca gera um trace,
     # só apresenta o que já foi persistido (ver TraceArtifact).
     trace: ReportTraceArtifact | None = None
+    # P1.5 (infrastructure failure das evidências): vazio no caso comum
+    # (evidência capturada/persistida sem problema) — nunca confundido com
+    # `assertions` (resultado FUNCIONAL do teste): isto é sempre um
+    # problema de INFRAESTRUTURA de captura de evidência, apresentado
+    # separadamente pelo renderer.
+    evidence_failures: tuple[ReportInfrastructureFailure, ...] = ()
 
 
 @dataclass(frozen=True)

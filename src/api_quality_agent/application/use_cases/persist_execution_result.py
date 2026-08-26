@@ -4,7 +4,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from api_quality_agent.domain.models import ExecutionResult, ExecutionResultLocation, TraceArtifact
+from api_quality_agent.domain.models import (
+    ExecutionResult,
+    ExecutionResultLocation,
+    InfrastructureFailure,
+    InfrastructureFailureType,
+    TraceArtifact,
+)
 from api_quality_agent.ports.outbound import ExecutionResultRepository
 from api_quality_agent.shared import sanitize_filename_component
 
@@ -12,16 +18,23 @@ from api_quality_agent.shared import sanitize_filename_component
 # workspace, aditivo), "1.2" (test_failures, aditivo), "1.3" (summary.skipped,
 # aditivo — P1.1/skipped_tests), "1.4" (http_transactions, aditivo — P1.2),
 # "1.5" (http_transactions[].test_id + assertion_results, aditivo — P1.1/
-# detalhamento de assertions) e "1.6" (trace_artifacts, aditivo — P1.3/Trace
-# em falha) são as versões que api-quality-orchestrator report sabe ler —
-# ver JsonExecutionResultReader. Mudanças de schema são sempre aditivas;
-# nenhum campo existente é removido ou renomeado.
-EXECUTION_RESULT_SCHEMA_VERSION = "1.6"
+# detalhamento de assertions), "1.6" (trace_artifacts, aditivo — P1.3/Trace
+# em falha) e "1.7" (evidence_failures, aditivo — P1.5/infrastructure
+# failure das evidências) são as versões que api-quality-orchestrator
+# report sabe ler — ver JsonExecutionResultReader. Mudanças de schema são
+# sempre aditivas; nenhum campo existente é removido ou renomeado.
+EXECUTION_RESULT_SCHEMA_VERSION = "1.7"
 
 # Subdiretório, irmão de result.json, onde os .zip de trace (já mascarados
 # pelo PlaywrightAdapter) são movidos — mesma convenção de "report.html ao
 # lado de result.json" já usada por write_report.py (_resolve_output_path).
 _TRACES_SUBDIR = "traces"
+
+# P1.5: mesmo "source" usado pelo PlaywrightAdapter para falhas detectadas
+# do lado dele (masking, trace ausente) — reaproveitado aqui para as
+# falhas detectadas do lado da PERSISTÊNCIA (mkdir/move), nunca um valor
+# novo/divergente para a mesma evidência.
+_EVIDENCE_SOURCE_PLAYWRIGHT_TRACE = "playwright_trace"
 
 
 class PersistExecutionResultUseCase:
@@ -59,12 +72,49 @@ class PersistExecutionResultUseCase:
                 workspace_id=workspace_id,
                 workspace_name=workspace_name,
                 trace_relative_paths=trace_relative_paths,
+                evidence_failures=result.evidence_failures,
             ),
             indent=2,
             ensure_ascii=False,
         )
         location = self._execution_result_repository.save(content=content)
-        _move_trace_artifacts(result.trace_artifacts, trace_relative_paths, location)
+
+        # P1.4 (hardening): se ALGUM trace não puder ser movido para o
+        # destino final (diretório sem permissão, disco cheio, etc.), o
+        # result.json já escrito não pode continuar afirmando que um
+        # arquivo inexistente existe — regra explícita: nunca uma
+        # referência falsa. P1.5: a falha em si (mkdir/move) também vira
+        # uma InfrastructureFailure explícita — nunca só uma ausência
+        # silenciosa em trace_artifacts. Reescreve (mesma _serialize,
+        # nunca uma segunda fonte de verdade) só quando algo realmente
+        # mudou.
+        persisted_relative_paths, move_time_failures = _move_trace_artifacts(
+            result.trace_artifacts, trace_relative_paths, location
+        )
+        if persisted_relative_paths != trace_relative_paths or move_time_failures:
+            corrected_content = json.dumps(
+                _serialize(
+                    result,
+                    collection_id=collection_id,
+                    collection_name=collection_name,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    workspace_id=workspace_id,
+                    workspace_name=workspace_name,
+                    trace_relative_paths=persisted_relative_paths,
+                    evidence_failures=result.evidence_failures + move_time_failures,
+                ),
+                indent=2,
+                ensure_ascii=False,
+            )
+            try:
+                Path(location.path).write_text(corrected_content, encoding="utf-8")
+            except OSError:
+                # Melhor esforço: a correção em si é para um caso de borda
+                # raro (falha ao mover um trace) — uma segunda falha aqui
+                # nunca deve mascarar o resultado já persistido nem
+                # levantar por cima da execução do teste em si.
+                pass
         return location
 
 
@@ -84,24 +134,50 @@ def _resolve_trace_relative_paths(trace_artifacts: tuple[TraceArtifact, ...]) ->
     return tuple(paths)
 
 
+def _evidence_failure(test_id: str, message: str) -> InfrastructureFailure:
+    # Mensagens são sempre texto fixo escrito por este módulo (nunca a
+    # mensagem bruta de uma OSError, que poderia ecoar um caminho de
+    # arquivo local — não é um secret, mas também não agrega valor pro
+    # usuário final) — nada aqui deriva do conteúdo do Trace em si.
+    return InfrastructureFailure(
+        failure_type=InfrastructureFailureType.EVIDENCE_PERSISTENCE_FAILED,
+        message=message,
+        source=_EVIDENCE_SOURCE_PLAYWRIGHT_TRACE,
+        test_id=test_id,
+    )
+
+
 def _move_trace_artifacts(
     trace_artifacts: tuple[TraceArtifact, ...],
     relative_paths: tuple[str, ...],
     location: ExecutionResultLocation,
-) -> None:
+) -> tuple[tuple[str | None, ...], tuple[InfrastructureFailure, ...]]:
+    # Devolve, na MESMA ordem/posição de trace_artifacts, o caminho
+    # relativo que de fato foi movido com sucesso (ou None quando não foi
+    # — mkdir falhou, ou o shutil.move específico falhou) e, à parte, uma
+    # InfrastructureFailure por artefato que não pôde ser movido — nunca
+    # só uma ausência silenciosa em trace_artifacts (P1.5).
     if not trace_artifacts:
-        return
+        return (), ()
     run_dir = Path(location.path).resolve().parent
     traces_dir = run_dir / _TRACES_SUBDIR
     try:
         traces_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
-        # result.json já foi gravado com sucesso nesse ponto (referências
-        # incluídas) — uma falha só ao criar a pasta física nunca desfaz
-        # isso; os .zip ficam órfãos no temp do SO, mesmo compromisso já
-        # aceito pelo resto deste método.
-        return
+        # Nenhum trace pode ser movido sem o diretório de destino — nenhuma
+        # referência falsa: todas as entradas voltam None, cada uma com
+        # sua própria InfrastructureFailure correlacionada por test_id.
+        failures = tuple(
+            _evidence_failure(
+                artifact.test_id,
+                "Falha ao criar o diretório de destino do Trace; artefato não persistido.",
+            )
+            for artifact in trace_artifacts
+        )
+        return tuple(None for _ in trace_artifacts), failures
 
+    persisted: list[str | None] = []
+    move_failures: list[InfrastructureFailure] = []
     source_dirs: set[Path] = set()
     for artifact, relative_path in zip(trace_artifacts, relative_paths, strict=True):
         source = Path(artifact.path)
@@ -113,15 +189,31 @@ def _move_trace_artifacts(
             # uma falha ao mover um artefato de evidência nunca transforma
             # uma execução bem-sucedida (ou com falhas de teste) em erro —
             # só este trace específico fica ausente do resultado
-            # persistido, o restante do result.json já foi gravado.
+            # persistido (None), nunca uma referência falsa, e a falha em
+            # si vira uma InfrastructureFailure explícita.
+            persisted.append(None)
+            move_failures.append(
+                _evidence_failure(
+                    artifact.test_id,
+                    "Falha ao mover o artefato de Trace para o destino final; "
+                    "artefato não persistido.",
+                )
+            )
             continue
+        persisted.append(relative_path)
 
     # O diretório temporário "masked" (criado pelo PlaywrightAdapter,
-    # tempfile.mkdtemp) só existe para hospedar estes arquivos até aqui —
-    # depois de movidos, é limpo; nunca falha a persistência por causa
-    # disso (best-effort, mesmo espírito do resto deste método).
+    # tempfile.mkdtemp) só é removido se ficou VAZIO — se algum arquivo não
+    # foi movido (still lá dentro), rmdir falha sozinho e o diretório (com
+    # a evidência que não pôde ser movida) é preservado para diagnóstico,
+    # nunca destruído silenciosamente.
     for source_dir in source_dirs:
-        shutil.rmtree(source_dir, ignore_errors=True)
+        try:
+            source_dir.rmdir()
+        except OSError:
+            pass
+
+    return tuple(persisted), tuple(move_failures)
 
 
 def _serialize(
@@ -133,7 +225,8 @@ def _serialize(
     finished_at: datetime,
     workspace_id: str | None,
     workspace_name: str | None,
-    trace_relative_paths: tuple[str, ...],
+    trace_relative_paths: tuple[str | None, ...],
+    evidence_failures: tuple[InfrastructureFailure, ...],
 ) -> dict[str, Any]:
     # Serialização explícita e estruturada: nunca stdout/stderr brutos, nunca
     # a Collection completa — só os campos já expostos pelo domínio, usados
@@ -163,6 +256,10 @@ def _serialize(
             "failed": result.failed_assertions,
             "skipped": result.skipped_tests,
         },
+        # test_failures: SEMPRE o resultado FUNCIONAL do teste (assertion,
+        # status HTTP, schema) — nunca misturado com evidence_failures
+        # (infraestrutura de captura de evidência). Ver regra fundamental
+        # do P1.5: os dois são independentes.
         "test_failures": [
             {
                 "request_name": failure.request_name,
@@ -200,6 +297,10 @@ def _serialize(
             }
             for assertion_result in result.assertion_results
         ],
+        # relative_path is None: o arquivo físico não pôde ser movido para
+        # o destino final (ver _move_trace_artifacts) — nunca uma
+        # referência para um arquivo que não existe (regra explícita do
+        # P1.4/hardening: "não criar referência falsa").
         "trace_artifacts": [
             {
                 "type": artifact.type,
@@ -209,6 +310,22 @@ def _serialize(
             for artifact, relative_path in zip(
                 result.trace_artifacts, trace_relative_paths, strict=True
             )
+            if relative_path is not None
+        ],
+        # P1.5 (infrastructure failure das evidências): distinta de
+        # "infrastructure_failure" (singular, abaixo — falha da EXECUÇÃO
+        # INTEIRA). Cada entrada aqui coexiste com um teste que pode ter
+        # passado OU falhado normalmente; nunca decide o resultado do
+        # teste, só sinaliza que uma evidência específica não pôde ser
+        # capturada/mascarada/persistida com segurança.
+        "evidence_failures": [
+            {
+                "type": failure.failure_type.value,
+                "source": failure.source,
+                "test_id": failure.test_id,
+                "message": failure.message,
+            }
+            for failure in evidence_failures
         ],
         "success": result.success,
         "infrastructure_failure": (
