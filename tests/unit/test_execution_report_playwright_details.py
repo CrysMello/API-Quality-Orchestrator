@@ -22,6 +22,7 @@ from api_quality_agent.domain.models import (
     HttpTransactionHeader,
     InfrastructureFailure,
     InfrastructureFailureType,
+    TestFailure,
     TraceArtifact,
 )
 from api_quality_agent.reporting import ReportEngine, render_execution_report_html
@@ -100,6 +101,16 @@ def _evidence_failure(**overrides) -> InfrastructureFailure:
     )
     defaults.update(overrides)
     return InfrastructureFailure(**defaults)
+
+
+def _test_failure(**overrides) -> TestFailure:
+    defaults = dict(
+        request_name=None,
+        test_name="test_post_orders_success",
+        error_message="playwright._impl._errors.Error: connect ECONNREFUSED",
+    )
+    defaults.update(overrides)
+    return TestFailure(**defaults)
 
 
 def _render(record: ExecutionResultRecord) -> str:
@@ -694,6 +705,297 @@ def test_newman_result_never_shows_any_evidence_failure_block():
     html = _render(record)
 
     assert "Infraestrutura de evidências" not in html
+
+
+# --- P1.6 (status visual por teste): test_failures sem assertions --------
+
+
+def test_html_shows_failed_when_there_is_a_test_failure_and_no_assertions():
+    # Caso relatado: erro de transporte (TestFailure) sem nenhuma
+    # HttpTransaction/AssertionResult para o mesmo test_id — o selo do
+    # teste precisa ser FAILED, nunca N/A.
+    record = _record(
+        assertion_results=(),
+        test_failures=(_test_failure(test_name="test_post_orders_success"),),
+        trace_artifacts=(_trace_artifact(test_id="test_post_orders_success"),),
+        success=False,
+        failed_assertions=0,
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+    html = _render(record)
+
+    assert len(report.execution.tests) == 1
+    assert report.execution.tests[0].test_id == "test_post_orders_success"
+    assert report.execution.tests[0].assertions == ()
+    assert 'class="status status-failed"' in html
+    assert "N/A" not in html
+
+
+def test_html_shows_failed_when_there_is_a_test_failure_and_assertions():
+    # TestFailure sempre vence, mesmo quando existem assertions (ex.:
+    # PASSED registrado antes de um erro de teardown derrubar o teste).
+    record = _record(
+        assertion_results=(_assertion(status="PASSED"),),
+        test_failures=(_test_failure(test_name="test_post_users_success"),),
+        success=False,
+    )
+
+    html = _render(record)
+
+    assert 'class="status status-failed"' in html
+
+
+def test_html_shows_failed_when_no_test_failure_but_an_assertion_failed():
+    record = _record(
+        assertion_results=(_assertion(status="FAILED", actual=500),),
+        test_failures=(),
+        success=False,
+        failed_assertions=1,
+    )
+
+    html = _render(record)
+
+    assert 'class="status status-failed"' in html
+
+
+def test_html_shows_passed_when_no_test_failure_and_all_assertions_passed():
+    record = _record(
+        assertion_results=(_assertion(status="PASSED"),),
+        test_failures=(),
+    )
+
+    html = _render(record)
+
+    assert 'class="status status-passed"' in html
+
+
+def test_html_shows_na_when_no_test_failure_and_no_assertions():
+    # Item 4 da regra: sem informação suficiente (nem TestFailure, nem
+    # assertion) — N/A, nunca inventado.
+    record = _record(
+        http_transactions=(),
+        assertion_results=(),
+        trace_artifacts=(_trace_artifact(test_id="test_transport_error_only"),),
+        test_failures=(),
+    )
+
+    html = _render(record)
+
+    assert 'class="status">N/A</span>' in html
+
+
+def test_evidence_failure_never_turns_a_passing_test_into_failed():
+    # Regra explícita: evidence_failures nunca decide o selo do teste.
+    record = _record(
+        assertion_results=(_assertion(status="PASSED"),),
+        evidence_failures=(_evidence_failure(test_id="test_post_users_success"),),
+        test_failures=(),
+    )
+
+    html = _render(record)
+
+    assert 'class="status status-passed"' in html
+    assert 'class="status status-failed"' not in html
+
+
+def test_evidence_failure_alone_is_never_treated_as_a_test_failure():
+    # Um evidence_failure isolado (sem TestFailure, sem assertions) nunca
+    # produz um selo FAILED — continua N/A (informação insuficiente sobre
+    # o resultado FUNCIONAL do teste).
+    record = _record(
+        http_transactions=(),
+        assertion_results=(),
+        evidence_failures=(_evidence_failure(test_id="test_transport_error_only"),),
+        test_failures=(),
+    )
+
+    html = _render(record)
+
+    assert 'class="status">N/A</span>' in html
+    assert 'class="status status-failed"' not in html
+
+
+# --- P1.6 (achado do sanity check): test_failure SEM NENHUMA evidência ------
+# --- correlacionada (nem HttpTransaction, nem AssertionResult, nem Trace, --
+# --- nem evidence_failure) também precisa entrar em                      --
+# --- report.execution.tests — antes, esse teste desaparecia inteiramente --
+# --- da visão detalhada por teste, só sobrando na seção "Falhas" legada. --
+
+
+def test_a_isolated_test_failure_without_any_evidence_appears_as_failed():
+    # Caso extremo do achado: erro de transporte puro (ex.: connect
+    # ECONNREFUSED antes de qualquer request) — nenhuma HttpTransaction,
+    # nenhuma AssertionResult, nenhum TraceArtifact, nenhum evidence_failure
+    # para este test_id. Antes desta correção, o teste nem aparecia em
+    # report.execution.tests.
+    record = _record(
+        http_transactions=(),
+        assertion_results=(),
+        test_failures=(_test_failure(test_name="test_connection_refused"),),
+        success=False,
+        total_requests=0,
+        total_assertions=0,
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+    html = _render(record)
+
+    assert len(report.execution.tests) == 1
+    test = report.execution.tests[0]
+    assert test.test_id == "test_connection_refused"
+    # Nenhum dado artificial é inventado: nem assertion, nem transação, nem
+    # trace, nem evidence_failure — só o test_id passa a existir no grupo.
+    assert test.transactions == ()
+    assert test.assertions == ()
+    assert test.trace is None
+    assert test.evidence_failures == ()
+    assert 'class="status status-failed"' in html
+    assert "N/A" not in html
+    assert "Ver Trace" not in html
+
+
+def test_b_test_failure_with_http_transaction_keeps_existing_behavior():
+    # test_failure + HttpTransaction (sem assertion) — já funcionava antes
+    # (a transação já colocava o test_id em `order`); esta correção não
+    # pode alterar esse comportamento.
+    record = _record(
+        http_transactions=(_transaction(test_id="test_post_orders_success"),),
+        assertion_results=(),
+        test_failures=(_test_failure(test_name="test_post_orders_success"),),
+        success=False,
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+    html = _render(record)
+
+    assert len(report.execution.tests) == 1
+    test = report.execution.tests[0]
+    assert len(test.transactions) == 1
+    assert test.assertions == ()
+    assert 'class="status status-failed"' in html
+
+
+def test_c_test_failure_with_assertion_keeps_existing_behavior():
+    # test_failure + AssertionResult (PASSED, ex.: falha no teardown depois
+    # do assert já ter passado) — comportamento existente preservado.
+    record = _record(
+        assertion_results=(_assertion(status="PASSED"),),
+        test_failures=(_test_failure(test_name="test_post_users_success"),),
+        success=False,
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+    html = _render(record)
+
+    assert len(report.execution.tests) == 1
+    test = report.execution.tests[0]
+    assert len(test.assertions) == 1
+    assert test.assertions[0].status == "PASSED"
+    assert 'class="status status-failed"' in html
+
+
+def test_d_test_failure_and_evidence_failure_both_appear_on_the_same_test():
+    record = _record(
+        http_transactions=(),
+        assertion_results=(),
+        test_failures=(_test_failure(test_name="test_checkout_flow"),),
+        evidence_failures=(_evidence_failure(test_id="test_checkout_flow"),),
+        success=False,
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+    html = _render(record)
+
+    assert len(report.execution.tests) == 1
+    test = report.execution.tests[0]
+    assert test.test_id == "test_checkout_flow"
+    assert len(test.evidence_failures) == 1
+    assert 'class="status status-failed"' in html
+    assert "Infraestrutura de evidências" in html
+
+
+def test_e_multiple_isolated_test_failures_each_get_their_own_block():
+    record = _record(
+        http_transactions=(),
+        assertion_results=(),
+        test_failures=(
+            _test_failure(test_name="test_one"),
+            _test_failure(test_name="test_two"),
+            _test_failure(test_name="test_three"),
+        ),
+        success=False,
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+
+    assert [test.test_id for test in report.execution.tests] == [
+        "test_one",
+        "test_two",
+        "test_three",
+    ]
+    for test in report.execution.tests:
+        assert test.transactions == ()
+        assert test.assertions == ()
+        assert test.evidence_failures == ()
+
+
+def test_f_isolated_test_failure_of_one_test_never_leaks_into_another():
+    record = _record(
+        http_transactions=(_transaction(test_id="test_B"),),
+        assertion_results=(_assertion(test_id="test_B", status="PASSED"),),
+        test_failures=(_test_failure(test_name="test_A"),),
+        success=False,
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+    tests_by_id = {test.test_id: test for test in report.execution.tests}
+
+    assert set(tests_by_id.keys()) == {"test_A", "test_B"}
+    assert tests_by_id["test_A"].transactions == ()
+    assert tests_by_id["test_A"].assertions == ()
+    assert tests_by_id["test_B"].assertions[0].status == "PASSED"
+
+    html = _render(record)
+    blocks = html.split('<div class="test-block">')[1:]
+    block_a = next(b for b in blocks if "<h3>test_A</h3>" in b)
+    block_b = next(b for b in blocks if "<h3>test_B</h3>" in b)
+    assert 'class="status status-failed"' in block_a
+    assert 'class="status status-passed"' in block_b
+    assert "test_A" not in block_b
+
+
+def test_g_normal_pass_is_not_affected_by_the_test_failure_correlation():
+    record = _record(
+        assertion_results=(_assertion(status="PASSED"),),
+        test_failures=(),
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+    html = _render(record)
+
+    assert len(report.execution.tests) == 1
+    assert 'class="status status-passed"' in html
+    assert 'class="status status-failed"' not in html
+
+
+def test_h_isolated_evidence_failure_still_does_not_become_a_test_failure():
+    # Mesmo depois de test_failures virar uma fonte de correlação, um
+    # evidence_failure isolado (sem TestFailure nenhum) continua N/A — a
+    # regra de que evidence_failure nunca decide o selo continua intacta.
+    record = _record(
+        http_transactions=(),
+        assertion_results=(),
+        evidence_failures=(_evidence_failure(test_id="test_transport_error_only"),),
+        test_failures=(),
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+    html = _render(record)
+
+    assert len(report.execution.tests) == 1
+    assert 'class="status">N/A</span>' in html
+    assert 'class="status status-failed"' not in html
 
 
 # --- Masking: dados já chegam mascarados, nunca reprocessados aqui ----------

@@ -166,12 +166,20 @@ def _render_failures(execution: ReportExecutionSection) -> str:
 def _render_tests(execution: ReportExecutionSection) -> str:
     if not execution.tests:
         return ""
-    blocks = "".join(_render_test_execution(test) for test in execution.tests)
+    # P1.6: correlação por test_id/test_name (mesmo valor em ambos os
+    # lados — sempre request.node.name, ver PlaywrightAdapter) feita aqui,
+    # na apresentação, com dados que ReportExecutionSection já carrega —
+    # nenhuma mudança em ReportEngine/report.py foi necessária.
+    failed_test_names = {failure.test_name for failure in execution.test_failures}
+    blocks = "".join(
+        _render_test_execution(test, has_test_failure=test.test_id in failed_test_names)
+        for test in execution.tests
+    )
     return f'<section aria-label="Testes"><h2>Testes</h2>{blocks}</section>'
 
 
-def _render_test_execution(test: ReportTestExecution) -> str:
-    status = _test_status(test.assertions)
+def _render_test_execution(test: ReportTestExecution, *, has_test_failure: bool) -> str:
+    status = _test_status(test.assertions, has_test_failure=has_test_failure)
     status_badge = (
         f'<span class="status status-{status}">'
         f'<span aria-hidden="true">{_STATUS_ICONS[status]}</span> {_STATUS_LABELS[status]}</span>'
@@ -248,11 +256,26 @@ def _file_uri(path: str) -> str:
         return path
 
 
-def _test_status(assertions: tuple[ReportAssertionResult, ...]) -> str | None:
-    # Agregação de exibição apenas: cada AssertionResult.status já foi
-    # decidido durante a execução (o `assert` original do teste gerado) —
-    # aqui só resume "algum FAILED?" para o selo do teste, nunca uma nova
-    # comparação/validação.
+def _test_status(
+    assertions: tuple[ReportAssertionResult, ...], *, has_test_failure: bool
+) -> str | None:
+    # Agregação de exibição apenas: cada AssertionResult.status/TestFailure
+    # já foi decidido durante a execução real (JUnit do pytest / o `assert`
+    # original do teste gerado) — aqui só resume um selo pro teste, nunca
+    # uma nova comparação/validação. Regra de prioridade (P1.6):
+    #   1. há um TestFailure para este test_id -> FAILED, mesmo sem
+    #      nenhuma assertion (ex.: erro de transporte, erro de coleta —
+    #      nunca chegou a existir uma assertion pra registrar);
+    #   2. sem TestFailure, mas alguma assertion FAILED -> FAILED;
+    #   3. sem TestFailure, todas as assertions PASSED -> PASSED;
+    #   4. nem TestFailure nem assertions -> N/A (None) — informação
+    #      insuficiente, nunca inventado.
+    # evidence_failures NUNCA entra nesta decisão (nem aqui, nem no
+    # parâmetro): uma falha de infraestrutura de evidência é apresentada à
+    # parte (ver _render_evidence_failures) e nunca pode transformar um
+    # teste aprovado em reprovado, nem ser tratada como TestFailure.
+    if has_test_failure:
+        return "failed"
     if not assertions:
         return None
     return "failed" if any(a.status == "FAILED" for a in assertions) else "passed"

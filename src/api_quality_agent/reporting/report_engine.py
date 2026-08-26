@@ -17,6 +17,7 @@ from api_quality_agent.domain.models import (
     HttpTransaction,
     InfrastructureFailure,
     SelectionOrigin,
+    TestFailure,
     TraceArtifact,
 )
 from api_quality_agent.ports.outbound import ArtifactRepository
@@ -311,6 +312,7 @@ def _build_execution_section(
             execution_result.assertion_results,
             execution_result.trace_artifacts,
             execution_result.evidence_failures,
+            execution_result.test_failures,
             # Fluxo "ao vivo" (generate/update): nunca houve persistência
             # ainda, então TraceArtifact.path já é um caminho ABSOLUTO de
             # arquivo temporário (ver PlaywrightAdapter) — nada a resolver
@@ -361,6 +363,7 @@ def _build_execution_section_from_record(record: ExecutionResultRecord) -> Repor
             record.assertion_results,
             record.trace_artifacts,
             record.evidence_failures,
+            record.test_failures,
             # Fluxo persistido (report): TraceArtifact.path já vem RELATIVO
             # ao diretório de result.json (ver PersistExecutionResultUseCase)
             # — resolvido aqui contra esse diretório, nunca contra o
@@ -376,6 +379,7 @@ def _build_test_executions(
     assertion_results: tuple[AssertionResult, ...],
     trace_artifacts: tuple[TraceArtifact, ...],
     evidence_failures: tuple[InfrastructureFailure, ...],
+    test_failures: tuple[TestFailure, ...],
     *,
     source_dir: Path | None,
 ) -> tuple[ReportTestExecution, ...]:
@@ -416,6 +420,19 @@ def _build_test_executions(
         if failure.test_id is not None and failure.test_id not in seen:
             seen.add(failure.test_id)
             order.append(failure.test_id)
+    # P1.6 (sanity check pós-hardening): um teste que falha sem deixar
+    # NENHUMA evidência correlacionável (nem HttpTransaction, nem
+    # AssertionResult, nem TraceArtifact, nem evidence_failure — ex.: erro
+    # de transporte antes de qualquer request) ainda tinha um TestFailure
+    # registrado, mas nunca aparecia em report.execution.tests, sumindo da
+    # visão detalhada por teste (só sobrava na seção "Falhas" legada, sem
+    # nenhum agrupamento). test_name é o mesmo identificador usado como
+    # test_id em toda a correlação (ver PlaywrightAdapter/request.node.name)
+    # — nenhum test_id artificial é inventado aqui.
+    for test_failure in test_failures:
+        if test_failure.test_name not in seen:
+            seen.add(test_failure.test_name)
+            order.append(test_failure.test_name)
 
     if not order:
         return ()
