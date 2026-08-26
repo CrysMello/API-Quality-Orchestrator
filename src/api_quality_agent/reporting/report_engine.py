@@ -281,6 +281,7 @@ def _build_execution_section(
             failed_assertions=None,
             test_failures=(),
             infrastructure_failure=None,
+            skipped_tests=None,
         )
 
     infrastructure_failure = None
@@ -307,6 +308,7 @@ def _build_execution_section(
             for failure in execution_result.test_failures
         ),
         infrastructure_failure=infrastructure_failure,
+        skipped_tests=execution_result.skipped_tests,
         tests=_build_test_executions(
             execution_result.http_transactions,
             execution_result.assertion_results,
@@ -358,6 +360,7 @@ def _build_execution_section_from_record(record: ExecutionResultRecord) -> Repor
         infrastructure_failure=infrastructure_failure,
         started_at=record.started_at,
         finished_at=record.finished_at,
+        skipped_tests=record.skipped_tests,
         tests=_build_test_executions(
             record.http_transactions,
             record.assertion_results,

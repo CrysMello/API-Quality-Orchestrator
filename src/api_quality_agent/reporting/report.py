@@ -162,6 +162,12 @@ class ReportExecutionSection:
     # assertion_results) — vazio para resultados antigos e para Newman
     # (que nunca preenche esses campos), nunca inventado.
     tests: tuple[ReportTestExecution, ...] = ()
+    # P1.7: contador AGREGADO de testes pulados (ver ExecutionResult.
+    # skipped_tests) — None só quando não houve execução (executed=False);
+    # quando há execução, é sempre um int (0 inclusive, nunca inventado).
+    # Nunca correlacionado a nenhum test_id individual: essa informação
+    # não existe hoje no ExecutionResult, então não é reconstruída aqui.
+    skipped_tests: int | None = None
 
 
 @dataclass(frozen=True)

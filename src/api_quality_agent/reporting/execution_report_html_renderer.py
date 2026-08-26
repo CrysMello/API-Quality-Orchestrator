@@ -79,6 +79,11 @@ def _render_cards(execution: ReportExecutionSection) -> str:
         ("Assertions", execution.total_assertions),
         ("Passed", passed),
         ("Failed", execution.failed_assertions),
+        # P1.7: contador AGREGADO de testes pulados (ver ExecutionResult.
+        # skipped_tests) — mesmo tratamento das demais cards: None vira
+        # "N/A" (execução não aconteceu), 0 é exibido normalmente (execução
+        # aconteceu e nenhum teste foi pulado, nunca "N/A").
+        ("Skipped", execution.skipped_tests),
     ]
     items = "".join(
         f'<div class="card"><p class="card-value">{_e(str(value)) if value is not None else "N/A"}</p>'
