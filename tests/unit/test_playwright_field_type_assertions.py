@@ -34,10 +34,22 @@ from api_quality_agent.parsers import PostmanCollectionParser
 
 @pytest.fixture
 def assert_field_type():
-    source = _render_helpers_block(frozenset({"assert_field_type"}))
+    # P1.1 (complementação): o helper agora chama _record_assertion_result
+    # internamente — mesmo texto exato do arquivo gerado, precisa de
+    # "os"/"json" no namespace e do helper de registro definido junto,
+    # mesmo padrão já usado por test_playwright_required_fields_assertions.
+    source = "import json\nimport os\n\n\n" + _render_helpers_block(
+        frozenset({"record_assertion_result", "assert_field_type"})
+    )
     namespace: dict = {}
     exec(source, namespace)  # noqa: S102 - texto do próprio gerador, não input externo
     return namespace["_assert_field_type"]
+
+
+def _call(assert_field_type, node, path, expected_type, nullable):
+    return assert_field_type(
+        node, path, expected_type, nullable, "test_x", "field_type:" + ".".join(path), "reason"
+    )
 
 
 @pytest.mark.parametrize(
@@ -54,37 +66,37 @@ def assert_field_type():
     ],
 )
 def test_matching_type_passes(assert_field_type, value, json_type):
-    assert_field_type({"field": value}, ("field",), json_type, False)
+    _call(assert_field_type, {"field": value}, ("field",), json_type, False)
 
 
 def test_string_123_never_passes_as_integer(assert_field_type):
     # Regra 2: nenhuma coerção — "123" continua sendo string.
     with pytest.raises(AssertionError, match="esperado integer, recebido string"):
-        assert_field_type({"field": "123"}, ("field",), "integer", False)
+        _call(assert_field_type, {"field": "123"}, ("field",), "integer", False)
 
 
 def test_true_never_passes_as_integer(assert_field_type):
     # Regra 3: isinstance(True, int) é True em Python, mas bool nunca deve
     # contar como integer.
     with pytest.raises(AssertionError, match="esperado integer, recebido boolean"):
-        assert_field_type({"field": True}, ("field",), "integer", False)
+        _call(assert_field_type, {"field": True}, ("field",), "integer", False)
 
 
 def test_true_never_passes_as_number(assert_field_type):
     with pytest.raises(AssertionError, match="esperado number, recebido boolean"):
-        assert_field_type({"field": True}, ("field",), "number", False)
+        _call(assert_field_type, {"field": True}, ("field",), "number", False)
 
 
 def test_false_never_passes_as_integer(assert_field_type):
     with pytest.raises(AssertionError, match="esperado integer, recebido boolean"):
-        assert_field_type({"field": False}, ("field",), "integer", False)
+        _call(assert_field_type, {"field": False}, ("field",), "integer", False)
 
 
 def test_float_never_passes_as_integer(assert_field_type):
     # "number" aceita integer, mas o inverso não é verdade — 3.14 não é um
     # integer válido.
     with pytest.raises(AssertionError, match="esperado integer, recebido number"):
-        assert_field_type({"field": 3.14}, ("field",), "integer", False)
+        _call(assert_field_type, {"field": 3.14}, ("field",), "integer", False)
 
 
 def test_error_message_contains_field_expected_and_received_type(assert_field_type):
@@ -92,7 +104,8 @@ def test_error_message_contains_field_expected_and_received_type(assert_field_ty
         AssertionError,
         match=r"Tipo inválido para o campo 'user\.address\.zipCode': esperado string, recebido integer\.",
     ):
-        assert_field_type(
+        _call(
+            assert_field_type,
             {"user": {"address": {"zipCode": 12345}}},
             ("user", "address", "zipCode"),
             "string",
@@ -103,25 +116,30 @@ def test_error_message_contains_field_expected_and_received_type(assert_field_ty
 def test_absent_field_never_fails_type_validation(assert_field_type):
     # Presença é escopo da Parte 19 — aqui, campo ausente simplesmente não
     # tem nada para validar.
-    assert_field_type({}, ("field",), "string", False)
-    assert_field_type({"other": 1}, ("field",), "string", False)
+    _call(assert_field_type, {}, ("field",), "string", False)
+    _call(assert_field_type, {"other": 1}, ("field",), "string", False)
 
 
 def test_null_fails_when_not_nullable(assert_field_type):
     with pytest.raises(AssertionError, match="esperado string, recebido null"):
-        assert_field_type({"field": None}, ("field",), "string", False)
+        _call(assert_field_type, {"field": None}, ("field",), "string", False)
 
 
 def test_null_passes_when_nullable(assert_field_type):
-    assert_field_type({"field": None}, ("field",), "string", True)
+    _call(assert_field_type, {"field": None}, ("field",), "string", True)
 
 
 def test_nested_field_type_is_checked(assert_field_type):
-    assert_field_type(
-        {"user": {"address": {"zipCode": "12345"}}}, ("user", "address", "zipCode"), "string", False
+    _call(
+        assert_field_type,
+        {"user": {"address": {"zipCode": "12345"}}},
+        ("user", "address", "zipCode"),
+        "string",
+        False,
     )
     with pytest.raises(AssertionError):
-        assert_field_type(
+        _call(
+            assert_field_type,
             {"user": {"address": {"zipCode": 12345}}},
             ("user", "address", "zipCode"),
             "string",
@@ -132,7 +150,75 @@ def test_nested_field_type_is_checked(assert_field_type):
 def test_non_navigable_intermediate_node_never_crashes(assert_field_type):
     # Nunca uma validação de tipo do NÓ intermediário (fora de escopo) —
     # só interrompe sem lançar TypeError.
-    assert_field_type({"user": "not-an-object"}, ("user", "address"), "object", False)
+    _call(assert_field_type, {"user": "not-an-object"}, ("user", "address"), "object", False)
+
+
+# --- P1.1 (complementação): registro de AssertionResult ---------------------
+
+
+def test_helper_records_a_passed_field_type_assertion_result(tmp_path, monkeypatch):
+    results_path = tmp_path / "assertion-results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+    source = "import json\nimport os\n\n\n" + _render_helpers_block(
+        frozenset({"record_assertion_result", "assert_field_type"})
+    )
+    namespace: dict = {}
+    exec(source, namespace)  # noqa: S102
+    namespace["_assert_field_type"](
+        {"age": 42}, ("age",), "integer", False, "test_x", "field_type:age", "schema documentado"
+    )
+
+    lines = results_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    recorded = json.loads(lines[0])
+    assert recorded == {
+        "test_id": "test_x",
+        "name": "field_type:age",
+        "expected": "integer",
+        "actual": "integer",
+        "status": "PASSED",
+        "precision": "EXACT",
+        "reason": "schema documentado",
+    }
+
+
+def test_helper_records_a_failed_field_type_assertion_result(tmp_path, monkeypatch):
+    results_path = tmp_path / "assertion-results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+    source = "import json\nimport os\n\n\n" + _render_helpers_block(
+        frozenset({"record_assertion_result", "assert_field_type"})
+    )
+    namespace: dict = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["_assert_field_type"](
+            {"age": "42"}, ("age",), "integer", False, "test_x", "field_type:age", "schema documentado"
+        )
+
+    lines = results_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    recorded = json.loads(lines[0])
+    assert recorded["status"] == "FAILED"
+    assert recorded["expected"] == "integer"
+    assert recorded["actual"] == "string"
+
+
+def test_helper_never_records_anything_when_the_field_is_absent(tmp_path, monkeypatch):
+    # Campo ausente nunca gera nenhuma checagem (escopo da Parte 19, não
+    # desta) — nunca fabrica um AssertionResult para algo que não foi
+    # realmente executado.
+    results_path = tmp_path / "assertion-results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+    source = "import json\nimport os\n\n\n" + _render_helpers_block(
+        frozenset({"record_assertion_result", "assert_field_type"})
+    )
+    namespace: dict = {}
+    exec(source, namespace)  # noqa: S102
+    namespace["_assert_field_type"](
+        {}, ("age",), "integer", False, "test_x", "field_type:age", "schema documentado"
+    )
+
+    assert not results_path.exists()
 
 
 # --- Conteúdo gerado ----------------------------------------------------
@@ -219,12 +305,12 @@ def test_all_scalar_and_container_types_generate_a_type_check():
     }
     generated = _generate(_GET_USERS, _base_assertions(_schema_assertion(schema)))
 
-    assert "_assert_field_type(body, ('name',), 'string', False)" in generated.content
-    assert "_assert_field_type(body, ('age',), 'integer', False)" in generated.content
-    assert "_assert_field_type(body, ('score',), 'number', False)" in generated.content
-    assert "_assert_field_type(body, ('active',), 'boolean', False)" in generated.content
-    assert "_assert_field_type(body, ('profile',), 'object', False)" in generated.content
-    assert "_assert_field_type(body, ('tags',), 'array', False)" in generated.content
+    assert "_assert_field_type(body, ('name',), 'string', False, 'test_get_users_success'" in generated.content
+    assert "_assert_field_type(body, ('age',), 'integer', False, 'test_get_users_success'" in generated.content
+    assert "_assert_field_type(body, ('score',), 'number', False, 'test_get_users_success'" in generated.content
+    assert "_assert_field_type(body, ('active',), 'boolean', False, 'test_get_users_success'" in generated.content
+    assert "_assert_field_type(body, ('profile',), 'object', False, 'test_get_users_success'" in generated.content
+    assert "_assert_field_type(body, ('tags',), 'array', False, 'test_get_users_success'" in generated.content
     ast.parse(generated.content)
 
 
@@ -236,7 +322,7 @@ def test_null_type_generates_no_type_check_by_itself():
     schema = {"type": "object", "properties": {"id": {"type": "string"}}}
     generated = _generate(_GET_USERS, _base_assertions(_schema_assertion(schema)))
 
-    assert "_assert_field_type(body, ('id',), 'string', False)" in generated.content
+    assert "_assert_field_type(body, ('id',), 'string', False, 'test_get_users_success'" in generated.content
 
 
 # --- nullable ---------------------------------------------------------------
@@ -249,7 +335,7 @@ def test_nullable_true_flag_is_passed_through():
     }
     generated = _generate(_GET_USERS, _base_assertions(_schema_assertion(schema)))
 
-    assert "_assert_field_type(body, ('middleName',), 'string', True)" in generated.content
+    assert "_assert_field_type(body, ('middleName',), 'string', True, 'test_get_users_success'" in generated.content
 
 
 def test_json_schema_style_nullable_type_list_is_recognized():
@@ -259,7 +345,7 @@ def test_json_schema_style_nullable_type_list_is_recognized():
     }
     generated = _generate(_GET_USERS, _base_assertions(_schema_assertion(schema)))
 
-    assert "_assert_field_type(body, ('middleName',), 'string', True)" in generated.content
+    assert "_assert_field_type(body, ('middleName',), 'string', True, 'test_get_users_success'" in generated.content
 
 
 def test_ambiguous_type_list_never_generates_a_type_check():
@@ -292,10 +378,10 @@ def test_nested_object_field_types_are_validated():
     }
     generated = _generate(_GET_USERS, _base_assertions(_schema_assertion(schema)))
 
-    assert "_assert_field_type(body, ('user',), 'object', False)" in generated.content
-    assert "_assert_field_type(body, ('user', 'address'), 'object', False)" in generated.content
+    assert "_assert_field_type(body, ('user',), 'object', False, 'test_get_users_success'" in generated.content
+    assert "_assert_field_type(body, ('user', 'address'), 'object', False, 'test_get_users_success'" in generated.content
     assert (
-        "_assert_field_type(body, ('user', 'address', 'zipCode'), 'string', False)"
+        "_assert_field_type(body, ('user', 'address', 'zipCode'), 'string', False, 'test_get_users_success'"
         in generated.content
     )
     ast.parse(generated.content)
@@ -329,12 +415,12 @@ def test_array_item_field_types_are_validated_safely():
     }
     generated = _generate(_GET_USERS, _base_assertions(_schema_assertion(schema)))
 
-    assert "_assert_field_type(body, ('orders',), 'array', False)" in generated.content
+    assert "_assert_field_type(body, ('orders',), 'array', False, 'test_get_users_success'" in generated.content
     assert "_get_nested_value(body, ('orders',))" in generated.content
     assert "for _item in _orders_items:" in generated.content
     assert "if not isinstance(_item, dict):" in generated.content
-    assert "_assert_field_type(_item, ('id',), 'string', False)" in generated.content
-    assert "_assert_field_type(_item, ('total',), 'number', False)" in generated.content
+    assert "_assert_field_type(_item, ('id',), 'string', False, 'test_get_users_success', 'field_type:orders[].id'" in generated.content
+    assert "_assert_field_type(_item, ('total',), 'number', False, 'test_get_users_success', 'field_type:orders[].total'" in generated.content
     assert "[0]" not in generated.content
     ast.parse(generated.content)
 
@@ -379,8 +465,10 @@ def test_type_and_required_checks_coexist_for_the_same_field():
     }
     generated = _generate(_GET_USERS, _base_assertions(_schema_assertion(schema)))
 
-    assert "_assert_required_field_present(body, ('id',))" in generated.content
-    assert "_assert_field_type(body, ('id',), 'string', False)" in generated.content
+    assert "_assert_required_field_present(body, ('id',), 'test_get_users_success'" in (
+        generated.content
+    )
+    assert "_assert_field_type(body, ('id',), 'string', False, 'test_get_users_success'" in generated.content
     # Helpers das duas partes definidos uma única vez cada.
     assert generated.content.count("def _assert_required_field_present(") == 1
     assert generated.content.count("def _assert_field_type(") == 1

@@ -12,6 +12,7 @@ acontece de estar instalado.
 
 import ast
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -234,3 +235,117 @@ def test_api_context_disposes_even_when_the_test_raises(tmp_path, fake_playwrigh
         generator.throw(RuntimeError("falha simulada do teste"))
 
     assert context.disposed is True
+
+
+# --- P1.2: captura de transação HTTP (contra o fake, nunca o playwright real) --------------
+
+
+def _load_wrapped_context(tmp_path: Path, module_name: str):
+    module_path = tmp_path / f"{module_name}.py"
+    module_path.write_text(_conftest_content(), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    generator = module.api_context.__wrapped__()
+    return generator, next(generator)
+
+
+def _read_transactions(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def test_wrapped_context_records_a_get_call(tmp_path, fake_playwright, monkeypatch):
+    transactions_path = tmp_path / "transactions.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_HTTP_TRANSACTIONS_PATH", str(transactions_path))
+    generator, context = _load_wrapped_context(tmp_path, "generated_conftest_get")
+
+    response = context.get("/users", headers={"Accept": "application/json"})
+
+    assert response.status == 200  # a chamada continua funcionando pra quem a fez
+    transactions = _read_transactions(transactions_path)
+    assert len(transactions) == 1
+    assert transactions[0]["method"] == "GET"
+    assert transactions[0]["request_headers"] == {"Accept": "application/json"}
+    with pytest.raises(StopIteration):
+        next(generator)
+
+
+def test_wrapped_context_records_a_post_call_with_body(tmp_path, fake_playwright, monkeypatch):
+    transactions_path = tmp_path / "transactions.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_HTTP_TRANSACTIONS_PATH", str(transactions_path))
+    fake_playwright.NEXT_RESPONSE.update(status=201, body='{"id": 1}')
+    generator, context = _load_wrapped_context(tmp_path, "generated_conftest_post")
+
+    context.post("/users", data={"name": "Maria", "active": True})
+
+    transactions = _read_transactions(transactions_path)
+    assert transactions[0]["method"] == "POST"
+    assert transactions[0]["request_body"] == {"name": "Maria", "active": True}
+
+
+def test_wrapped_context_records_the_response(tmp_path, fake_playwright, monkeypatch):
+    transactions_path = tmp_path / "transactions.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_HTTP_TRANSACTIONS_PATH", str(transactions_path))
+    fake_playwright.NEXT_RESPONSE.update(
+        status=404, headers={"content-type": "application/json"}, body='{"error": "not found"}'
+    )
+    generator, context = _load_wrapped_context(tmp_path, "generated_conftest_response")
+
+    context.get("/users/999")
+
+    transactions = _read_transactions(transactions_path)
+    assert transactions[0]["response_status"] == 404
+    assert transactions[0]["response_body"] == '{"error": "not found"}'
+    assert transactions[0]["response_headers"] == {"content-type": "application/json"}
+
+
+def test_wrapped_context_records_absence_of_request_body(tmp_path, fake_playwright, monkeypatch):
+    transactions_path = tmp_path / "transactions.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_HTTP_TRANSACTIONS_PATH", str(transactions_path))
+    generator, context = _load_wrapped_context(tmp_path, "generated_conftest_no_body")
+
+    context.delete("/users/1")
+
+    transactions = _read_transactions(transactions_path)
+    assert transactions[0]["method"] == "DELETE"
+    assert transactions[0]["request_body"] is None
+
+
+def test_wrapped_context_records_multiple_calls(tmp_path, fake_playwright, monkeypatch):
+    transactions_path = tmp_path / "transactions.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_HTTP_TRANSACTIONS_PATH", str(transactions_path))
+    generator, context = _load_wrapped_context(tmp_path, "generated_conftest_multiple")
+
+    context.get("/users")
+    context.post("/users", data={"name": "Maria"})
+    context.delete("/users/1")
+
+    transactions = _read_transactions(transactions_path)
+    assert [t["method"] for t in transactions] == ["GET", "POST", "DELETE"]
+
+
+def test_wrapped_context_uses_method_kwarg_for_fetch(tmp_path, fake_playwright, monkeypatch):
+    transactions_path = tmp_path / "transactions.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_HTTP_TRANSACTIONS_PATH", str(transactions_path))
+    generator, context = _load_wrapped_context(tmp_path, "generated_conftest_fetch")
+
+    context.fetch("/users", method="OPTIONS")
+
+    transactions = _read_transactions(transactions_path)
+    assert transactions[0]["method"] == "OPTIONS"
+
+
+def test_capture_is_a_no_op_without_the_env_var(tmp_path, fake_playwright, monkeypatch):
+    # Ausência de PLAYWRIGHT_HTTP_TRANSACTIONS_PATH (ex.: pytest rodado
+    # direto, fora do PlaywrightAdapter) nunca gera erro nem arquivo.
+    monkeypatch.delenv("PLAYWRIGHT_HTTP_TRANSACTIONS_PATH", raising=False)
+    transactions_path = tmp_path / "nunca-deveria-existir.ndjson"
+    generator, context = _load_wrapped_context(tmp_path, "generated_conftest_no_env")
+
+    response = context.get("/users")
+
+    assert response.status == 200
+    assert not transactions_path.exists()

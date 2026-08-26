@@ -6,11 +6,13 @@ from api_quality_agent.domain.models import ExecutionResult, ExecutionResultLoca
 from api_quality_agent.ports.outbound import ExecutionResultRepository
 
 # "1.0" (sem schema_version/workspace no arquivo), "1.1" (schema_version +
-# workspace, aditivo), "1.2" (test_failures, aditivo) e "1.3" (summary.skipped,
-# aditivo — P1.1) são as versões que api-quality-orchestrator report sabe ler
-# — ver JsonExecutionResultReader. Mudanças de schema são sempre aditivas;
-# nenhum campo existente é removido ou renomeado.
-EXECUTION_RESULT_SCHEMA_VERSION = "1.3"
+# workspace, aditivo), "1.2" (test_failures, aditivo), "1.3" (summary.skipped,
+# aditivo — P1.1/skipped_tests), "1.4" (http_transactions, aditivo — P1.2) e
+# "1.5" (http_transactions[].test_id + assertion_results, aditivo — P1.1/
+# detalhamento de assertions) são as versões que api-quality-orchestrator
+# report sabe ler — ver JsonExecutionResultReader. Mudanças de schema são
+# sempre aditivas; nenhum campo existente é removido ou renomeado.
+EXECUTION_RESULT_SCHEMA_VERSION = "1.5"
 
 
 class PersistExecutionResultUseCase:
@@ -89,6 +91,35 @@ def _serialize(
                 "error_message": failure.error_message,
             }
             for failure in result.test_failures
+        ],
+        "http_transactions": [
+            {
+                "test_id": transaction.test_id,
+                "method": transaction.method,
+                "url": transaction.url,
+                "request_headers": {
+                    header.name: header.value for header in transaction.request_headers
+                },
+                "request_body": transaction.request_body,
+                "response_status": transaction.response_status,
+                "response_headers": {
+                    header.name: header.value for header in transaction.response_headers
+                },
+                "response_body": transaction.response_body,
+            }
+            for transaction in result.http_transactions
+        ],
+        "assertion_results": [
+            {
+                "test_id": assertion_result.test_id,
+                "name": assertion_result.name,
+                "expected": assertion_result.expected,
+                "actual": assertion_result.actual,
+                "status": assertion_result.status,
+                "precision": assertion_result.precision,
+                "reason": assertion_result.reason,
+            }
+            for assertion_result in result.assertion_results
         ],
         "success": result.success,
         "infrastructure_failure": (

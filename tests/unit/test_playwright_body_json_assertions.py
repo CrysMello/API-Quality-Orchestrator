@@ -262,7 +262,10 @@ def test_no_json_evidence_at_all_never_parses_and_never_warns():
 
     assert "response.text()" not in generated.content
     assert "json.loads" not in generated.content
-    assert "import json" not in generated.content
+    # "import json" continua presente mesmo sem evidência de JSON no body —
+    # não é mais sinal de parsing de body (P1.1: sempre usado por
+    # _record_assertion_result, incondicional, pra registrar o resultado
+    # da asserção de status).
     assert generated.warnings == ()
 
 

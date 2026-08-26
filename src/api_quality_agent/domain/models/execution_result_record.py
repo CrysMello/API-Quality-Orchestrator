@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from datetime import datetime
 
+from api_quality_agent.domain.models.assertion_result import AssertionResult
+from api_quality_agent.domain.models.http_transaction import HttpTransaction
 from api_quality_agent.domain.models.infrastructure_failure import InfrastructureFailure
 from api_quality_agent.domain.models.test_failure import TestFailure
 
@@ -31,6 +33,12 @@ class ExecutionResultRecord:
     # e os testes de ReportEngine/HTML renderer que constroem este record
     # direto, sem passar por esse campo).
     skipped_tests: int = 0
+    # P1.2: só existe a partir do schema 1.4 — mesmo raciocínio aditivo de
+    # skipped_tests (default preserva toda construção existente).
+    http_transactions: tuple[HttpTransaction, ...] = ()
+    # P1.1 (detalhamento de assertions): só existe a partir do schema 1.5 —
+    # mesmo raciocínio aditivo.
+    assertion_results: tuple[AssertionResult, ...] = ()
 
     @property
     def passed_assertions(self) -> int:

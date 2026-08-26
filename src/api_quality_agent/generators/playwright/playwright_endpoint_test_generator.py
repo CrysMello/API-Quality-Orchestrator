@@ -1161,26 +1161,42 @@ def _find_status_code_assertion(strategy: TestStrategy) -> AssertionDefinition |
     )
 
 
-def _resolve_status_assertion(strategy: TestStrategy) -> _StatusAssertionResolution:
+def _resolve_status_assertion(strategy: TestStrategy, test_id: str) -> _StatusAssertionResolution:
     # "Não pode assumir que todo cenário positivo retorna 200 e não pode
     # inventar códigos HTTP": só gera `assert response.status == N` quando
     # strategy.assertions já traz um STATUS_CODE resolvido por evidência —
     # nunca um range (200 <= status < 300 / response.ok) que trataria erro
     # de autenticação/autorização/rota/mídia como sucesso só por cair na
     # mesma classe HTTP de outro código aceitável.
+    #
+    # P1.1: o `assert` original (linha exata que já existia) fica INTACTO
+    # dentro do try — só envolvido para poder registrar o resultado antes
+    # de relançar a MESMA exceção (bare "raise") no caminho de falha, nunca
+    # uma segunda comparação/validação paralela.
     assertion = _find_status_code_assertion(strategy)
     if assertion is not None:
         status_code = int(assertion.expected_value)
-        classification = _exact(
-            "status",
-            source=assertion.origin,
-            justification=(
-                f"Status HTTP {status_code} documentado explicitamente para este cenário "
-                f"(evidência: {assertion.origin})."
-            ),
+        reason = (
+            f"Status HTTP {status_code} documentado explicitamente para este cenário "
+            f"(evidência: {assertion.origin})."
+        )
+        classification = _exact("status", source=assertion.origin, justification=reason)
+        assertion_line = (
+            "    try:\n"
+            f"        assert response.status == {status_code}\n"
+            "    except AssertionError:\n"
+            f"        _record_assertion_result(\n"
+            f"            {test_id!r}, \"HTTP status\", {status_code}, response.status, "
+            f"\"FAILED\", \"EXACT\", {reason!r},\n"
+            "        )\n"
+            "        raise\n"
+            f"    _record_assertion_result(\n"
+            f"        {test_id!r}, \"HTTP status\", {status_code}, response.status, "
+            f"\"PASSED\", \"EXACT\", {reason!r},\n"
+            "    )\n"
         )
         return _StatusAssertionResolution(
-            assertion_line=f"    assert response.status == {status_code}\n",
+            assertion_line=assertion_line,
             docstring_note=(
                 f"    Status: {status_code} (origem: {assertion.origin})"
                 f"{_classification_docstring_suffix(classification.precision)}\n"
@@ -1197,16 +1213,27 @@ def _resolve_status_assertion(strategy: TestStrategy) -> _StatusAssertionResolut
     # evidência (EXPECTED_STATUS_NOT_DEFINED, Parte 16), o outro classifica
     # o que foi gerado no lugar (BROAD_STATUS_ASSERTION, regra 2 da Parte
     # 23) — nunca um no lugar do outro.
-    classification = _broad(
-        "status",
-        source="none",
-        justification=(
-            "Nenhuma evidência de status disponível (estratégia de teste, Postman, OpenAPI, "
-            "contrato ou exemplo); mantida a validação aproximada de que a resposta existe."
-        ),
+    broad_reason = (
+        "Nenhuma evidência de status disponível (estratégia de teste, Postman, OpenAPI, "
+        "contrato ou exemplo); mantida a validação aproximada de que a resposta existe."
+    )
+    classification = _broad("status", source="none", justification=broad_reason)
+    broad_assertion_line = (
+        "    try:\n"
+        "        assert response is not None\n"
+        "    except AssertionError:\n"
+        "        _record_assertion_result(\n"
+        f"            {test_id!r}, \"HTTP status\", \"resposta presente\", \"ausente\", "
+        f"\"FAILED\", \"BROAD\", {broad_reason!r},\n"
+        "        )\n"
+        "        raise\n"
+        "    _record_assertion_result(\n"
+        f"        {test_id!r}, \"HTTP status\", \"resposta presente\", \"presente\", "
+        f"\"PASSED\", \"BROAD\", {broad_reason!r},\n"
+        "    )\n"
     )
     return _StatusAssertionResolution(
-        assertion_line="    assert response is not None\n",
+        assertion_line=broad_assertion_line,
         docstring_note=(
             "    Status: não determinado — validação parcial "
             "(ver warning EXPECTED_STATUS_NOT_DEFINED)"
@@ -1275,7 +1302,9 @@ def _find_content_type_assertion(strategy: TestStrategy) -> AssertionDefinition 
     )
 
 
-def _resolve_content_type_assertion(strategy: TestStrategy) -> _ContentTypeAssertionResolution:
+def _resolve_content_type_assertion(
+    strategy: TestStrategy, test_id: str
+) -> _ContentTypeAssertionResolution:
     assertion = _find_content_type_assertion(strategy)
     if assertion is None:
         return _ContentTypeAssertionResolution(lines=(), docstring_note="")
@@ -1288,28 +1317,46 @@ def _resolve_content_type_assertion(strategy: TestStrategy) -> _ContentTypeAsser
     is_json = _is_json_content_type(expected_media_type)
     kind = "JSON" if is_json else "não-JSON"
 
+    # Mesmo texto que alimenta a docstring E cada _record_assertion_result
+    # (P1.1, complementação) — uma única fonte para o "reason".
+    reason = f"Content-Type documentado explicitamente (evidência: {assertion.origin})."
+    # A expressão de normalização (.split(";")[0].strip().lower()) é lida de
+    # novo nos dois _record_assertion_result — nunca guardada numa variável
+    # nova para reuso, pra manter a linha do `assert` original 100% intacta
+    # dentro do try (mesmo texto, mesma posição, mesmo comportamento de
+    # introspecção do pytest). Ler a MESMA expressão de novo não é uma
+    # segunda validação: é só reportar o que a comparação já decidiu.
     lines = (
         # .get(..., "") em vez de .get(...) cru: um header ausente em
         # runtime vira uma string vazia, que nunca bate com o media type
         # esperado — falha limpa na asserção seguinte, nunca um
         # AttributeError tentando chamar .split(...) em None.
         '    content_type = response.headers.get("content-type", "")\n',
+        "    try:\n",
         # response.headers do Playwright já normaliza o NOME do header para
         # minúsculas (ver playwright._impl._network.RawHeaders) — "content-
         # type" cobre qualquer caixa original ("Content-Type",
         # "CONTENT-TYPE" etc.), satisfazendo a comparação case-insensitive
         # do nome pedida na regra 2. O VALOR também é normalizado aqui
         # (.lower()) antes de comparar.
-        f'    assert content_type.split(";")[0].strip().lower() == {expected_literal}\n',
+        f'        assert content_type.split(";")[0].strip().lower() == {expected_literal}\n',
+        "    except AssertionError:\n",
+        "        _record_assertion_result(\n",
+        f"            {test_id!r}, \"Content-Type\", {expected_literal}, "
+        'content_type.split(";")[0].strip().lower(), "FAILED", "EXACT", '
+        f"{reason!r},\n",
+        "        )\n",
+        "        raise\n",
+        "    _record_assertion_result(\n",
+        f"        {test_id!r}, \"Content-Type\", {expected_literal}, "
+        'content_type.split(";")[0].strip().lower(), "PASSED", "EXACT", '
+        f"{reason!r},\n",
+        "    )\n",
     )
     # Content-Type documentado explicitamente (JSON Schema/OpenAPI/contrato)
     # — sempre EXACT quando gerado; nunca uma aproximação (o media type
     # exigido é sempre o exato, nunca "algo parecido").
-    classification = _exact(
-        "content_type",
-        source=assertion.origin,
-        justification=f"Content-Type documentado explicitamente (evidência: {assertion.origin}).",
-    )
+    classification = _exact("content_type", source=assertion.origin, justification=reason)
     docstring_note = (
         f"    Content-Type: {expected_media_type} [{kind}] (origem: {assertion.origin})"
         f"{_classification_docstring_suffix(classification.precision)}\n"
@@ -1488,15 +1535,35 @@ def _resolve_body_json_assertion(
 # navegação (nada abaixo de um nó null para checar, "respeitar nullable").
 # Um nó que não é mais um dict (não navegável) também interrompe sem falhar
 # — nunca uma validação de tipo (fora de escopo da Parte 19).
+#
+# P1.1: test_id/reason só existem pra alimentar _record_assertion_result —
+# a navegação/asserção em si (linhas dentro do try) é EXATAMENTE a mesma de
+# antes, byte a byte, só envolvida num try/except que nunca muda o que é
+# validado nem a mensagem de erro original (regra "nunca criar um mecanismo
+# paralelo de validação"): o próprio AssertionError original é recapturado
+# e relançado (bare "raise"), nunca substituído por um novo.
 _ASSERT_REQUIRED_FIELD_PRESENT_SOURCE = (
-    "def _assert_required_field_present(node, path):\n"
-    "    for index, key in enumerate(path):\n"
-    "        if not isinstance(node, dict):\n"
-    "            return\n"
-    '        assert key in node, "Campo obrigatório ausente: " + ".".join(path[: index + 1])\n'
-    "        node = node[key]\n"
-    "        if node is None:\n"
-    "            return\n"
+    "def _assert_required_field_present(node, path, test_id, reason):\n"
+    "    label = \".\".join(path)\n"
+    "    try:\n"
+    "        _node = node\n"
+    "        for index, key in enumerate(path):\n"
+    "            if not isinstance(_node, dict):\n"
+    "                break\n"
+    '            assert key in _node, "Campo obrigatório ausente: " + ".".join(path[: index + 1])\n'
+    "            _node = _node[key]\n"
+    "            if _node is None:\n"
+    "                break\n"
+    "    except AssertionError:\n"
+    "        _record_assertion_result(\n"
+    '            test_id, "required_field:" + label, "presente", "ausente", "FAILED",\n'
+    "            \"EXACT\", reason,\n"
+    "        )\n"
+    "        raise\n"
+    "    _record_assertion_result(\n"
+    '        test_id, "required_field:" + label, "presente", "presente", "PASSED",\n'
+    "        \"EXACT\", reason,\n"
+    "    )\n"
 )
 
 # _get_nested_value (Partes 19 e 20): mesma navegação, mas devolve o valor
@@ -1613,7 +1680,7 @@ class _RequiredFieldsResolution:
 
 
 def _resolve_required_fields_assertion(
-    strategy: TestStrategy, response_body_resolution: _BodyJsonResolution
+    strategy: TestStrategy, response_body_resolution: _BodyJsonResolution, test_id: str
 ) -> _RequiredFieldsResolution:
     # Só faz sentido checar campos dentro de `body` quando a Parte 18 já
     # garantiu que essa variável existe (evidência de JSON) — nunca gerado
@@ -1631,31 +1698,34 @@ def _resolve_required_fields_assertion(
 
     assert schema_assertion is not None  # garantido por required_paths/arrays não vazios
 
+    total = len(required_paths) + len(required_arrays)
+    # Mesmo texto que alimenta a docstring E cada _record_assertion_result
+    # (P1.1) — uma única fonte para o "reason", nunca duas versões da mesma
+    # justificativa podendo divergir.
+    reason = (
+        f"{total} campo(s) declarado(s) como 'required' no schema documentado "
+        f"(evidência: {schema_assertion.origin})."
+    )
+
     lines: list[str] = []
     for path in required_paths:
-        lines.append(f"    _assert_required_field_present(body, {path!r})\n")
+        lines.append(
+            f"    _assert_required_field_present(body, {path!r}, {test_id!r}, {reason!r})\n"
+        )
     for array_field in required_arrays:
         lines.extend(_render_required_array_field_lines(array_field))
 
-    total = len(required_paths) + len(required_arrays)
     # Sempre EXACT quando gerado: cada campo é literalmente listado em
     # "required" no schema — nunca uma aproximação (ausência de evidência
     # não gera nada, ver "empty" acima, nunca um BROAD "talvez obrigatório").
-    classification = _exact(
-        "required_fields",
-        source=schema_assertion.origin,
-        justification=(
-            f"{total} campo(s) declarado(s) como 'required' no schema documentado "
-            f"(evidência: {schema_assertion.origin})."
-        ),
-    )
+    classification = _exact("required_fields", source=schema_assertion.origin, justification=reason)
     docstring_note = (
         f"    Required fields: {total} campo(s) obrigatório(s) validados "
         f"(origem: {schema_assertion.origin})"
         f"{_classification_docstring_suffix(classification.precision)}\n"
     )
 
-    helper_names = {"assert_required_field_present"}
+    helper_names = {"assert_required_field_present", "record_assertion_result"}
     if required_arrays:
         helper_names.add("get_nested_value")
 
@@ -1683,7 +1753,7 @@ def _resolve_required_fields_assertion(
 # sempre com campo (caminho completo), tipo esperado e tipo recebido
 # (regra 6).
 _ASSERT_FIELD_TYPE_SOURCE = (
-    "def _assert_field_type(node, path, expected_type, nullable):\n"
+    "def _assert_field_type(node, path, expected_type, nullable, test_id, name, reason):\n"
     "    for key in path[:-1]:\n"
     "        if not isinstance(node, dict) or key not in node:\n"
     "            return\n"
@@ -1715,22 +1785,67 @@ _ASSERT_FIELD_TYPE_SOURCE = (
     '        ok = received in ("integer", "number")\n'
     "    else:\n"
     "        ok = received == expected_type\n"
-    "    assert ok, (\n"
-    "        \"Tipo inválido para o campo '\" + label + \"': esperado \" + expected_type\n"
-    '        + ", recebido " + received + "."\n'
+    # P1.1 (complementação): o `assert ok, (...)` original — mesmo texto,
+    # mesma mensagem — fica intacto dentro do try; só é envolvido para
+    # registrar o resultado antes de relançar a MESMA exceção (bare
+    # "raise"), nunca uma segunda comparação. `name` chega pronto de quem
+    # chama (o `path` sozinho não basta para nomear checagens de item de
+    # array — ver _render_array_item_type_check_lines).
+    "    try:\n"
+    "        assert ok, (\n"
+    "            \"Tipo inválido para o campo '\" + label + \"': esperado \" + expected_type\n"
+    '            + ", recebido " + received + "."\n'
+    "        )\n"
+    "    except AssertionError:\n"
+    "        _record_assertion_result(\n"
+    '            test_id, name, expected_type, received, "FAILED", "EXACT", reason,\n'
+    "        )\n"
+    "        raise\n"
+    "    _record_assertion_result(\n"
+    '        test_id, name, expected_type, received, "PASSED", "EXACT", reason,\n'
     "    )\n"
+)
+
+# P1.1 (detalhamento de assertions): registra UMA assertion realmente
+# checada em runtime — name/expected/actual/status/precision/reason — num
+# arquivo NDJSON (mesmo padrão de _record_http_transaction em conftest.py:
+# arquivo, nunca stdout; ausência da env var = captura desligada, sem erro).
+# Vive aqui (per-arquivo, via _render_helpers_block), não em conftest.py,
+# porque quem chama é o próprio corpo da função de teste gerada — mesmo
+# lugar de _assert_field_type/_assert_required_field_present. NUNCA decide
+# sozinho o que é secret: PlaywrightAdapter mascara expected/actual/reason
+# depois de ler o arquivo, exatamente como já faz para a transação HTTP.
+_RECORD_ASSERTION_RESULT_SOURCE = (
+    "def _record_assertion_result(test_id, name, expected, actual, status, precision, reason):\n"
+    "    results_path = os.environ.get(\"PLAYWRIGHT_ASSERTION_RESULTS_PATH\")\n"
+    "    if not results_path:\n"
+    "        return\n"
+    "    entry = {\n"
+    "        \"test_id\": test_id,\n"
+    "        \"name\": name,\n"
+    "        \"expected\": expected,\n"
+    "        \"actual\": actual,\n"
+    "        \"status\": status,\n"
+    "        \"precision\": precision,\n"
+    "        \"reason\": reason,\n"
+    "    }\n"
+    "    with open(results_path, \"a\", encoding=\"utf-8\") as handle:\n"
+    "        handle.write(json.dumps(entry, ensure_ascii=False, default=str) + \"\\n\")\n"
 )
 
 # Nome do helper -> texto; ordem estável de emissão (nunca depende de ordem
 # de dict/set em runtime) para manter a geração determinística — usado
 # tanto pela Parte 19 quanto pela Parte 20, deduplicado por nome quando as
-# duas precisam do mesmo helper (get_nested_value).
+# duas precisam do mesmo helper (get_nested_value). record_assertion_result
+# vem primeiro porque os demais helpers (P1.1) chamam ele.
 _HELPER_SOURCES: dict[str, str] = {
+    "record_assertion_result": _RECORD_ASSERTION_RESULT_SOURCE,
     "get_nested_value": _GET_NESTED_VALUE_SOURCE,
     "assert_required_field_present": _ASSERT_REQUIRED_FIELD_PRESENT_SOURCE,
     "assert_field_type": _ASSERT_FIELD_TYPE_SOURCE,
 }
 _HELPER_ORDER: tuple[str, ...] = (
+    "record_assertion_result",
     "get_nested_value",
     "assert_required_field_present",
     "assert_field_type",
@@ -1848,7 +1963,9 @@ def _collect_field_types(
     return field_checks, array_checks, ambiguous_paths
 
 
-def _render_array_item_type_check_lines(array_check: _ArrayItemTypeCheck) -> tuple[str, ...]:
+def _render_array_item_type_check_lines(
+    array_check: _ArrayItemTypeCheck, test_id: str, reason: str
+) -> tuple[str, ...]:
     local_name = f"_{sanitize_identifier('_'.join(array_check.array_path))}_items"
     path_literal = repr(array_check.array_path)
     lines = [
@@ -1858,10 +1975,15 @@ def _render_array_item_type_check_lines(array_check: _ArrayItemTypeCheck) -> tup
         "            if not isinstance(_item, dict):\n",
         "                continue\n",
     ]
+    array_label = ".".join(array_check.array_path)
     for item_name, item_type, item_nullable in array_check.item_fields:
+        # `name` inclui o prefixo do array (ex.: "field_type:items[].id") —
+        # o `path` sozinho ((item_name,), relativo a cada `_item`) não
+        # carrega esse contexto, então precisa ser passado à parte.
+        name_literal = repr(f"field_type:{array_label}[].{item_name}")
         lines.append(
             f"            _assert_field_type(_item, {(item_name,)!r}, "
-            f"{item_type!r}, {item_nullable!r})\n"
+            f"{item_type!r}, {item_nullable!r}, {test_id!r}, {name_literal}, {reason!r})\n"
         )
     return tuple(lines)
 
@@ -1897,7 +2019,7 @@ def _ambiguous_field_type_warning(
 
 
 def _resolve_field_types_assertion(
-    strategy: TestStrategy, response_body_resolution: _BodyJsonResolution
+    strategy: TestStrategy, response_body_resolution: _BodyJsonResolution, test_id: str
 ) -> _FieldTypesResolution:
     # Mesmo pré-requisito da Parte 19: só existe `body` para inspecionar
     # quando a Parte 18 já provou (por evidência) que a resposta é JSON.
@@ -1918,34 +2040,35 @@ def _resolve_field_types_assertion(
 
     assert schema_assertion is not None  # garantido por field_checks/array_checks não vazios
 
+    total = len(field_checks) + sum(len(a.item_fields) for a in array_checks)
+    # Mesmo texto que alimenta a docstring E cada _record_assertion_result
+    # (P1.1, complementação) — uma única fonte para o "reason".
+    reason = (
+        f"Tipo de {total} campo(s) documentado(s) explicitamente no schema "
+        f"(evidência: {schema_assertion.origin})."
+    )
+
     lines: list[str] = []
     for check in field_checks:
+        name_literal = repr(f"field_type:{'.'.join(check.path)}")
         lines.append(
             f"    _assert_field_type(body, {check.path!r}, {check.json_type!r}, "
-            f"{check.nullable!r})\n"
+            f"{check.nullable!r}, {test_id!r}, {name_literal}, {reason!r})\n"
         )
     for array_check in array_checks:
-        lines.extend(_render_array_item_type_check_lines(array_check))
+        lines.extend(_render_array_item_type_check_lines(array_check, test_id, reason))
 
-    total = len(field_checks) + sum(len(a.item_fields) for a in array_checks)
     # Sempre EXACT quando gerado: "type"/"nullable" vêm direto do schema,
     # nunca uma aproximação de tipo (ver _normalize_field_type — tipo
     # ambíguo/não documentado nunca gera checagem, então nunca chega BROAD
     # aqui).
-    classification = _exact(
-        "field_types",
-        source=schema_assertion.origin,
-        justification=(
-            f"Tipo de {total} campo(s) documentado(s) explicitamente no schema "
-            f"(evidência: {schema_assertion.origin})."
-        ),
-    )
+    classification = _exact("field_types", source=schema_assertion.origin, justification=reason)
     docstring_note = (
         f"    Field types: {total} campo(s) validados (origem: {schema_assertion.origin})"
         f"{_classification_docstring_suffix(classification.precision)}\n"
     )
 
-    helper_names = {"assert_field_type"}
+    helper_names = {"assert_field_type", "record_assertion_result"}
     if array_checks:
         helper_names.add("get_nested_value")
 
@@ -2047,7 +2170,7 @@ class _JsonSchemaResolution:
 
 
 def _resolve_json_schema_assertion(
-    strategy: TestStrategy, response_body_resolution: _BodyJsonResolution
+    strategy: TestStrategy, response_body_resolution: _BodyJsonResolution, test_id: str
 ) -> _JsonSchemaResolution:
     # Mesmo pré-requisito das Partes 19/20: só existe `body` para validar
     # quando a Parte 18 já provou (por evidência) que a resposta é JSON.
@@ -2088,12 +2211,26 @@ def _resolve_json_schema_assertion(
             lines=(), docstring_note=docstring_note, warning=warning, extra_imports=frozenset()
         )
 
+    # Mesmo texto que alimenta a docstring E cada _record_assertion_result
+    # (P1.1) — uma única fonte para o "reason".
+    reason = (
+        "Validação estrutural completa contra o schema documentado (biblioteca "
+        f"jsonschema; evidência: {schema_assertion.origin})."
+    )
     schema_literal = _render_schema_literal(schema, "    ")
     lines = (
         f"    _response_json_schema = {schema_literal}\n",
         "    try:\n",
         "        jsonschema.validate(instance=body, schema=_response_json_schema)\n",
         "    except jsonschema.exceptions.ValidationError as error:\n",
+        # P1.1: registra a falha ANTES de pytest.fail(...) — que continua
+        # exatamente igual a antes, nunca uma segunda validação: o único
+        # jsonschema.validate(...) acima é quem decide, aqui só se
+        # descreve o que ele já decidiu.
+        "        _record_assertion_result(\n",
+        f"            {test_id!r}, \"json_schema\", \"válido conforme schema documentado\",\n",
+        '            "inválido: " + error.message, "FAILED", "EXACT", ' + repr(reason) + ",\n",
+        "        )\n",
         "        pytest.fail(\n",
         # Caminho, keyword, valor esperado e mensagem do validator (regra
         # 5) — nunca só "schema inválido" genérico. error.path é um
@@ -2105,19 +2242,17 @@ def _resolve_json_schema_assertion(
         '            + "; esperado: " + repr(error.validator_value)\n',
         '            + "; mensagem: " + error.message\n',
         "        )\n",
+        "    else:\n",
+        "        _record_assertion_result(\n",
+        f"            {test_id!r}, \"json_schema\", \"válido conforme schema documentado\",\n",
+        '            "válido", "PASSED", "EXACT", ' + repr(reason) + ",\n",
+        "        )\n",
     )
     # Sempre EXACT quando gerado: valida contra o schema REAL, completo —
     # nunca uma aproximação (o $ref não suportado, o único jeito de ficar
     # "menos que exato", já pula a validação inteira acima, nunca gera uma
     # checagem parcial disfarçada de completa).
-    classification = _exact(
-        "json_schema",
-        source=schema_assertion.origin,
-        justification=(
-            "Validação estrutural completa contra o schema documentado (biblioteca "
-            f"jsonschema; evidência: {schema_assertion.origin})."
-        ),
-    )
+    classification = _exact("json_schema", source=schema_assertion.origin, justification=reason)
     docstring_note = (
         f"    JSON Schema: validado (origem: {schema_assertion.origin})"
         f"{_classification_docstring_suffix(classification.precision)}\n"
@@ -2284,16 +2419,24 @@ def _parsed_request_json_body(request_body: NormalizedBody) -> dict[str, Any] | 
     return parsed if isinstance(parsed, dict) else None
 
 
-def _render_expected_value_check_lines(check: _ExpectedValueCheck) -> tuple[str, ...]:
+def _render_expected_value_check_lines(
+    check: _ExpectedValueCheck, test_id: str, reason: str, precision: str
+) -> tuple[str, ...]:
     label = ".".join(check.path)
     path_literal = repr(check.path)
     # "Valores sensíveis não podem aparecer na mensagem de falha" (regra 6):
     # nunca um `assert _value == X` cru — o assertion rewriting do pytest
     # exibiria os dois valores reais na falha mesmo com uma mensagem
     # customizada ao lado. Por isso sempre if/pytest.fail com uma mensagem
-    # que cita só o CAMPO, nunca o valor esperado nem o recebido.
+    # que cita só o CAMPO, nunca o valor esperado nem o recebido. A mesma
+    # cautela NÃO se aplica ao registro de AssertionResult (P1.1,
+    # complementação): é uma chamada de função comum, sem introspecção de
+    # bytecode do pytest, escrita num arquivo NDJSON separado que já passa
+    # pelo mascaramento de secrets do PlaywrightAdapter antes de persistir
+    # — nunca aparece na saída/mensagem de falha do pytest.
     message = f"Valor inesperado para o campo '{label}' (ver contrato)."
     fail_line = f"        pytest.fail({_python_string_literal(message)})\n"
+    name_literal = repr(f"expected_value:{label}")
     if check.kind == "const":
         expected_literal = _render_schema_literal(check.value, "    ")
         condition = f"_value != {expected_literal}"
@@ -2302,14 +2445,23 @@ def _render_expected_value_check_lines(check: _ExpectedValueCheck) -> tuple[str,
             "(" + ", ".join(_render_schema_literal(item, "    ") for item in check.value) + ",)"
         )
         condition = f"_value not in {values_literal}"
+        expected_literal = values_literal
     return (
         f"    _value = _get_nested_value(body, {path_literal})\n",
         f"    if {condition}:\n",
+        "        _record_assertion_result(\n",
+        f"            {test_id!r}, {name_literal}, {expected_literal}, _value, \"FAILED\", "
+        f"{precision!r}, {reason!r},\n",
+        "        )\n",
         fail_line,
+        "    _record_assertion_result(\n",
+        f"        {test_id!r}, {name_literal}, {expected_literal}, _value, \"PASSED\", "
+        f"{precision!r}, {reason!r},\n",
+        "    )\n",
     )
 
 
-def _render_correlation_check_lines(check: _CorrelationCheck) -> tuple[str, ...]:
+def _render_correlation_check_lines(check: _CorrelationCheck, test_id: str, reason: str) -> tuple[str, ...]:
     label = ".".join(check.path)
     path_literal = repr(check.path)
     source_literal = _python_string_literal(check.source_field)
@@ -2318,15 +2470,31 @@ def _render_correlation_check_lines(check: _CorrelationCheck) -> tuple[str, ...]
     # próprias) dentro de outra string — evita aspas aninhadas quebrando a
     # sintaxe do arquivo gerado. Mesma cautela da regra 6: nunca um `assert`
     # cru comparando os dois valores — só o nome dos dois campos aparece na
-    # mensagem.
+    # mensagem. O "expected" aqui só é conhecido em runtime (é o próprio
+    # valor enviado no request desta execução) — nunca um literal inventado
+    # na geração. `request_body.get(...)` é lido de novo nos dois
+    # _record_assertion_result (mesma expressão da comparação original,
+    # nunca guardada numa variável nova) só para reportar o que a
+    # comparação já decidiu — mesmo raciocínio do Content-Type acima: a
+    # linha `if` original permanece exatamente a mesma, única responsável
+    # pela decisão.
     message = (
         f"Valor do campo '{label}' não corresponde ao valor enviado em "
         f"request_body['{check.source_field}'] (ver contrato)."
     )
+    name_literal = repr(f"correlation:{label}")
     return (
         f"    _value = _get_nested_value(body, {path_literal})\n",
         f"    if _value != request_body.get({source_literal}):\n",
+        "        _record_assertion_result(\n",
+        f"            {test_id!r}, {name_literal}, request_body.get({source_literal}), "
+        f"_value, \"FAILED\", \"EXACT\", {reason!r},\n",
+        "        )\n",
         f"        pytest.fail({_python_string_literal(message)})\n",
+        "    _record_assertion_result(\n",
+        f"        {test_id!r}, {name_literal}, request_body.get({source_literal}), "
+        f"_value, \"PASSED\", \"EXACT\", {reason!r},\n",
+        "    )\n",
     )
 
 
@@ -2351,6 +2519,7 @@ def _resolve_expected_values_assertion(
     strategy: TestStrategy,
     response_body_resolution: _BodyJsonResolution,
     request_body: NormalizedBody,
+    test_id: str,
 ) -> _ExpectedValuesResolution:
     # Mesmo pré-requisito das Partes 19-21: só existe `body` para comparar
     # quando a Parte 18 já provou (por evidência) que a resposta é JSON.
@@ -2375,45 +2544,50 @@ def _resolve_expected_values_assertion(
 
     assert schema_assertion is not None  # garantido por value_checks/correlation_checks não vazios
 
-    lines: list[str] = []
-    for check in value_checks:
-        lines.extend(_render_expected_value_check_lines(check))
-    for correlation_check in correlation_checks:
-        lines.extend(_render_correlation_check_lines(correlation_check))
-
     # "const"/enum de 1 valor e correlação são sempre EXACT (valor único,
     # sem ambiguidade); "enum" de 2+ valores é DERIVED (conjunto de valores
     # permitidos derivado do schema, sem um valor único garantido) — nunca
     # os dois misturados numa única classificação (regra 3).
     const_checks = [c for c in value_checks if c.kind == "const"]
     enum_checks = [c for c in value_checks if c.kind == "enum"]
+    exact_total = len(const_checks) + len(correlation_checks)
+
+    # Mesmo texto que alimenta a docstring/classification E cada
+    # _record_assertion_result (P1.1, complementação) — uma única fonte por
+    # grupo de precisão, nunca duas versões da mesma justificativa podendo
+    # divergir. "enum_reason" só é usado quando enum_checks não é vazio,
+    # mas é computado sempre (barato, string pura) para simplificar o loop
+    # abaixo.
+    exact_reason = (
+        f"{exact_total} campo(s) com valor único documentado explicitamente "
+        "('const'/'enum' de 1 valor) e/ou correlação comprovada com o request "
+        "('x-source-request-field')."
+    )
+    enum_reason = (
+        f"{len(enum_checks)} campo(s) com conjunto de valores permitidos derivado "
+        "do 'enum' documentado no schema, sem valor único garantido."
+    )
+
+    lines: list[str] = []
+    for check in value_checks:
+        check_reason = exact_reason if check.kind == "const" else enum_reason
+        check_precision = "EXACT" if check.kind == "const" else "DERIVED"
+        lines.extend(
+            _render_expected_value_check_lines(check, test_id, check_reason, check_precision)
+        )
+    for correlation_check in correlation_checks:
+        lines.extend(_render_correlation_check_lines(correlation_check, test_id, exact_reason))
 
     classifications: list[AssertionClassification] = []
     tags: list[str] = []
-    exact_total = len(const_checks) + len(correlation_checks)
     if exact_total:
         classifications.append(
-            _exact(
-                "expected_values",
-                source=schema_assertion.origin,
-                justification=(
-                    f"{exact_total} campo(s) com valor único documentado explicitamente "
-                    "('const'/'enum' de 1 valor) e/ou correlação comprovada com o request "
-                    "('x-source-request-field')."
-                ),
-            )
+            _exact("expected_values", source=schema_assertion.origin, justification=exact_reason)
         )
         tags.append(f"EXACT:{exact_total}")
     if enum_checks:
         classifications.append(
-            _derived(
-                "expected_values",
-                source=schema_assertion.origin,
-                justification=(
-                    f"{len(enum_checks)} campo(s) com conjunto de valores permitidos derivado "
-                    "do 'enum' documentado no schema, sem valor único garantido."
-                ),
-            )
+            _derived("expected_values", source=schema_assertion.origin, justification=enum_reason)
         )
         tags.append(f"DERIVED:{len(enum_checks)}")
 
@@ -2424,7 +2598,7 @@ def _resolve_expected_values_assertion(
     )
 
     return _ExpectedValuesResolution(
-        helper_names=frozenset({"get_nested_value"}),
+        helper_names=frozenset({"get_nested_value", "record_assertion_result"}),
         lines=tuple(lines),
         docstring_note=docstring_note,
         classifications=tuple(classifications),
@@ -2443,14 +2617,24 @@ def _generate_positive_success_test(
     # (Parte 08A) — _render_http_call decide, a partir daqui, entre um
     # método nativo (api_context.<verbo>) e fetch(..., method=...).
     method = (request.method or "GET").upper()
-    status_resolution = _resolve_status_assertion(strategy)
-    content_type_resolution = _resolve_content_type_assertion(strategy)
+    # test_id (P1.1): mesmo identificador usado por conftest.py
+    # (_CURRENT_TEST_ID, via request.node.name em runtime) para correlacionar
+    # test_id -> request/response -> assertions — aqui é literalmente o
+    # nome da função que está sendo gerada agora, já conhecido nesta etapa.
+    status_resolution = _resolve_status_assertion(strategy, function_name)
+    content_type_resolution = _resolve_content_type_assertion(strategy, function_name)
     response_body_resolution = _resolve_body_json_assertion(strategy, content_type_resolution)
-    required_fields_resolution = _resolve_required_fields_assertion(strategy, response_body_resolution)
-    field_types_resolution = _resolve_field_types_assertion(strategy, response_body_resolution)
-    json_schema_resolution = _resolve_json_schema_assertion(strategy, response_body_resolution)
+    required_fields_resolution = _resolve_required_fields_assertion(
+        strategy, response_body_resolution, function_name
+    )
+    field_types_resolution = _resolve_field_types_assertion(
+        strategy, response_body_resolution, function_name
+    )
+    json_schema_resolution = _resolve_json_schema_assertion(
+        strategy, response_body_resolution, function_name
+    )
     expected_values_resolution = _resolve_expected_values_assertion(
-        strategy, response_body_resolution, request.body
+        strategy, response_body_resolution, request.body, function_name
     )
 
     # Já sabido "supported" (gate em _unsupported_reason); recomputado aqui
@@ -2497,10 +2681,14 @@ def _generate_positive_success_test(
     else:
         body_origin_note = "sem body"
 
+    # "os"/"json" (P1.1): o helper record_assertion_result é usado
+    # incondicionalmente (a asserção de status, EXACT ou BROAD, sempre
+    # registra um resultado) — nunca dependente de outra condição.
     all_imports = (
         session.extra_imports
         | response_body_resolution.extra_imports
         | json_schema_resolution.extra_imports
+        | {"os", "json"}
     )
     imports_block = "".join(f"import {name}\n" for name in sorted(all_imports))
     if imports_block:
@@ -2523,10 +2711,13 @@ def _generate_positive_success_test(
         body_resolution.multipart_fields,
     )
 
+    # "record_assertion_result" (P1.1): mesma razão do "os"/"json" acima —
+    # a asserção de status sempre o usa, nunca condicional a outra parte.
     helpers_block = _render_helpers_block(
         required_fields_resolution.helper_names
         | field_types_resolution.helper_names
         | expected_values_resolution.helper_names
+        | {"record_assertion_result"}
     )
 
     content = (

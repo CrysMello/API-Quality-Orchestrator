@@ -26,6 +26,7 @@ from api_quality_agent.domain.models import (
 from api_quality_agent.domain.services import ApiAnalysisEngine
 from api_quality_agent.generators.playwright import PlaywrightEndpointTestGenerator
 from api_quality_agent.generators.playwright.playwright_endpoint_test_generator import (
+    _RECORD_ASSERTION_RESULT_SOURCE,
     _BodyJsonResolution,
     _resolve_expected_values_assertion,
 )
@@ -82,10 +83,16 @@ def _build_validator(schema: dict, request_json: dict | None = None):
         lines=("    body = ...\n",), docstring_note="", warning=None, extra_imports=frozenset()
     )
     resolution = _resolve_expected_values_assertion(
-        strategy, body_resolution, _raw_request_body(request_json)
+        strategy, body_resolution, _raw_request_body(request_json), "test_x"
     )
     assert resolution.lines, "schema deveria gerar ao menos uma checagem de valor"
+    # P1.1 (complementação): as linhas agora chamam _record_assertion_result
+    # — mesmo texto exato do arquivo gerado, precisa do helper de registro
+    # (e "os"/"json") definidos junto, mesmo padrão já usado pelas outras
+    # categorias instrumentadas.
     source = (
+        "import json\n"
+        "import os\n\n\n"
         "def _get_nested_value(node, path):\n"
         "    for key in path:\n"
         "        if not isinstance(node, dict) or key not in node:\n"
@@ -93,6 +100,8 @@ def _build_validator(schema: dict, request_json: dict | None = None):
         "        node = node[key]\n"
         "    return node\n"
         "\n\n"
+        + _RECORD_ASSERTION_RESULT_SOURCE
+        + "\n\n"
         "import pytest\n\n\n"
         "def _run(body, request_body=None):\n" + "".join(resolution.lines)
     )
@@ -167,6 +176,142 @@ def test_correlation_fails_without_exposing_the_values():
     assert "name" in message
     assert "Maria" not in message
     assert "Outro Nome" not in message
+
+
+# --- P1.1 (complementação): registro de AssertionResult ---------------------
+
+
+def _recorded_entries(results_path):
+    lines = results_path.read_text(encoding="utf-8").strip().splitlines()
+    return [json.loads(line) for line in lines]
+
+
+def test_const_assertion_records_a_passed_result_with_exact_precision(tmp_path, monkeypatch):
+    results_path = tmp_path / "assertion-results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+    validator = _build_validator(
+        {"type": "object", "properties": {"status": {"const": "active"}}}
+    )
+
+    validator({"status": "active"})
+
+    entry = _recorded_entries(results_path)[0]
+    assert entry["name"] == "expected_value:status"
+    assert entry["expected"] == "active"
+    assert entry["actual"] == "active"
+    assert entry["status"] == "PASSED"
+    assert entry["precision"] == "EXACT"
+    assert entry["reason"]
+
+
+def test_const_assertion_records_a_failed_result(tmp_path, monkeypatch):
+    import pytest
+
+    results_path = tmp_path / "assertion-results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+    validator = _build_validator(
+        {"type": "object", "properties": {"status": {"const": "active"}}}
+    )
+
+    with pytest.raises(pytest.fail.Exception):
+        validator({"status": "banned"})
+
+    entry = _recorded_entries(results_path)[0]
+    assert entry["expected"] == "active"
+    assert entry["actual"] == "banned"
+    assert entry["status"] == "FAILED"
+    assert entry["precision"] == "EXACT"
+
+
+def test_enum_assertion_records_derived_precision(tmp_path, monkeypatch):
+    # Precisão preservada exatamente como já classificado pela Parte 22:
+    # "enum" de 2+ valores é sempre DERIVED, nunca reclassificado como
+    # EXACT só porque a checagem passou.
+    results_path = tmp_path / "assertion-results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+    validator = _build_validator(
+        {"type": "object", "properties": {"role": {"enum": ["admin", "user"]}}}
+    )
+
+    validator({"role": "admin"})
+
+    entry = _recorded_entries(results_path)[0]
+    assert entry["name"] == "expected_value:role"
+    assert entry["precision"] == "DERIVED"
+    assert entry["status"] == "PASSED"
+    assert entry["expected"] == ["admin", "user"]
+
+
+def test_correlation_assertion_records_a_passed_result_with_the_runtime_expected_value(
+    tmp_path, monkeypatch
+):
+    # "expected" da correlação só é conhecido em runtime (o valor
+    # realmente enviado nesta execução) — nunca um literal inventado na
+    # geração.
+    results_path = tmp_path / "assertion-results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+    validator = _build_validator(
+        {"type": "object", "properties": {"name": {"x-source-request-field": "name"}}},
+        request_json={"name": "Maria"},
+    )
+
+    validator({"name": "Maria"}, request_body={"name": "Maria"})
+
+    entry = _recorded_entries(results_path)[0]
+    assert entry["name"] == "correlation:name"
+    assert entry["expected"] == "Maria"
+    assert entry["actual"] == "Maria"
+    assert entry["status"] == "PASSED"
+    assert entry["precision"] == "EXACT"
+
+
+def test_correlation_assertion_records_a_failed_result(tmp_path, monkeypatch):
+    import pytest
+
+    results_path = tmp_path / "assertion-results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+    validator = _build_validator(
+        {"type": "object", "properties": {"name": {"x-source-request-field": "name"}}},
+        request_json={"name": "Maria"},
+    )
+
+    with pytest.raises(pytest.fail.Exception):
+        validator({"name": "Outro Nome"}, request_body={"name": "Maria"})
+
+    entry = _recorded_entries(results_path)[0]
+    assert entry["expected"] == "Maria"
+    assert entry["actual"] == "Outro Nome"
+    assert entry["status"] == "FAILED"
+
+
+def test_reason_reflects_the_real_classification_justification(tmp_path, monkeypatch):
+    # O "reason" registrado é exatamente a mesma justificativa já usada
+    # pela classificação/docstring (Parte 23) — nunca uma frase nova,
+    # inventada só para o registro de runtime (regra 3 do bloco: "reutilizar
+    # a justificativa/origem já existente").
+    results_path = tmp_path / "assertion-results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+    schema = {"type": "object", "properties": {"status": {"const": "active"}}}
+    validator = _build_validator(schema, request_json=None)
+
+    validator({"status": "active"})
+
+    entry = _recorded_entries(results_path)[0]
+    strategy = TestStrategy(
+        endpoint_source="GET /x",
+        assertions=(_schema_assertion(schema),),
+        variable_extractions=(),
+        negative_cases=(),
+        warnings=(),
+    )
+    body_resolution = _BodyJsonResolution(
+        lines=("    body = ...\n",), docstring_note="", warning=None, extra_imports=frozenset()
+    )
+    resolution = _resolve_expected_values_assertion(
+        strategy, body_resolution, _raw_request_body(None), "test_x"
+    )
+    assert entry["reason"] == resolution.classifications[0].justification
+    assert entry["reason"]
 
 
 # --- Conteúdo gerado ----------------------------------------------------
@@ -429,8 +574,12 @@ def test_coexists_with_required_and_type_checks_for_the_same_endpoint():
     }
     generated = _generate(_GET_USERS, _base_assertions(_schema_assertion(schema)))
 
-    assert "_assert_required_field_present(body, ('id',))" in generated.content
-    assert "_assert_field_type(body, ('id',), 'string', False)" in generated.content
+    assert "_assert_required_field_present(body, ('id',), 'test_get_users_success'" in (
+        generated.content
+    )
+    assert "_assert_field_type(body, ('id',), 'string', False, 'test_get_users_success'" in (
+        generated.content
+    )
     assert 'if _value != "active":' in generated.content
     ast.parse(generated.content)
 

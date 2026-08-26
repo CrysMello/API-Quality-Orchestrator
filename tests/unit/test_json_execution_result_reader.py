@@ -56,6 +56,41 @@ def _valid_payload_1_3(**overrides) -> dict:
     return payload
 
 
+def _valid_payload_1_4(**overrides) -> dict:
+    payload = _valid_payload_1_3(schema_version="1.4")
+    payload["http_transactions"] = [
+        {
+            "method": "GET",
+            "url": "https://api.exemplo.com/users",
+            "request_headers": {"Accept": "application/json"},
+            "request_body": None,
+            "response_status": 200,
+            "response_headers": {"content-type": "application/json"},
+            "response_body": '{"items": []}',
+        },
+    ]
+    payload.update(overrides)
+    return payload
+
+
+def _valid_payload_1_5(**overrides) -> dict:
+    payload = _valid_payload_1_4(schema_version="1.5")
+    payload["http_transactions"][0]["test_id"] = "test_get_users_success"
+    payload["assertion_results"] = [
+        {
+            "test_id": "test_get_users_success",
+            "name": "HTTP status",
+            "expected": 200,
+            "actual": 200,
+            "status": "PASSED",
+            "precision": "EXACT",
+            "reason": "Status HTTP 200 documentado explicitamente (evidência: contract).",
+        },
+    ]
+    payload.update(overrides)
+    return payload
+
+
 def _valid_payload_1_0() -> dict:
     # Schema 1.0: sem schema_version e sem workspace no arquivo.
     return {
@@ -96,6 +131,7 @@ def test_read_schema_1_1_populates_workspace(tmp_path):
     assert record.source_path == str(path)
     assert record.test_failures == ()
     assert record.skipped_tests == 0
+    assert record.http_transactions == ()
 
 
 # --- Leitura: schema 1.2 ----------------------------------------------------------------
@@ -155,6 +191,103 @@ def test_read_schema_1_3_with_zero_skipped_tests(tmp_path):
     assert record.skipped_tests == 0
 
 
+def test_read_schema_1_3_defaults_http_transactions_to_empty(tmp_path):
+    # "http_transactions" só existe a partir do 1.4 — um result.json 1.3
+    # legado (sem essa chave) precisa continuar sendo lido, com tupla vazia.
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_3())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.http_transactions == ()
+
+
+# --- Leitura: schema 1.4 ----------------------------------------------------------------
+
+
+def test_read_schema_1_4_populates_http_transactions(tmp_path):
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_4())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.schema_version == "1.4"
+    assert len(record.http_transactions) == 1
+    transaction = record.http_transactions[0]
+    assert transaction.method == "GET"
+    assert transaction.url == "https://api.exemplo.com/users"
+    assert transaction.request_body is None
+    assert transaction.response_status == 200
+    assert transaction.response_body == '{"items": []}'
+    assert {h.name: h.value for h in transaction.request_headers} == {
+        "Accept": "application/json"
+    }
+    assert {h.name: h.value for h in transaction.response_headers} == {
+        "content-type": "application/json"
+    }
+    # Demais campos continuam populados normalmente (regressão do que já
+    # existia no 1.3).
+    assert record.skipped_tests == 2
+    assert len(record.test_failures) == 1
+
+
+def test_read_schema_1_4_with_no_http_transactions(tmp_path):
+    payload = _valid_payload_1_4(http_transactions=[])
+    path = _write(tmp_path / "run_x" / "result.json", payload)
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.http_transactions == ()
+
+
+def test_read_schema_1_4_defaults_http_transaction_test_id_and_assertion_results(tmp_path):
+    # "http_transactions[].test_id" e "assertion_results" só existem a
+    # partir do 1.5 — um result.json 1.4 legado precisa continuar sendo
+    # lido, com "" e tupla vazia respectivamente.
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_4())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.http_transactions[0].test_id == ""
+    assert record.assertion_results == ()
+
+
+# --- Leitura: schema 1.5 ----------------------------------------------------------------
+
+
+def test_read_schema_1_5_populates_test_id_and_assertion_results(tmp_path):
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_5())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.schema_version == "1.5"
+    assert record.http_transactions[0].test_id == "test_get_users_success"
+    assert len(record.assertion_results) == 1
+    assertion_result = record.assertion_results[0]
+    assert assertion_result.test_id == "test_get_users_success"
+    assert assertion_result.name == "HTTP status"
+    assert assertion_result.expected == 200
+    assert assertion_result.actual == 200
+    assert assertion_result.status == "PASSED"
+    assert assertion_result.precision == "EXACT"
+    assert "evidência: contract" in assertion_result.reason
+    # Correlação: mesmo test_id na transação e na assertion.
+    assert record.http_transactions[0].test_id == assertion_result.test_id
+
+
+def test_read_schema_1_5_with_no_assertion_results(tmp_path):
+    payload = _valid_payload_1_5(assertion_results=[])
+    path = _write(tmp_path / "run_x" / "result.json", payload)
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.assertion_results == ()
+
+
 # --- Leitura: schema 1.0 (retrocompatibilidade) ----------------------------------------------------------------
 
 
@@ -170,6 +303,7 @@ def test_read_schema_1_0_defaults_workspace_to_none(tmp_path):
     assert record.collection_id == "col-1"
     assert record.success is True
     assert record.skipped_tests == 0
+    assert record.http_transactions == ()
 
 
 # --- Falha de infraestrutura persistida ----------------------------------------------------------------

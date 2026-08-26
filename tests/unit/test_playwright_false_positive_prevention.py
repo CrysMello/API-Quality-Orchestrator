@@ -486,6 +486,119 @@ def test_fully_exact_scenario_is_the_only_case_marked_complete():
 # --- Guarda: warnings nunca somem para "limpar" o resultado -----------------
 
 
+# --- Guarda: instrumentação de AssertionResult (P1.1) nunca enfraquece a ----
+# --- prevenção de falso positivo já provada acima --------------------------
+
+
+def test_assertion_result_recording_never_swallows_or_weakens_a_real_failure(tmp_path, monkeypatch):
+    # A mesma verificação do Caso 1 (401 nunca passa por engano quando o
+    # contrato espera 422), agora com a gravação de AssertionResult ligada
+    # (PLAYWRIGHT_ASSERTION_RESULTS_PATH setado) — prova que instrumentar a
+    # asserção original (try/except ao redor do `assert` inalterado) nunca
+    # relaxa, engole ou substitui o comportamento de falha já garantido.
+    results_path = tmp_path / "assertion-results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+
+    generated = _generate(_GET_USERS, (_status_assertion(422),))
+    assert_no_false_positive_smells(generated.content)  # conteúdo real, nunca um smell proibido
+
+    with pytest.raises(AssertionError):
+        _run_generated_scenario(generated, _FakeResponse(status=401))
+
+    lines = results_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    recorded = json.loads(lines[0])
+    assert recorded["name"] == "HTTP status"
+    assert recorded["expected"] == 422
+    assert recorded["actual"] == 401
+    assert recorded["status"] == "FAILED"
+
+
+def test_assertion_result_recording_never_swallows_or_weakens_a_real_pass(tmp_path, monkeypatch):
+    results_path = tmp_path / "assertion-results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+
+    generated = _generate(_GET_USERS, (_status_assertion(200),))
+    assert_no_false_positive_smells(generated.content)
+
+    _run_generated_scenario(generated, _FakeResponse(status=200))  # nunca levanta
+
+    lines = results_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    recorded = json.loads(lines[0])
+    assert recorded["name"] == "HTTP status"
+    assert recorded["expected"] == 200
+    assert recorded["actual"] == 200
+    assert recorded["status"] == "PASSED"
+
+
+def test_content_type_recording_never_weakens_the_case4_failure(tmp_path, monkeypatch):
+    # Mesmo cenário do Caso 4 (Content-Type incorreto com body aparentemente
+    # JSON) — agora com a gravação ligada: prova que a complementação de
+    # content_type nunca relaxa a falha já garantida.
+    results_path = tmp_path / "assertion-results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+    generated = _generate(
+        _GET_USERS, (_status_assertion(200), _content_type_assertion("application/json"))
+    )
+    assert_no_false_positive_smells(generated.content)
+
+    with pytest.raises(AssertionError):
+        _run_generated_scenario(
+            generated,
+            _FakeResponse(
+                status=200,
+                headers={"content-type": "text/html"},
+                body_text=json.dumps({"id": "1"}),
+            ),
+        )
+
+    recorded = [json.loads(line) for line in results_path.read_text(encoding="utf-8").splitlines()]
+    content_type_entry = next(e for e in recorded if e["name"] == "Content-Type")
+    assert content_type_entry["status"] == "FAILED"
+    assert content_type_entry["expected"] == "application/json"
+    assert content_type_entry["actual"] == "text/html"
+
+
+def test_json_schema_recording_never_weakens_the_case3_failure(tmp_path, monkeypatch):
+    # Mesmo cenário do Caso 3 (schema com formato certo, valor funcional
+    # errado) — a gravação de json_schema (já instrumentado antes desta
+    # complementação) continua reportando corretamente o motivo real da
+    # falha detectada pela Parte 22 (expected_values), sem nenhuma
+    # interferência entre as duas categorias.
+    # "extra" tem um $ref remoto (nunca buscado — Parte 21): a validação
+    # JSON Schema INTEIRA é pulada para este endpoint (mesmo truque do
+    # Caso 3 acima), isolando a falha na checagem de valor esperado (Parte
+    # 22) — senão o próprio jsonschema.validate já rejeitaria o "const"
+    # antes de expected_values ser avaliado.
+    results_path = tmp_path / "assertion-results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+    schema = {
+        "type": "object",
+        "properties": {
+            "status": {"const": "active"},
+            "extra": {"$ref": "https://schemas.exemplo.com/extra.json"},
+        },
+    }
+    generated = _generate(
+        _GET_USERS,
+        (_status_assertion(200), _valid_json_body_assertion(), _schema_assertion(schema)),
+    )
+    assert "jsonschema.validate" not in generated.content  # confirma que foi pulada
+    assert_no_false_positive_smells(generated.content)
+
+    with pytest.raises(pytest.fail.Exception):
+        _run_generated_scenario(
+            generated, _FakeResponse(status=200, body_text=json.dumps({"status": "inactive"}))
+        )
+
+    recorded = [json.loads(line) for line in results_path.read_text(encoding="utf-8").splitlines()]
+    expected_value_entry = next(e for e in recorded if e["name"] == "expected_value:status")
+    assert expected_value_entry["status"] == "FAILED"
+    assert expected_value_entry["expected"] == "active"
+    assert expected_value_entry["actual"] == "inactive"
+
+
 def test_broad_warnings_are_never_silently_removed():
     generated = _generate(_GET_USERS, ())
 

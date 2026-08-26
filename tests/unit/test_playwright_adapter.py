@@ -6,6 +6,7 @@ reais entre os dois motores (skipped, errors vs. failures do JUnit, ausência
 de arquivo de environment).
 """
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -494,3 +495,703 @@ def test_the_four_outcomes_are_all_distinguishable(tmp_path, monkeypatch):
         infra_error.infrastructure_failure.failure_type
         == InfrastructureFailureType.TEST_SUITE_NOT_FOUND
     )
+
+
+# --- P1.2: captura estruturada de transação HTTP -----------------------------------------
+
+
+def _set_transactions(monkeypatch, transactions: list[dict]) -> None:
+    monkeypatch.setenv("FAKE_PYTEST_TRANSACTIONS", json.dumps(transactions))
+
+
+def _get_transaction(**overrides) -> dict:
+    defaults = {
+        "method": "GET",
+        "url": "https://api.exemplo.com/users",
+        "request_headers": {"Accept": "application/json"},
+        "request_body": None,
+        "response_status": 200,
+        "response_headers": {"content-type": "application/json"},
+        "response_body": '{"items": []}',
+    }
+    defaults.update(overrides)
+    return defaults
+
+
+def test_captures_a_get_call(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(monkeypatch, [_get_transaction()])
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert len(result.http_transactions) == 1
+    transaction = result.http_transactions[0]
+    assert transaction.method == "GET"
+    assert transaction.url == "https://api.exemplo.com/users"
+    assert transaction.request_body is None
+
+
+def test_captures_the_test_id_of_the_transaction(tmp_path, monkeypatch):
+    # P1.1: correlação test_id -> request/response depende de
+    # HttpTransaction.test_id ser lido do NDJSON — não só existir no
+    # domínio.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(monkeypatch, [_get_transaction(test_id="test_get_users_success")])
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.http_transactions[0].test_id == "test_get_users_success"
+
+
+def test_captures_a_post_call_with_body(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(
+        monkeypatch,
+        [
+            _get_transaction(
+                method="POST",
+                url="https://api.exemplo.com/users",
+                request_body={"name": "Maria", "active": True},
+                response_status=201,
+                response_body='{"id": 1, "name": "Maria"}',
+            )
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    transaction = result.http_transactions[0]
+    assert transaction.method == "POST"
+    assert transaction.request_body is not None
+    assert "Maria" in transaction.request_body
+    assert "true" in transaction.request_body.lower()
+
+
+def test_captures_the_response(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(
+        monkeypatch, [_get_transaction(response_status=200, response_body='{"items": [1, 2]}')]
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    transaction = result.http_transactions[0]
+    assert transaction.response_status == 200
+    assert transaction.response_body == '{"items": [1, 2]}'
+
+
+def test_captures_request_and_response_headers(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(
+        monkeypatch,
+        [
+            _get_transaction(
+                request_headers={"Accept": "application/json", "X-Trace": "abc"},
+                response_headers={"content-type": "application/json", "x-request-id": "req-1"},
+            )
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    transaction = result.http_transactions[0]
+    request_header_names = {header.name for header in transaction.request_headers}
+    response_header_names = {header.name for header in transaction.response_headers}
+    assert request_header_names == {"Accept", "X-Trace"}
+    assert response_header_names == {"content-type", "x-request-id"}
+    assert (
+        next(h.value for h in transaction.request_headers if h.name == "X-Trace") == "abc"
+    )
+
+
+def test_captures_the_status_code(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(monkeypatch, [_get_transaction(response_status=404)])
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.http_transactions[0].response_status == 404
+
+
+def test_absence_of_request_body_is_preserved_as_none(tmp_path, monkeypatch):
+    # GET/DELETE/HEAD sem data/form/multipart no call site — nunca inventa
+    # um body vazio "{}" no lugar de None.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(monkeypatch, [_get_transaction(method="DELETE", request_body=None)])
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.http_transactions[0].request_body is None
+
+
+def test_captures_multiple_http_calls_in_order(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(
+        monkeypatch,
+        [
+            _get_transaction(method="GET", url="https://api.exemplo.com/users"),
+            _get_transaction(
+                method="POST",
+                url="https://api.exemplo.com/users",
+                request_body={"name": "Maria"},
+                response_status=201,
+            ),
+            _get_transaction(method="DELETE", url="https://api.exemplo.com/users/1", request_body=None),
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert len(result.http_transactions) == 3
+    assert [t.method for t in result.http_transactions] == ["GET", "POST", "DELETE"]
+
+
+def test_no_transactions_file_means_no_http_transactions(tmp_path, monkeypatch):
+    # Sem FAKE_PYTEST_TRANSACTIONS: o fake não escreve o arquivo — mesmo
+    # cenário de uma suíte real sem nenhuma chamada HTTP feita.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.http_transactions == ()
+
+
+# --- P1.2: masking de secret na evidência de transação HTTP ------------------------------
+
+
+def test_known_secret_is_masked_in_request_headers_and_body(tmp_path, monkeypatch):
+    secret_value = "sk_live_super_secret_token_123456"
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(
+        monkeypatch,
+        [
+            _get_transaction(
+                method="POST",
+                request_headers={"Authorization": f"Bearer {secret_value}"},
+                request_body={"password": secret_value},
+            )
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(
+        tests_path=_minimal_suite_dir(tmp_path), known_secret_values=(secret_value,)
+    )
+
+    transaction = result.http_transactions[0]
+    assert secret_value not in transaction.request_body
+    assert all(secret_value not in header.value for header in transaction.request_headers)
+    # mascarado, não removido — prefixo/sufixo do valor original continuam
+    # visíveis, prova de que não foi um apagamento silencioso.
+    auth_header = next(h for h in transaction.request_headers if h.name == "Authorization")
+    assert "****" in auth_header.value
+
+
+def test_known_secret_is_masked_in_response_headers_and_body(tmp_path, monkeypatch):
+    secret_value = "sk_live_super_secret_token_123456"
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(
+        monkeypatch,
+        [
+            _get_transaction(
+                response_headers={"X-Session-Token": secret_value},
+                response_body=json.dumps({"token": secret_value}),
+            )
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(
+        tests_path=_minimal_suite_dir(tmp_path), known_secret_values=(secret_value,)
+    )
+
+    transaction = result.http_transactions[0]
+    assert secret_value not in transaction.response_body
+    assert all(secret_value not in header.value for header in transaction.response_headers)
+
+
+def test_known_secret_is_masked_in_the_url(tmp_path, monkeypatch):
+    secret_value = "sk_live_super_secret_token_123456"
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(
+        monkeypatch,
+        [_get_transaction(url=f"https://api.exemplo.com/users?token={secret_value}")],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(
+        tests_path=_minimal_suite_dir(tmp_path), known_secret_values=(secret_value,)
+    )
+
+    assert secret_value not in result.http_transactions[0].url
+
+
+def test_value_not_in_known_secret_values_is_never_masked_in_transactions(tmp_path, monkeypatch):
+    # "não mascarar indiscriminadamente": um valor que não está na lista de
+    # secrets conhecidos continua visível na evidência.
+    public_value = "customer-id-nao-e-secret"
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(monkeypatch, [_get_transaction(request_body={"customerId": public_value})])
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path), known_secret_values=())
+
+    assert public_value in result.http_transactions[0].request_body
+
+
+def test_malformed_transaction_line_is_skipped_without_breaking_the_run(tmp_path, monkeypatch):
+    # Robustez: uma linha NDJSON corrompida (ex.: escrita interrompida por
+    # um crash no meio da suíte) nunca derruba a execução nem as demais
+    # transações válidas na mesma linha por linha.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    valid_entry = json.dumps(_get_transaction(method="GET"))
+    monkeypatch.setenv(
+        "FAKE_PYTEST_RAW_TRANSACTIONS",
+        f"{valid_entry}\nisto não é uma linha JSON válida\n",
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.success is True  # a linha corrompida nunca vira infrastructure_failure
+    assert len(result.http_transactions) == 1
+    assert result.http_transactions[0].method == "GET"
+
+
+def test_transaction_entry_missing_required_field_is_skipped(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    incomplete_entry = json.dumps({"method": "GET"})  # sem url/response_status etc.
+    valid_entry = json.dumps(_get_transaction(method="POST"))
+    monkeypatch.setenv(
+        "FAKE_PYTEST_RAW_TRANSACTIONS", f"{incomplete_entry}\n{valid_entry}\n"
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert len(result.http_transactions) == 1
+    assert result.http_transactions[0].method == "POST"
+
+
+# --- P1.1 (detalhamento de assertions): captura de assertion_results ------------------------
+
+
+def _set_assertion_results(monkeypatch, results: list[dict]) -> None:
+    monkeypatch.setenv("FAKE_PYTEST_ASSERTION_RESULTS", json.dumps(results))
+
+
+def _assertion_result_entry(**overrides) -> dict:
+    defaults = {
+        "test_id": "test_post_users_success",
+        "name": "HTTP status",
+        "expected": 201,
+        "actual": 201,
+        "status": "PASSED",
+        "precision": "EXACT",
+        "reason": "Status HTTP 201 documentado explicitamente para este cenário "
+        "(evidência: contract).",
+    }
+    defaults.update(overrides)
+    return defaults
+
+
+def test_http_status_passing_is_captured(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_assertion_results(monkeypatch, [_assertion_result_entry()])
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert len(result.assertion_results) == 1
+    entry = result.assertion_results[0]
+    assert entry.name == "HTTP status"
+    assert entry.expected == 201
+    assert entry.actual == 201
+    assert entry.status == "PASSED"
+
+
+def test_http_status_failing_is_captured(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    _set_assertion_results(
+        monkeypatch,
+        [
+            _assertion_result_entry(
+                expected=201,
+                actual=500,
+                status="FAILED",
+                reason="Status HTTP 201 documentado explicitamente para este cenário "
+                "(evidência: contract).",
+            )
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    entry = result.assertion_results[0]
+    assert entry.status == "FAILED"
+    assert entry.expected == 201
+    assert entry.actual == 500
+    # expected e actual diferentes — exatamente o que se espera de uma falha.
+    assert entry.expected != entry.actual
+
+
+def test_required_field_present_is_captured(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_assertion_results(
+        monkeypatch,
+        [
+            _assertion_result_entry(
+                name="required_field:id",
+                expected="presente",
+                actual="presente",
+                status="PASSED",
+                reason="1 campo(s) declarado(s) como 'required' no schema documentado "
+                "(evidência: contract).",
+            )
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    entry = result.assertion_results[0]
+    assert entry.name == "required_field:id"
+    assert entry.expected == "presente"
+    assert entry.actual == "presente"
+    assert entry.status == "PASSED"
+
+
+def test_required_field_absent_is_captured(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    _set_assertion_results(
+        monkeypatch,
+        [
+            _assertion_result_entry(
+                name="required_field:id",
+                expected="presente",
+                actual="ausente",
+                status="FAILED",
+                reason="1 campo(s) declarado(s) como 'required' no schema documentado "
+                "(evidência: contract).",
+            )
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    entry = result.assertion_results[0]
+    assert entry.expected == "presente"
+    assert entry.actual == "ausente"
+    assert entry.status == "FAILED"
+
+
+def test_schema_valid_is_captured(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_assertion_results(
+        monkeypatch,
+        [
+            _assertion_result_entry(
+                name="json_schema",
+                expected="válido conforme schema documentado",
+                actual="válido",
+                status="PASSED",
+                precision="EXACT",
+                reason="Validação estrutural completa contra o schema documentado "
+                "(biblioteca jsonschema; evidência: contract).",
+            )
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    entry = result.assertion_results[0]
+    assert entry.name == "json_schema"
+    assert entry.status == "PASSED"
+    assert entry.actual == "válido"
+
+
+def test_schema_invalid_is_captured(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    _set_assertion_results(
+        monkeypatch,
+        [
+            _assertion_result_entry(
+                name="json_schema",
+                expected="válido conforme schema documentado",
+                actual="inválido: 'id' is a required property",
+                status="FAILED",
+                precision="EXACT",
+                reason="Validação estrutural completa contra o schema documentado "
+                "(biblioteca jsonschema; evidência: contract).",
+            )
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    entry = result.assertion_results[0]
+    assert entry.status == "FAILED"
+    assert "required property" in entry.actual
+
+
+def test_precision_exact_is_preserved(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_assertion_results(monkeypatch, [_assertion_result_entry(precision="EXACT")])
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.assertion_results[0].precision == "EXACT"
+
+
+def test_precision_derived_is_preserved(tmp_path, monkeypatch):
+    # DERIVED existe hoje na classificação de expected_values (enum de 2+
+    # valores) — não instrumentado ainda com _record_assertion_result nesta
+    # parte (ver limitações), então este teste valida o pipeline de
+    # captura/persistência/masking em si, não uma chamada gerada de verdade.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_assertion_results(
+        monkeypatch,
+        [
+            _assertion_result_entry(
+                name="expected_values",
+                expected=("active", "inactive", "pending"),
+                actual="active",
+                status="PASSED",
+                precision="DERIVED",
+                reason="2 campo(s) com conjunto de valores permitidos derivado do 'enum' "
+                "documentado no schema, sem valor único garantido.",
+            )
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.assertion_results[0].precision == "DERIVED"
+
+
+def test_precision_broad_is_preserved(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_assertion_results(
+        monkeypatch,
+        [
+            _assertion_result_entry(
+                name="HTTP status",
+                expected="resposta presente",
+                actual="presente",
+                status="PASSED",
+                precision="BROAD",
+                reason="Nenhuma evidência de status disponível (estratégia de teste, "
+                "Postman, OpenAPI, contrato ou exemplo); mantida a validação aproximada "
+                "de que a resposta existe.",
+            )
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.assertion_results[0].precision == "BROAD"
+
+
+def test_reason_reflects_a_real_source(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_assertion_results(
+        monkeypatch,
+        [_assertion_result_entry(reason="Status HTTP 201 documentado explicitamente para "
+        "este cenário (evidência: contract).")],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    # A razão sempre aponta a fonte real (evidência: contract) — nunca um
+    # texto genérico tipo "porque sim".
+    assert "evidência: contract" in result.assertion_results[0].reason
+
+
+def test_absence_of_source_never_fabricates_a_reason(tmp_path, monkeypatch):
+    # BROAD por ausência total de evidência: reason explica a AUSÊNCIA,
+    # nunca inventa uma justificativa como se houvesse fonte.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_assertion_results(
+        monkeypatch,
+        [
+            _assertion_result_entry(
+                precision="BROAD",
+                reason="Nenhuma evidência de status disponível (estratégia de teste, "
+                "Postman, OpenAPI, contrato ou exemplo); mantida a validação aproximada "
+                "de que a resposta existe.",
+            )
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    reason = result.assertion_results[0].reason
+    assert "Nenhuma evidência" in reason
+    assert "evidência: contract" not in reason
+
+
+def test_multiple_assertion_results_in_order(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_assertion_results(
+        monkeypatch,
+        [
+            _assertion_result_entry(name="HTTP status"),
+            _assertion_result_entry(name="required_field:id"),
+            _assertion_result_entry(name="json_schema"),
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert [r.name for r in result.assertion_results] == [
+        "HTTP status",
+        "required_field:id",
+        "json_schema",
+    ]
+
+
+def test_no_assertion_results_file_means_empty_tuple(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.assertion_results == ()
+
+
+def test_malformed_assertion_result_line_is_skipped(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    valid_entry = json.dumps(_assertion_result_entry())
+    monkeypatch.setenv(
+        "FAKE_PYTEST_RAW_ASSERTION_RESULTS", f"{valid_entry}\nisto não é json\n"
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.success is True
+    assert len(result.assertion_results) == 1
+
+
+# --- Correlação test_id -> request/response -> assertions -----------------------------------
+
+
+def test_test_id_correlates_transaction_and_assertion(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(
+        monkeypatch,
+        [
+            _get_transaction(
+                method="POST",
+                url="https://api.exemplo.com/users",
+                test_id="test_post_users_success",
+            )
+        ],
+    )
+    _set_assertion_results(monkeypatch, [_assertion_result_entry()])
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.http_transactions[0].test_id == result.assertion_results[0].test_id
+    assert result.assertion_results[0].test_id == "test_post_users_success"
+
+
+# --- Masking de secret em assertion_results --------------------------------------------------
+
+
+def test_known_secret_is_masked_in_actual(tmp_path, monkeypatch):
+    secret_value = "sk_live_super_secret_token_123456"
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    _set_assertion_results(
+        monkeypatch,
+        [
+            _assertion_result_entry(
+                name="json_schema",
+                actual=f"inválido: token esperado {secret_value}",
+                status="FAILED",
+            )
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(
+        tests_path=_minimal_suite_dir(tmp_path), known_secret_values=(secret_value,)
+    )
+
+    assert secret_value not in str(result.assertion_results[0].actual)
+
+
+def test_known_secret_is_masked_in_reason(tmp_path, monkeypatch):
+    secret_value = "sk_live_super_secret_token_123456"
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_assertion_results(
+        monkeypatch,
+        [_assertion_result_entry(reason=f"Valor documentado no contrato: {secret_value}.")],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(
+        tests_path=_minimal_suite_dir(tmp_path), known_secret_values=(secret_value,)
+    )
+
+    assert secret_value not in result.assertion_results[0].reason
+
+
+def test_no_known_secret_leaks_in_any_assertion_result_field(tmp_path, monkeypatch):
+    secret_value = "sk_live_super_secret_token_123456"
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    _set_assertion_results(
+        monkeypatch,
+        [
+            _assertion_result_entry(
+                name=f"field:{secret_value}",
+                expected=secret_value,
+                actual=f"inválido: {secret_value}",
+                reason=f"Documentado no contrato como {secret_value}.",
+            )
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(
+        tests_path=_minimal_suite_dir(tmp_path), known_secret_values=(secret_value,)
+    )
+
+    entry = result.assertion_results[0]
+    assert secret_value not in entry.name
+    assert secret_value not in str(entry.expected)
+    assert secret_value not in str(entry.actual)
+    assert secret_value not in entry.reason
+
+
+def test_value_not_in_known_secret_values_is_never_masked_in_assertion_results(
+    tmp_path, monkeypatch
+):
+    public_value = "active"
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_assertion_results(monkeypatch, [_assertion_result_entry(actual=public_value)])
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path), known_secret_values=())
+
+    assert result.assertion_results[0].actual == public_value

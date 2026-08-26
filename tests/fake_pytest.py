@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import time
@@ -10,9 +11,66 @@ def _extract_report_path(argv: list) -> str | None:
     return None
 
 
+def _maybe_write_http_transactions() -> None:
+    # P1.2: simula o que o api_context gerado escreveria — controlado por
+    # FAKE_PYTEST_TRANSACTIONS (lista de dicts em JSON), independente do
+    # FAKE_PYTEST_MODE, pra testar o parsing/masking do PlaywrightAdapter
+    # sem depender do playwright real. Ausente = nenhuma chamada HTTP
+    # simulada (igual a uma suíte sem nenhum api_context.get/post/...).
+    #
+    # FAKE_PYTEST_RAW_TRANSACTIONS (texto verbatim, sem passar por
+    # json.loads) existe à parte só pra testar o adapter lendo uma linha
+    # NDJSON estruturalmente inválida — nunca usado nos demais cenários.
+    transactions_path = os.environ.get("PLAYWRIGHT_HTTP_TRANSACTIONS_PATH")
+    if not transactions_path:
+        return
+
+    raw_verbatim = os.environ.get("FAKE_PYTEST_RAW_TRANSACTIONS")
+    if raw_verbatim is not None:
+        with open(transactions_path, "a", encoding="utf-8") as handle:
+            handle.write(raw_verbatim)
+        return
+
+    raw_transactions = os.environ.get("FAKE_PYTEST_TRANSACTIONS")
+    if not raw_transactions:
+        return
+    transactions = json.loads(raw_transactions)
+    with open(transactions_path, "a", encoding="utf-8") as handle:
+        handle.writelines(
+            json.dumps(entry, ensure_ascii=False) + "\n" for entry in transactions
+        )
+
+
+def _maybe_write_assertion_results() -> None:
+    # P1.1 (detalhamento de assertions): mesmo raciocínio de
+    # _maybe_write_http_transactions, para o NDJSON de resultado de
+    # assertion (name/expected/actual/status/precision/reason) — controlado
+    # por FAKE_PYTEST_ASSERTION_RESULTS (lista de dicts em JSON) ou
+    # FAKE_PYTEST_RAW_ASSERTION_RESULTS (texto verbatim, pra testar linha
+    # corrompida).
+    results_path = os.environ.get("PLAYWRIGHT_ASSERTION_RESULTS_PATH")
+    if not results_path:
+        return
+
+    raw_verbatim = os.environ.get("FAKE_PYTEST_RAW_ASSERTION_RESULTS")
+    if raw_verbatim is not None:
+        with open(results_path, "a", encoding="utf-8") as handle:
+            handle.write(raw_verbatim)
+        return
+
+    raw_results = os.environ.get("FAKE_PYTEST_ASSERTION_RESULTS")
+    if not raw_results:
+        return
+    results = json.loads(raw_results)
+    with open(results_path, "a", encoding="utf-8") as handle:
+        handle.writelines(json.dumps(entry, ensure_ascii=False) + "\n" for entry in results)
+
+
 def main() -> int:
     mode = os.environ.get("FAKE_PYTEST_MODE", "success")
     report_path = _extract_report_path(sys.argv)
+    _maybe_write_http_transactions()
+    _maybe_write_assertion_results()
 
     if mode == "slow":
         time.sleep(float(os.environ.get("FAKE_PYTEST_SLEEP_SECONDS", "5")))

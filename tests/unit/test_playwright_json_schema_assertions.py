@@ -30,6 +30,7 @@ from api_quality_agent.generators.playwright import (
 )
 from api_quality_agent.generators.playwright.playwright_endpoint_test_generator import (
     _BodyJsonResolution,
+    _RECORD_ASSERTION_RESULT_SOURCE,
     _resolve_json_schema_assertion,
 )
 from api_quality_agent.parsers import PostmanCollectionParser
@@ -46,7 +47,7 @@ def _schema_assertion(schema: dict, origin: str = "contract") -> AssertionDefini
     )
 
 
-def _resolve(schema: dict):
+def _resolve(schema: dict, test_id: str = "test_x"):
     strategy = TestStrategy(
         endpoint_source="GET /x",
         assertions=(_schema_assertion(schema),),
@@ -57,16 +58,23 @@ def _resolve(schema: dict):
     body_resolution = _BodyJsonResolution(
         lines=("    body = ...\n",), docstring_note="", warning=None, extra_imports=frozenset()
     )
-    return _resolve_json_schema_assertion(strategy, body_resolution)
+    return _resolve_json_schema_assertion(strategy, body_resolution, test_id)
 
 
 def _build_validator(schema: dict):
     # Mesmo texto exato que iria para o arquivo gerado (via
     # _resolve_json_schema_assertion), só envolvido numa função para poder
-    # ser chamado com um `body` de teste — nunca uma cópia divergente.
+    # ser chamado com um `body` de teste — nunca uma cópia divergente. O
+    # helper record_assertion_result (P1.1) também é o texto real do
+    # gerador — nunca um stub que fingisse gravar.
     resolution = _resolve(schema)
     assert resolution.lines, "schema deveria gerar validação (sem $ref não suportado)"
-    source = "import jsonschema\nimport pytest\n\n\ndef _run(body):\n" + "".join(resolution.lines)
+    source = (
+        "import json\nimport os\nimport jsonschema\nimport pytest\n\n\n"
+        + _RECORD_ASSERTION_RESULT_SOURCE
+        + "\n\ndef _run(body):\n"
+        + "".join(resolution.lines)
+    )
     namespace: dict = {}
     exec(source, namespace)  # noqa: S102 - texto do próprio gerador, não input externo
     return namespace["_run"]
@@ -307,8 +315,12 @@ def test_json_schema_never_replaces_the_earlier_assertions():
     assert "assert response.status == 200" in generated.content
     assert 'content_type.split(";")[0].strip().lower() == "application/json"' in generated.content
     assert "assert isinstance(body, dict)" in generated.content
-    assert "_assert_required_field_present(body, ('id',))" in generated.content
-    assert "_assert_field_type(body, ('id',), 'string', False)" in generated.content
+    assert "_assert_required_field_present(body, ('id',), 'test_get_users_success'" in (
+        generated.content
+    )
+    assert "_assert_field_type(body, ('id',), 'string', False, 'test_get_users_success'" in (
+        generated.content
+    )
     assert "jsonschema.validate" in generated.content
     ast.parse(generated.content)
 

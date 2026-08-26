@@ -1,3 +1,5 @@
+import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -7,14 +9,21 @@ from pathlib import Path
 
 from api_quality_agent.domain.exceptions import InputError
 from api_quality_agent.domain.models import (
+    AssertionResult,
     ExecutionResult,
+    HttpTransaction,
+    HttpTransactionHeader,
     InfrastructureFailure,
     InfrastructureFailureType,
     TestFailure,
 )
 from api_quality_agent.domain.policies import ensure_non_empty_id
 from api_quality_agent.ports.outbound.collection_runner import DEFAULT_RUN_TIMEOUT_SECONDS
-from api_quality_agent.shared import mask_all_occurrences
+from api_quality_agent.shared import (
+    ASSERTION_RESULTS_PATH_ENV_VAR,
+    HTTP_TRANSACTIONS_PATH_ENV_VAR,
+    mask_all_occurrences,
+)
 
 # P0.1: equivalente ao NewmanAdapter para a suíte Playwright já gerada por
 # este projeto (PlaywrightEndpointTestGenerator/DefaultPlaywrightTestSuiteBuilder)
@@ -28,6 +37,15 @@ _JUNIT_REPORT_FILENAME = "pytest-junit-report.xml"
 # estável e documentado pelo próprio pytest, nunca reaproveitado para outro
 # significado.
 _PYTEST_EXIT_CODE_NO_TESTS_COLLECTED = 5
+# P1.2: arquivo NDJSON (uma transação HTTP por linha) que o api_context do
+# conftest.py gerado escreve, via HTTP_TRANSACTIONS_PATH_ENV_VAR — mesma
+# pasta temporária do relatório JUnit, removida no fim do run() igual a ele.
+_HTTP_TRANSACTIONS_FILENAME = "http-transactions.ndjson"
+# P1.1 (detalhamento de assertions): arquivo NDJSON (uma assertion
+# realmente checada por linha) que o helper _record_assertion_result
+# embutido em cada arquivo de teste gerado escreve, via
+# ASSERTION_RESULTS_PATH_ENV_VAR — mesma pasta temporária, mesmo raciocínio.
+_ASSERTION_RESULTS_FILENAME = "assertion-results.ndjson"
 
 
 class _JunitReportNotGeneratedError(Exception):
@@ -89,14 +107,20 @@ class PlaywrightAdapter:
 
         # O relatório oficial é o arquivo exportado via --junitxml (nativo do
         # pytest, sem plugin/dependência extra), nunca o stdout do processo —
-        # mesmo raciocínio do NewmanAdapter com --reporter-json-export.
+        # mesmo raciocínio do NewmanAdapter com --reporter-json-export. A
+        # captura de transação HTTP (P1.2) segue o MESMO raciocínio: outro
+        # arquivo na mesma pasta temporária, nunca stdout.
         report_dir = tempfile.mkdtemp(prefix="api-quality-agent-pytest-")
         report_path = str(Path(report_dir) / _JUNIT_REPORT_FILENAME)
+        transactions_path = str(Path(report_dir) / _HTTP_TRANSACTIONS_FILENAME)
+        assertion_results_path = str(Path(report_dir) / _ASSERTION_RESULTS_FILENAME)
         try:
             return self._run_with_report_export(
                 tests_path=tests_path,
                 timeout_seconds=timeout_seconds,
                 report_path=report_path,
+                transactions_path=transactions_path,
+                assertion_results_path=assertion_results_path,
                 start=start,
                 known_secret_values=known_secret_values,
             )
@@ -109,6 +133,8 @@ class PlaywrightAdapter:
         tests_path: str,
         timeout_seconds: float,
         report_path: str,
+        transactions_path: str,
+        assertion_results_path: str,
         start: float,
         known_secret_values: tuple[str, ...],
     ) -> ExecutionResult:
@@ -119,6 +145,18 @@ class PlaywrightAdapter:
             "--junitxml",
             report_path,
         ]
+        # HTTP_TRANSACTIONS_PATH_ENV_VAR/ASSERTION_RESULTS_PATH_ENV_VAR nunca
+        # substituem o ambiente herdado (AQO_*, PATH etc.) — só acrescentam
+        # variáveis de wiring interno, nunca uma credencial. O código gerado
+        # lê essas variáveis pra saber onde registrar cada transação HTTP
+        # (P1.2) / resultado de assertion (P1.1); ausentes, a captura
+        # correspondente fica desligada sem erro (ver _render_conftest e
+        # _RECORD_ASSERTION_RESULT_SOURCE).
+        subprocess_env = {
+            **os.environ,
+            HTTP_TRANSACTIONS_PATH_ENV_VAR: transactions_path,
+            ASSERTION_RESULTS_PATH_ENV_VAR: assertion_results_path,
+        }
 
         try:
             completed = subprocess.run(  # noqa: S603 - argv explícito, shell=False
@@ -127,6 +165,7 @@ class PlaywrightAdapter:
                 text=True,
                 timeout=timeout_seconds,
                 shell=False,
+                env=subprocess_env,
             )
         except FileNotFoundError:
             return _infrastructure_result(
@@ -138,6 +177,10 @@ class PlaywrightAdapter:
                 duration=time.monotonic() - start,
             )
         except subprocess.TimeoutExpired as exc:
+            # O processo chegou a rodar (e pode ter feito chamadas HTTP/
+            # checado assertions antes do timeout) — evidência parcial é
+            # lida do mesmo jeito que uma execução completa, nunca
+            # descartada só porque o processo não terminou a tempo.
             return _infrastructure_result(
                 tests_path,
                 InfrastructureFailureType.TIMEOUT,
@@ -145,6 +188,10 @@ class PlaywrightAdapter:
                 duration=time.monotonic() - start,
                 stdout=mask_all_occurrences(_decode(exc.stdout), known_secret_values),
                 stderr=mask_all_occurrences(_decode(exc.stderr), known_secret_values),
+                http_transactions=_read_http_transactions(transactions_path, known_secret_values),
+                assertion_results=_read_assertion_results(
+                    assertion_results_path, known_secret_values
+                ),
             )
         except OSError as exc:
             return _infrastructure_result(
@@ -161,6 +208,8 @@ class PlaywrightAdapter:
         # retorno abaixo — nunca um valor secret cru chega ao chamador.
         stdout = mask_all_occurrences(completed.stdout or "", known_secret_values)
         stderr = mask_all_occurrences(completed.stderr or "", known_secret_values)
+        http_transactions = _read_http_transactions(transactions_path, known_secret_values)
+        assertion_results = _read_assertion_results(assertion_results_path, known_secret_values)
 
         if completed.returncode == _PYTEST_EXIT_CODE_NO_TESTS_COLLECTED:
             # "Diferenciar: nenhum teste coletado" — nunca reportado como um
@@ -176,6 +225,8 @@ class PlaywrightAdapter:
                 stdout=stdout,
                 stderr=stderr,
                 exit_code=completed.returncode,
+                http_transactions=http_transactions,
+                assertion_results=assertion_results,
             )
 
         try:
@@ -197,6 +248,8 @@ class PlaywrightAdapter:
                 ),
                 stdout=stdout,
                 stderr=stderr,
+                http_transactions=http_transactions,
+                assertion_results=assertion_results,
             )
 
         failures = tuple(
@@ -216,6 +269,8 @@ class PlaywrightAdapter:
             success=completed.returncode == 0,
             exit_code=completed.returncode,
             duration_seconds=duration,
+            http_transactions=http_transactions,
+            assertion_results=assertion_results,
             # total_requests e total_assertions recebem o MESMO número: o
             # JUnit do pytest só sabe contar "testes" (uma função de teste),
             # sem a granularidade de "requisição" vs. "assertion" que o
@@ -242,11 +297,16 @@ def _infrastructure_result(
     stdout: str = "",
     stderr: str = "",
     exit_code: int | None = None,
+    http_transactions: tuple[HttpTransaction, ...] = (),
+    assertion_results: tuple[AssertionResult, ...] = (),
 ) -> ExecutionResult:
     # exit_code=None é o caso comum (nenhum processo chegou a rodar de
     # verdade: caminho inválido, executável ausente); NO_TESTS_COLLECTED é a
     # única chamada que informa um exit_code real (5), preservando-o como
-    # pedido — nunca descartado silenciosamente.
+    # pedido — nunca descartado silenciosamente. http_transactions=()/
+    # assertion_results=() são o caso comum pelo mesmo motivo (processo
+    # nunca rodou de verdade); TIMEOUT e NO_TESTS_COLLECTED passam
+    # evidência real quando ela existe.
     return ExecutionResult(
         collection_source=tests_path,
         success=False,
@@ -260,6 +320,8 @@ def _infrastructure_result(
         infrastructure_failure=InfrastructureFailure(failure_type=failure_type, message=message),
         stdout=stdout,
         stderr=stderr,
+        http_transactions=http_transactions,
+        assertion_results=assertion_results,
     )
 
 
@@ -351,3 +413,164 @@ def _safe_int(value: str | None) -> int:
         return int(value)
     except ValueError:
         return 0
+
+
+# --- P1.2: transações HTTP (NDJSON escrito pelo api_context gerado) ---------
+
+
+def _read_http_transactions(
+    transactions_path: str, known_secret_values: tuple[str, ...]
+) -> tuple[HttpTransaction, ...]:
+    # Arquivo ausente (nenhuma chamada HTTP feita, ou suíte gerada antes da
+    # P1.2, sem a captura no conftest.py) nunca é erro — só significa
+    # "nenhuma transação pra reportar", igual a um relatório JUnit sem
+    # falhas.
+    path = Path(transactions_path)
+    if not path.exists():
+        return ()
+
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+
+    transactions: list[HttpTransaction] = []
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            # Uma linha corrompida (ex.: escrita interrompida por um crash
+            # no meio da suíte) nunca invalida as demais nem o resultado da
+            # execução — evidência é best-effort, nunca um requisito
+            # funcional do run em si.
+            continue
+        transaction = _parse_transaction_entry(entry, known_secret_values)
+        if transaction is not None:
+            transactions.append(transaction)
+    return tuple(transactions)
+
+
+def _parse_transaction_entry(
+    entry: object, known_secret_values: tuple[str, ...]
+) -> HttpTransaction | None:
+    if not isinstance(entry, dict):
+        return None
+    try:
+        return HttpTransaction(
+            # test_id nunca carrega dado do usuário (é sempre o nome da
+            # função de teste, conhecido em tempo de geração) — nunca
+            # precisa de mascaramento, mesmo critério de
+            # _parse_assertion_result_entry.
+            test_id=str(entry.get("test_id") or ""),
+            method=str(entry["method"]),
+            url=mask_all_occurrences(str(entry["url"]), known_secret_values),
+            request_headers=_masked_headers(entry.get("request_headers"), known_secret_values),
+            request_body=_masked_body(entry.get("request_body"), known_secret_values),
+            response_status=int(entry["response_status"]),
+            response_headers=_masked_headers(entry.get("response_headers"), known_secret_values),
+            response_body=_masked_body(entry.get("response_body"), known_secret_values),
+        )
+    except (KeyError, TypeError, ValueError):
+        # Entrada estruturalmente inválida (campo obrigatório ausente/tipo
+        # errado) — descartada, nunca inventada, mesmo critério de linha
+        # corrompida acima.
+        return None
+
+
+def _masked_headers(
+    raw_headers: object, known_secret_values: tuple[str, ...]
+) -> tuple[HttpTransactionHeader, ...]:
+    if not isinstance(raw_headers, dict):
+        return ()
+    return tuple(
+        HttpTransactionHeader(
+            name=str(name), value=mask_all_occurrences(str(value), known_secret_values)
+        )
+        for name, value in raw_headers.items()
+    )
+
+
+def _masked_body(raw_body: object, known_secret_values: tuple[str, ...]) -> str | None:
+    # request_body/response_body chegam do conftest.py gerado já
+    # json-seguros (_json_safe lá), mas podem ser dict/list/escalar em vez
+    # de string — normalizados para texto AQUI (nunca no conftest.py, que
+    # não sabe o que é secret) para que o mascaramento sempre opere sobre
+    # uma string simples, cobrindo o body inteiro independente do quão
+    # aninhado um valor secret esteja.
+    if raw_body is None:
+        return None
+    text = raw_body if isinstance(raw_body, str) else json.dumps(raw_body, ensure_ascii=False)
+    return mask_all_occurrences(text, known_secret_values)
+
+
+# --- P1.1 (detalhamento de assertions): resultado de cada assertion --------
+
+
+def _read_assertion_results(
+    results_path: str, known_secret_values: tuple[str, ...]
+) -> tuple[AssertionResult, ...]:
+    # Mesmo raciocínio de _read_http_transactions: arquivo ausente (suíte
+    # sem nenhuma assertion registrada, ou gerada antes da P1.1) nunca é
+    # erro, só "nada pra reportar".
+    path = Path(results_path)
+    if not path.exists():
+        return ()
+
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+
+    results: list[AssertionResult] = []
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            # Mesmo critério de linha corrompida de _read_http_transactions
+            # — nunca invalida o resto, evidência é best-effort.
+            continue
+        result = _parse_assertion_result_entry(entry, known_secret_values)
+        if result is not None:
+            results.append(result)
+    return tuple(results)
+
+
+def _parse_assertion_result_entry(
+    entry: object, known_secret_values: tuple[str, ...]
+) -> AssertionResult | None:
+    if not isinstance(entry, dict):
+        return None
+    try:
+        return AssertionResult(
+            test_id=str(entry["test_id"]),
+            name=mask_all_occurrences(str(entry["name"]), known_secret_values),
+            expected=_masked_scalar(entry["expected"], known_secret_values),
+            actual=_masked_scalar(entry["actual"], known_secret_values),
+            status=str(entry["status"]),
+            precision=str(entry["precision"]),
+            reason=mask_all_occurrences(str(entry["reason"]), known_secret_values),
+        )
+    except (KeyError, TypeError, ValueError):
+        # Entrada estruturalmente inválida — descartada, nunca inventada,
+        # mesmo critério de _parse_transaction_entry.
+        return None
+
+
+def _masked_scalar(value: object, known_secret_values: tuple[str, ...]) -> object:
+    # expected/actual normalmente são escalares simples (status HTTP,
+    # "presente"/"ausente", "válido"/"inválido: ...") — preserva o tipo
+    # original (int/float/bool/None) quando não há nada pra mascarar;
+    # string é mascarada; qualquer outra coisa (dict/list, não esperado
+    # aqui mas nunca assumido impossível) vira texto mascarado, nunca
+    # perdido silenciosamente.
+    if isinstance(value, str):
+        return mask_all_occurrences(value, known_secret_values)
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    return mask_all_occurrences(json.dumps(value, ensure_ascii=False), known_secret_values)
