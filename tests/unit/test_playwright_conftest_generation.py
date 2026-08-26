@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,15 @@ from api_quality_agent.generators.playwright import (
 )
 
 _FAKE_PLAYWRIGHT_ROOT = Path(__file__).resolve().parent.parent / "fake_playwright_package"
+
+
+def _fake_request(test_name: str = "fake_test"):
+    # P1.3 (Trace em falha): api_context agora recebe `request` (usado só
+    # para decidir PASS/FAIL do teste ao finalizar o trace — ver
+    # _finish_trace) — um objeto mínimo com `.node.name` é suficiente para
+    # estes testes, que nunca setam PLAYWRIGHT_TRACE_DIR (feature
+    # desligada, _finish_trace retorna antes de tocar em `request`).
+    return types.SimpleNamespace(node=types.SimpleNamespace(name=test_name))
 
 
 def _endpoint_test(**overrides) -> GeneratedEndpointTest:
@@ -203,7 +213,7 @@ def test_api_context_fixture_yields_a_context_and_disposes_it(tmp_path, fake_pla
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    generator = module.api_context.__wrapped__()
+    generator = module.api_context.__wrapped__(_fake_request())
     context = next(generator)
 
     assert isinstance(context, fake_playwright.APIRequestContext)
@@ -226,7 +236,7 @@ def test_api_context_disposes_even_when_the_test_raises(tmp_path, fake_playwrigh
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    generator = module.api_context.__wrapped__()
+    generator = module.api_context.__wrapped__(_fake_request())
     context = next(generator)
 
     # Simula o pytest propagando uma falha de teste para dentro do gerador
@@ -247,7 +257,7 @@ def _load_wrapped_context(tmp_path: Path, module_name: str):
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    generator = module.api_context.__wrapped__()
+    generator = module.api_context.__wrapped__(_fake_request())
     return generator, next(generator)
 
 

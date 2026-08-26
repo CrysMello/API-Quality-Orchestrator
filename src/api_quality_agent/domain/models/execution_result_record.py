@@ -5,6 +5,7 @@ from api_quality_agent.domain.models.assertion_result import AssertionResult
 from api_quality_agent.domain.models.http_transaction import HttpTransaction
 from api_quality_agent.domain.models.infrastructure_failure import InfrastructureFailure
 from api_quality_agent.domain.models.test_failure import TestFailure
+from api_quality_agent.domain.models.trace_artifact import TraceArtifact
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,9 @@ class ExecutionResultRecord:
     # P1.1 (detalhamento de assertions): só existe a partir do schema 1.5 —
     # mesmo raciocínio aditivo.
     assertion_results: tuple[AssertionResult, ...] = ()
+    # P1.3 (Trace em falha): só existe a partir do schema 1.6 — mesmo
+    # raciocínio aditivo.
+    trace_artifacts: tuple[TraceArtifact, ...] = ()
 
     @property
     def passed_assertions(self) -> int:

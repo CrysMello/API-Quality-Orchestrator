@@ -1,12 +1,14 @@
-"""Caracterização do schema de `result.json` (schema_version "1.5") exatamente
+"""Caracterização do schema de `result.json` (schema_version "1.6") exatamente
 como ele é serializado hoje.
 
-"1.5" foi introduzida na P1.1 seguinte — detalhamento de assertions (aditivo:
-`assertion_results` + `http_transactions[].test_id`, pra correlação test_id
--> request/response -> assertions) — bumps anteriores foram "1.4" (P1.2,
-http_transactions), "1.3" (P1.1/skipped_tests, summary.skipped) e "1.2"
-(test_failures). A Fase 9 do plano Playwright ainda vai introduzir o campo
-aditivo `tool` e bumpar de novo, deliberadamente.
+"1.6" foi introduzida no bloco P1.3 seguinte — Trace em falha (aditivo:
+`trace_artifacts`, referência a um Playwright Trace .zip persistido
+externamente, correlacionado por test_id) — bumps anteriores foram "1.5"
+(detalhamento de assertions: `assertion_results` + `http_transactions[].
+test_id`), "1.4" (P1.2, http_transactions), "1.3" (P1.1/skipped_tests,
+summary.skipped) e "1.2" (test_failures). A Fase 9 do plano Playwright
+ainda vai introduzir o campo aditivo `tool` e bumpar de novo,
+deliberadamente.
 
 Ver tests/characterization/README.md: se este teste quebrar durante uma
 dessas mudanças planejadas, é esperado — atualize-o conscientemente. Se
@@ -37,8 +39,8 @@ def _build_result(**overrides: object) -> ExecutionResult:
     return ExecutionResult(**defaults)  # type: ignore[arg-type]
 
 
-def test_schema_version_is_now_1_5() -> None:
-    assert persist_module.EXECUTION_RESULT_SCHEMA_VERSION == "1.5"
+def test_schema_version_is_now_1_6() -> None:
+    assert persist_module.EXECUTION_RESULT_SCHEMA_VERSION == "1.6"
 
 
 def test_serialized_top_level_keys_are_unchanged() -> None:
@@ -50,6 +52,7 @@ def test_serialized_top_level_keys_are_unchanged() -> None:
         finished_at=datetime(2026, 8, 4, 10, 0, 2),
         workspace_id="ws-1",
         workspace_name="QA Workspace",
+        trace_relative_paths=(),
     )
 
     assert set(serialized.keys()) == {
@@ -61,10 +64,11 @@ def test_serialized_top_level_keys_are_unchanged() -> None:
         "test_failures",
         "http_transactions",
         "assertion_results",
+        "trace_artifacts",
         "success",
         "infrastructure_failure",
     }
-    assert serialized["schema_version"] == "1.5"
+    assert serialized["schema_version"] == "1.6"
     assert set(serialized["execution"].keys()) == {
         "started_at",
         "finished_at",
@@ -79,6 +83,7 @@ def test_serialized_top_level_keys_are_unchanged() -> None:
     }
     assert serialized["http_transactions"] == []
     assert serialized["assertion_results"] == []
+    assert serialized["trace_artifacts"] == []
     # stdout/stderr nunca são persistidos — contrato de segurança explícito.
     assert "stdout" not in serialized
     assert "stderr" not in serialized
@@ -109,6 +114,7 @@ def test_http_transaction_keys_are_unchanged() -> None:
         finished_at=datetime(2026, 8, 4, 10, 0, 2),
         workspace_id="ws-1",
         workspace_name="QA Workspace",
+        trace_relative_paths=(),
     )
 
     assert len(serialized["http_transactions"]) == 1
@@ -148,6 +154,7 @@ def test_assertion_result_keys_are_unchanged() -> None:
         finished_at=datetime(2026, 8, 4, 10, 0, 2),
         workspace_id="ws-1",
         workspace_name="QA Workspace",
+        trace_relative_paths=(),
     )
 
     assert len(serialized["assertion_results"]) == 1
@@ -162,6 +169,36 @@ def test_assertion_result_keys_are_unchanged() -> None:
     }
 
 
+def test_trace_artifact_keys_are_unchanged() -> None:
+    from api_quality_agent.domain.models import TraceArtifact
+
+    result = _build_result(
+        trace_artifacts=(
+            TraceArtifact(
+                type="playwright-trace",
+                test_id="test_post_users_fail",
+                path="/tmp/whatever/trace.zip",
+            ),
+        )
+    )
+    serialized = persist_module._serialize(
+        result,
+        collection_id="col-1",
+        collection_name="Pets Offline",
+        started_at=datetime(2026, 8, 4, 10, 0, 0),
+        finished_at=datetime(2026, 8, 4, 10, 0, 2),
+        workspace_id="ws-1",
+        workspace_name="QA Workspace",
+        trace_relative_paths=("traces/00-test_post_users_fail.zip",),
+    )
+
+    assert len(serialized["trace_artifacts"]) == 1
+    assert set(serialized["trace_artifacts"][0].keys()) == {"type", "test_id", "path"}
+    # path serializado é sempre o RELATIVO calculado pelo use case, nunca o
+    # caminho absoluto/temporário original do TraceArtifact "ao vivo".
+    assert serialized["trace_artifacts"][0]["path"] == "traces/00-test_post_users_fail.zip"
+
+
 def test_local_file_run_serializes_null_workspace_and_collection() -> None:
     # run --file: sem Workspace/Collection reais do Postman envolvidos.
     serialized = persist_module._serialize(
@@ -172,6 +209,7 @@ def test_local_file_run_serializes_null_workspace_and_collection() -> None:
         finished_at=datetime(2026, 8, 4, 10, 0, 2),
         workspace_id=None,
         workspace_name=None,
+        trace_relative_paths=(),
     )
 
     assert serialized["workspace"] == {"id": None, "name": None}

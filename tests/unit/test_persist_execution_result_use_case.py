@@ -65,7 +65,7 @@ def test_persisted_json_has_expected_structure():
     assert location.path == "artifacts/run_fake/result.json"
     payload = json.loads(repository.captured_content)
     assert payload == {
-        "schema_version": "1.5",
+        "schema_version": "1.6",
         "execution": {
             "started_at": _STARTED_AT.isoformat(),
             "finished_at": _FINISHED_AT.isoformat(),
@@ -85,6 +85,7 @@ def test_persisted_json_has_expected_structure():
         ],
         "http_transactions": [],
         "assertion_results": [],
+        "trace_artifacts": [],
         "success": True,
         "infrastructure_failure": None,
     }
@@ -357,6 +358,7 @@ def test_persisted_json_never_contains_the_full_collection_document():
         "test_failures",
         "http_transactions",
         "assertion_results",
+        "trace_artifacts",
         "success",
         "infrastructure_failure",
     }

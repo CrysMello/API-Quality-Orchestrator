@@ -17,6 +17,7 @@ from api_quality_agent.domain.models import (
     InfrastructureFailure,
     InfrastructureFailureType,
     TestFailure,
+    TraceArtifact,
 )
 
 DEFAULT_EXECUTION_RESULTS_BASE_PATH = Path("artifacts")
@@ -25,10 +26,11 @@ DEFAULT_EXECUTION_RESULTS_BASE_PATH = Path("artifacts")
 # workspace; "1.1" adiciona workspace; "1.2" adiciona test_failures; "1.3"
 # adiciona summary.skipped (P1.1/skipped_tests); "1.4" adiciona
 # http_transactions (P1.2); "1.5" adiciona http_transactions[].test_id e
-# assertion_results (P1.1/detalhamento de assertions). Cada versão é
-# aditiva sobre a anterior. Qualquer outra versão é recusada — nunca
-# interpretada parcialmente.
-_SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1", "1.2", "1.3", "1.4", "1.5"})
+# assertion_results (P1.1/detalhamento de assertions); "1.6" adiciona
+# trace_artifacts (P1.3/Trace em falha). Cada versão é aditiva sobre a
+# anterior. Qualquer outra versão é recusada — nunca interpretada
+# parcialmente.
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6"})
 _DEFAULT_SCHEMA_VERSION = "1.0"
 
 
@@ -137,6 +139,17 @@ def _deserialize(payload: dict[str, Any], *, schema_version: str, source_path: s
             for assertion_result in payload.get("assertion_results") or []
         )
 
+        # "trace_artifacts" só existe a partir do schema 1.6 — ausente em
+        # 1.0-1.5, tratado como tupla vazia, nunca inventado.
+        trace_artifacts = tuple(
+            TraceArtifact(
+                type=trace_artifact["type"],
+                test_id=trace_artifact["test_id"],
+                path=trace_artifact["path"],
+            )
+            for trace_artifact in payload.get("trace_artifacts") or []
+        )
+
         return ExecutionResultRecord(
             source_path=source_path,
             schema_version=schema_version,
@@ -156,6 +169,7 @@ def _deserialize(payload: dict[str, Any], *, schema_version: str, source_path: s
             test_failures=test_failures,
             http_transactions=http_transactions,
             assertion_results=assertion_results,
+            trace_artifacts=trace_artifacts,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise InvalidExecutionResultError(

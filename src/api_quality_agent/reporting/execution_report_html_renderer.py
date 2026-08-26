@@ -1,5 +1,6 @@
 from datetime import datetime
 from html import escape
+from pathlib import Path
 from typing import Any
 
 from api_quality_agent.reporting.report import (
@@ -185,11 +186,34 @@ def _render_test_execution(test: ReportTestExecution) -> str:
         else "<p>Nenhuma transação HTTP registrada para este teste.</p>"
     )
     assertions_html = _render_assertions(test.assertions)
+    trace_html = _render_trace_link(test)
     return f"""<div class="test-block">
   <div class="test-header"><h3>{_e(test.test_id) or "(sem test_id)"}</h3>{status_badge}</div>
+  {trace_html}
   {transactions_html}
   {assertions_html}
 </div>"""
+
+
+def _render_trace_link(test: ReportTestExecution) -> str:
+    # P1.3 (Trace em falha): ReportEngine nunca gera o trace, só apresenta
+    # a referência já persistida (ver TraceArtifact) — ausente (None) para
+    # um teste que passou, ou para um resultado antigo sem trace algum.
+    if test.trace is None:
+        return ""
+    href = _e(_file_uri(test.trace.path))
+    return f'<p class="trace-link">Trace disponível: <a href="{href}">Ver Trace</a></p>'
+
+
+def _file_uri(path: str) -> str:
+    try:
+        return Path(path).as_uri()
+    except ValueError:
+        # Caminho não-absoluto (nunca esperado — ReportEngine sempre
+        # resolve para absoluto antes de chegar aqui) — nunca quebra a
+        # renderização do relatório por causa disso, só perde a
+        # clicabilidade do link.
+        return path
 
 
 def _test_status(assertions: tuple[ReportAssertionResult, ...]) -> str | None:
@@ -350,4 +374,6 @@ th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid #eee
 .assertion-name { font-weight: 700; margin: 0 0 0.4rem; }
 .assertion-reason { margin: 0.4rem 0 0; color: #444; }
 @media (prefers-color-scheme: dark) { .assertion-reason { color: #ccc; } }
+.trace-link { background: #fef3c7; border-radius: 6px; padding: 0.5rem 0.75rem; margin: 0 0 0.75rem; }
+@media (prefers-color-scheme: dark) { .trace-link { background: #78350f; } }
 """

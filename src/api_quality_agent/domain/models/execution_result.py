@@ -4,6 +4,7 @@ from api_quality_agent.domain.models.assertion_result import AssertionResult
 from api_quality_agent.domain.models.http_transaction import HttpTransaction
 from api_quality_agent.domain.models.infrastructure_failure import InfrastructureFailure
 from api_quality_agent.domain.models.test_failure import TestFailure
+from api_quality_agent.domain.models.trace_artifact import TraceArtifact
 
 
 @dataclass(frozen=True)
@@ -32,3 +33,7 @@ class ExecutionResult:
     # entrada por assertion realmente gerada e executada — Newman nunca
     # preenche isto, mesmo raciocínio aditivo de http_transactions.
     assertion_results: tuple[AssertionResult, ...] = ()
+    # P1.3 (Trace em falha): um TraceArtifact por teste Playwright que
+    # FALHOU (nunca por um que passou) — Newman nunca preenche isto, mesmo
+    # raciocínio aditivo de http_transactions/assertion_results.
+    trace_artifacts: tuple[TraceArtifact, ...] = ()

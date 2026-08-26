@@ -99,6 +99,7 @@ from api_quality_agent.domain.models.strategy_warning import StrategyWarning
 from api_quality_agent.domain.models.test_failure import TestFailure
 from api_quality_agent.domain.models.test_strategy import TestStrategy
 from api_quality_agent.domain.models.test_strategy_options import TestStrategyOptions
+from api_quality_agent.domain.models.trace_artifact import TraceArtifact
 from api_quality_agent.domain.models.variable_extraction import VariableExtraction
 from api_quality_agent.domain.models.variable_scope import VariableScope
 from api_quality_agent.domain.models.workspace_ref import WorkspaceRef
@@ -200,6 +201,7 @@ __all__ = [
     "TestFailure",
     "TestStrategy",
     "TestStrategyOptions",
+    "TraceArtifact",
     "UnknownCollectionItem",
     "VariableExtraction",
     "VariableScope",

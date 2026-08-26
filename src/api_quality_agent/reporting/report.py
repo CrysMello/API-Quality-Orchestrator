@@ -92,6 +92,18 @@ class ReportAssertionResult:
 
 
 @dataclass(frozen=True)
+class ReportTraceArtifact:
+    # Espelha domain.models.TraceArtifact — só a referência (nunca o
+    # conteúdo binário do .zip). `path` aqui já é o caminho ABSOLUTO
+    # resolvido pelo ReportEngine (ver _resolve_trace_href), pronto para
+    # virar um link clicável no HTML independente de onde o próprio
+    # report.html for escrito (--output pode apontar para outro
+    # diretório).
+    test_id: str
+    path: str
+
+
+@dataclass(frozen=True)
 class ReportTestExecution:
     # Agrupamento por test_id (P1.2 do bloco de ReportEngine): correlaciona
     # test_id -> HttpTransaction(s) -> AssertionResult(s) exatamente como já
@@ -101,6 +113,10 @@ class ReportTestExecution:
     test_id: str
     transactions: tuple[ReportHttpTransaction, ...]
     assertions: tuple[ReportAssertionResult, ...]
+    # None quando o teste não gerou trace (passou, ou a suíte foi gerada
+    # antes da P1.3) — nunca inventado; ReportEngine nunca gera um trace,
+    # só apresenta o que já foi persistido (ver TraceArtifact).
+    trace: ReportTraceArtifact | None = None
 
 
 @dataclass(frozen=True)

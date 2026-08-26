@@ -91,6 +91,19 @@ def _valid_payload_1_5(**overrides) -> dict:
     return payload
 
 
+def _valid_payload_1_6(**overrides) -> dict:
+    payload = _valid_payload_1_5(schema_version="1.6")
+    payload["trace_artifacts"] = [
+        {
+            "type": "playwright-trace",
+            "test_id": "test_get_users_success",
+            "path": "traces/00-test_get_users_success.zip",
+        },
+    ]
+    payload.update(overrides)
+    return payload
+
+
 def _valid_payload_1_0() -> dict:
     # Schema 1.0: sem schema_version e sem workspace no arquivo.
     return {
@@ -286,6 +299,47 @@ def test_read_schema_1_5_with_no_assertion_results(tmp_path):
     record = reader.read(path=path)
 
     assert record.assertion_results == ()
+
+
+def test_read_schema_1_5_defaults_trace_artifacts_to_empty(tmp_path):
+    # "trace_artifacts" só existe a partir do schema 1.6 — ausente em 1.5,
+    # tratado como tupla vazia, nunca inventado.
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_5())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.trace_artifacts == ()
+
+
+# --- Leitura: schema 1.6 (P1.3 — Trace em falha) ----------------------------------------
+
+
+def test_read_schema_1_6_populates_trace_artifacts(tmp_path):
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_6())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.schema_version == "1.6"
+    assert len(record.trace_artifacts) == 1
+    artifact = record.trace_artifacts[0]
+    assert artifact.type == "playwright-trace"
+    assert artifact.test_id == "test_get_users_success"
+    assert artifact.path == "traces/00-test_get_users_success.zip"
+    # Correlação: mesmo test_id na transação, na assertion e no trace.
+    assert record.http_transactions[0].test_id == artifact.test_id
+    assert record.assertion_results[0].test_id == artifact.test_id
+
+
+def test_read_schema_1_6_with_no_trace_artifacts(tmp_path):
+    payload = _valid_payload_1_6(trace_artifacts=[])
+    path = _write(tmp_path / "run_x" / "result.json", payload)
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.trace_artifacts == ()
 
 
 # --- Leitura: schema 1.0 (retrocompatibilidade) ----------------------------------------------------------------

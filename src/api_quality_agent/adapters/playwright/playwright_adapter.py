@@ -4,9 +4,11 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from api_quality_agent.adapters.playwright.trace_masking import mask_trace_archive
 from api_quality_agent.domain.exceptions import InputError
 from api_quality_agent.domain.models import (
     AssertionResult,
@@ -16,12 +18,15 @@ from api_quality_agent.domain.models import (
     InfrastructureFailure,
     InfrastructureFailureType,
     TestFailure,
+    TraceArtifact,
 )
 from api_quality_agent.domain.policies import ensure_non_empty_id
 from api_quality_agent.ports.outbound.collection_runner import DEFAULT_RUN_TIMEOUT_SECONDS
 from api_quality_agent.shared import (
     ASSERTION_RESULTS_PATH_ENV_VAR,
     HTTP_TRANSACTIONS_PATH_ENV_VAR,
+    TRACE_ARTIFACTS_PATH_ENV_VAR,
+    TRACE_DIR_ENV_VAR,
     mask_all_occurrences,
 )
 
@@ -46,6 +51,13 @@ _HTTP_TRANSACTIONS_FILENAME = "http-transactions.ndjson"
 # embutido em cada arquivo de teste gerado escreve, via
 # ASSERTION_RESULTS_PATH_ENV_VAR — mesma pasta temporária, mesmo raciocínio.
 _ASSERTION_RESULTS_FILENAME = "assertion-results.ndjson"
+# P1.3 (Trace em falha): diretório (dentro da MESMA pasta temporária acima,
+# removida no fim do run() junto com o resto) onde a fixture api_context
+# grava o .zip BRUTO (ainda não mascarado) de cada teste que falhou, e
+# arquivo NDJSON que correlaciona test_id -> esse caminho bruto — nunca o
+# nome do arquivo sozinho como mecanismo de correlação.
+_TRACE_RAW_DIR_NAME = "traces-raw"
+_TRACE_MANIFEST_FILENAME = "trace-manifest.ndjson"
 
 
 class _JunitReportNotGeneratedError(Exception):
@@ -114,6 +126,14 @@ class PlaywrightAdapter:
         report_path = str(Path(report_dir) / _JUNIT_REPORT_FILENAME)
         transactions_path = str(Path(report_dir) / _HTTP_TRANSACTIONS_FILENAME)
         assertion_results_path = str(Path(report_dir) / _ASSERTION_RESULTS_FILENAME)
+        # traces-raw/ e o manifesto ficam DENTRO de report_dir (removidos no
+        # fim junto com o resto) — só os .zip já MASCARADOS (ver
+        # _read_trace_artifacts) precisam sobreviver além deste método, numa
+        # pasta temporária própria cuja posse passa para quem for persistir
+        # o ExecutionResult (PersistExecutionResultUseCase).
+        trace_raw_dir = Path(report_dir) / _TRACE_RAW_DIR_NAME
+        trace_raw_dir.mkdir(parents=True, exist_ok=True)
+        trace_manifest_path = str(Path(report_dir) / _TRACE_MANIFEST_FILENAME)
         try:
             return self._run_with_report_export(
                 tests_path=tests_path,
@@ -121,6 +141,8 @@ class PlaywrightAdapter:
                 report_path=report_path,
                 transactions_path=transactions_path,
                 assertion_results_path=assertion_results_path,
+                trace_dir=str(trace_raw_dir),
+                trace_manifest_path=trace_manifest_path,
                 start=start,
                 known_secret_values=known_secret_values,
             )
@@ -135,6 +157,8 @@ class PlaywrightAdapter:
         report_path: str,
         transactions_path: str,
         assertion_results_path: str,
+        trace_dir: str,
+        trace_manifest_path: str,
         start: float,
         known_secret_values: tuple[str, ...],
     ) -> ExecutionResult:
@@ -145,17 +169,20 @@ class PlaywrightAdapter:
             "--junitxml",
             report_path,
         ]
-        # HTTP_TRANSACTIONS_PATH_ENV_VAR/ASSERTION_RESULTS_PATH_ENV_VAR nunca
-        # substituem o ambiente herdado (AQO_*, PATH etc.) — só acrescentam
-        # variáveis de wiring interno, nunca uma credencial. O código gerado
-        # lê essas variáveis pra saber onde registrar cada transação HTTP
-        # (P1.2) / resultado de assertion (P1.1); ausentes, a captura
-        # correspondente fica desligada sem erro (ver _render_conftest e
+        # HTTP_TRANSACTIONS_PATH_ENV_VAR/ASSERTION_RESULTS_PATH_ENV_VAR/
+        # TRACE_*_ENV_VAR nunca substituem o ambiente herdado (AQO_*, PATH
+        # etc.) — só acrescentam variáveis de wiring interno, nunca uma
+        # credencial. O código gerado lê essas variáveis pra saber onde
+        # registrar cada transação HTTP (P1.2) / resultado de assertion
+        # (P1.1) / trace de falha (P1.3); ausentes, a captura correspondente
+        # fica desligada sem erro (ver _render_conftest e
         # _RECORD_ASSERTION_RESULT_SOURCE).
         subprocess_env = {
             **os.environ,
             HTTP_TRANSACTIONS_PATH_ENV_VAR: transactions_path,
             ASSERTION_RESULTS_PATH_ENV_VAR: assertion_results_path,
+            TRACE_DIR_ENV_VAR: trace_dir,
+            TRACE_ARTIFACTS_PATH_ENV_VAR: trace_manifest_path,
         }
 
         try:
@@ -180,7 +207,12 @@ class PlaywrightAdapter:
             # O processo chegou a rodar (e pode ter feito chamadas HTTP/
             # checado assertions antes do timeout) — evidência parcial é
             # lida do mesmo jeito que uma execução completa, nunca
-            # descartada só porque o processo não terminou a tempo.
+            # descartada só porque o processo não terminou a tempo. Um
+            # trace em andamento no momento do timeout nunca chega a ser
+            # finalizado pelo `finally` da fixture (o processo é morto
+            # abruptamente) — o manifesto simplesmente não tem entrada para
+            # ele, nunca um arquivo incompleto/corrompido é interpretado
+            # como trace válido.
             return _infrastructure_result(
                 tests_path,
                 InfrastructureFailureType.TIMEOUT,
@@ -192,6 +224,7 @@ class PlaywrightAdapter:
                 assertion_results=_read_assertion_results(
                     assertion_results_path, known_secret_values
                 ),
+                trace_artifacts=_read_trace_artifacts(trace_manifest_path, known_secret_values),
             )
         except OSError as exc:
             return _infrastructure_result(
@@ -210,6 +243,7 @@ class PlaywrightAdapter:
         stderr = mask_all_occurrences(completed.stderr or "", known_secret_values)
         http_transactions = _read_http_transactions(transactions_path, known_secret_values)
         assertion_results = _read_assertion_results(assertion_results_path, known_secret_values)
+        trace_artifacts = _read_trace_artifacts(trace_manifest_path, known_secret_values)
 
         if completed.returncode == _PYTEST_EXIT_CODE_NO_TESTS_COLLECTED:
             # "Diferenciar: nenhum teste coletado" — nunca reportado como um
@@ -227,6 +261,7 @@ class PlaywrightAdapter:
                 exit_code=completed.returncode,
                 http_transactions=http_transactions,
                 assertion_results=assertion_results,
+                trace_artifacts=trace_artifacts,
             )
 
         try:
@@ -250,6 +285,7 @@ class PlaywrightAdapter:
                 stderr=stderr,
                 http_transactions=http_transactions,
                 assertion_results=assertion_results,
+                trace_artifacts=trace_artifacts,
             )
 
         failures = tuple(
@@ -271,6 +307,7 @@ class PlaywrightAdapter:
             duration_seconds=duration,
             http_transactions=http_transactions,
             assertion_results=assertion_results,
+            trace_artifacts=trace_artifacts,
             # total_requests e total_assertions recebem o MESMO número: o
             # JUnit do pytest só sabe contar "testes" (uma função de teste),
             # sem a granularidade de "requisição" vs. "assertion" que o
@@ -299,14 +336,15 @@ def _infrastructure_result(
     exit_code: int | None = None,
     http_transactions: tuple[HttpTransaction, ...] = (),
     assertion_results: tuple[AssertionResult, ...] = (),
+    trace_artifacts: tuple[TraceArtifact, ...] = (),
 ) -> ExecutionResult:
     # exit_code=None é o caso comum (nenhum processo chegou a rodar de
     # verdade: caminho inválido, executável ausente); NO_TESTS_COLLECTED é a
     # única chamada que informa um exit_code real (5), preservando-o como
     # pedido — nunca descartado silenciosamente. http_transactions=()/
-    # assertion_results=() são o caso comum pelo mesmo motivo (processo
-    # nunca rodou de verdade); TIMEOUT e NO_TESTS_COLLECTED passam
-    # evidência real quando ela existe.
+    # assertion_results=()/trace_artifacts=() são o caso comum pelo mesmo
+    # motivo (processo nunca rodou de verdade); TIMEOUT e NO_TESTS_COLLECTED
+    # passam evidência real quando ela existe.
     return ExecutionResult(
         collection_source=tests_path,
         success=False,
@@ -322,6 +360,7 @@ def _infrastructure_result(
         stderr=stderr,
         http_transactions=http_transactions,
         assertion_results=assertion_results,
+        trace_artifacts=trace_artifacts,
     )
 
 
@@ -574,3 +613,80 @@ def _masked_scalar(value: object, known_secret_values: tuple[str, ...]) -> objec
     if value is None or isinstance(value, (int, float, bool)):
         return value
     return mask_all_occurrences(json.dumps(value, ensure_ascii=False), known_secret_values)
+
+
+# --- P1.3 (Trace em falha): traces .zip (um por teste que falhou) ----------
+
+
+def _read_trace_artifacts(
+    manifest_path: str, known_secret_values: tuple[str, ...]
+) -> tuple[TraceArtifact, ...]:
+    # Mesmo raciocínio de _read_http_transactions/_read_assertion_results:
+    # manifesto ausente (nenhum teste falhou, ou suíte gerada antes da
+    # P1.3) nunca é erro, só "nada pra reportar" — e nunca cria a pasta de
+    # saída mascarada à toa.
+    path = Path(manifest_path)
+    if not path.exists():
+        return ()
+
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+
+    entries: list[tuple[str, str]] = []
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            # Mesmo critério de linha corrompida das demais evidências —
+            # nunca invalida o resto, best-effort.
+            continue
+        if not isinstance(entry, dict):
+            continue
+        test_id = entry.get("test_id")
+        raw_path = entry.get("path")
+        if not isinstance(test_id, str) or not isinstance(raw_path, str):
+            continue
+        entries.append((test_id, raw_path))
+
+    if not entries:
+        return ()
+
+    # Diretório próprio (nunca dentro de report_dir, removido pelo
+    # chamador de run() ao final): a posse passa para quem for persistir o
+    # ExecutionResult (PersistExecutionResultUseCase move estes arquivos
+    # para o diretório final e só então pode remover este). Criado só
+    # quando existe pelo menos um trace de verdade a processar — nunca uma
+    # pasta temporária vazia por execução.
+    masked_dir = Path(tempfile.mkdtemp(prefix="api-quality-agent-pytest-traces-masked-"))
+
+    artifacts: list[TraceArtifact] = []
+    for test_id, raw_path in entries:
+        source = Path(raw_path)
+        if not source.is_file():
+            # Trace referenciado no manifesto mas nunca finalizado (ex.:
+            # processo morto abruptamente por timeout no meio do
+            # tracing.stop) — nunca inventa um artefato para um arquivo
+            # que não existe.
+            continue
+        destination = masked_dir / f"{uuid.uuid4().hex}.zip"
+        try:
+            mask_trace_archive(
+                source_path=source,
+                destination_path=destination,
+                known_secret_values=known_secret_values,
+            )
+        except Exception:  # noqa: S112, BLE001 - best-effort: só descarta este trace específico
+            # Mascaramento é evidência de segurança best-effort: uma falha
+            # aqui (.zip corrompido, disco cheio etc.) nunca derruba o
+            # ExecutionResult inteiro — só este trace específico é
+            # descartado, nunca persistido sem passar pelo masking.
+            continue
+        artifacts.append(
+            TraceArtifact(type="playwright-trace", test_id=test_id, path=str(destination))
+        )
+    return tuple(artifacts)

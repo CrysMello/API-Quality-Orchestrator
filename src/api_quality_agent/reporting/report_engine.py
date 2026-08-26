@@ -16,6 +16,7 @@ from api_quality_agent.domain.models import (
     GeneratedArtifact,
     HttpTransaction,
     SelectionOrigin,
+    TraceArtifact,
 )
 from api_quality_agent.ports.outbound import ArtifactRepository
 from api_quality_agent.reporting.execution_report_html_renderer import (
@@ -33,6 +34,7 @@ from api_quality_agent.reporting.report import (
     ReportInfrastructureFailure,
     ReportTestExecution,
     ReportTestFailure,
+    ReportTraceArtifact,
     ReportUpdateSection,
 )
 from api_quality_agent.reporting.report_html_renderer import render_report_html
@@ -304,7 +306,14 @@ def _build_execution_section(
         ),
         infrastructure_failure=infrastructure_failure,
         tests=_build_test_executions(
-            execution_result.http_transactions, execution_result.assertion_results
+            execution_result.http_transactions,
+            execution_result.assertion_results,
+            execution_result.trace_artifacts,
+            # Fluxo "ao vivo" (generate/update): nunca houve persistência
+            # ainda, então TraceArtifact.path já é um caminho ABSOLUTO de
+            # arquivo temporário (ver PlaywrightAdapter) — nada a resolver
+            # contra um diretório de origem.
+            source_dir=None,
         ),
     )
 
@@ -345,13 +354,26 @@ def _build_execution_section_from_record(record: ExecutionResultRecord) -> Repor
         infrastructure_failure=infrastructure_failure,
         started_at=record.started_at,
         finished_at=record.finished_at,
-        tests=_build_test_executions(record.http_transactions, record.assertion_results),
+        tests=_build_test_executions(
+            record.http_transactions,
+            record.assertion_results,
+            record.trace_artifacts,
+            # Fluxo persistido (report): TraceArtifact.path já vem RELATIVO
+            # ao diretório de result.json (ver PersistExecutionResultUseCase)
+            # — resolvido aqui contra esse diretório, nunca contra o
+            # diretório de saída do próprio report.html (que pode ser
+            # outro, via --output), pra o link continuar válido.
+            source_dir=Path(record.source_path).resolve().parent,
+        ),
     )
 
 
 def _build_test_executions(
     http_transactions: tuple[HttpTransaction, ...],
     assertion_results: tuple[AssertionResult, ...],
+    trace_artifacts: tuple[TraceArtifact, ...],
+    *,
+    source_dir: Path | None,
 ) -> tuple[ReportTestExecution, ...]:
     # P1.2 (integração com ReportEngine): agrupa por test_id, na ordem de
     # primeira aparição em http_transactions — com fallback para
@@ -375,6 +397,13 @@ def _build_test_executions(
     if not order:
         return ()
 
+    # P1.3 (Trace em falha): no máximo um trace por test_id nesta fase (a
+    # fixture api_context só chama tracing.start/stop uma vez por função de
+    # teste) — se por algum motivo existir mais de um, o último vence
+    # (nunca uma lista, pra não inventar uma estrutura de "múltiplos traces
+    # por teste" que não existe ainda).
+    trace_by_test_id = {artifact.test_id: artifact for artifact in trace_artifacts}
+
     return tuple(
         ReportTestExecution(
             test_id=test_id,
@@ -388,9 +417,21 @@ def _build_test_executions(
                 for assertion in assertion_results
                 if assertion.test_id == test_id
             ),
+            trace=_build_report_trace(trace_by_test_id.get(test_id), source_dir=source_dir),
         )
         for test_id in order
     )
+
+
+def _build_report_trace(
+    artifact: TraceArtifact | None, *, source_dir: Path | None
+) -> ReportTraceArtifact | None:
+    if artifact is None:
+        return None
+    candidate = Path(artifact.path)
+    if source_dir is not None and not candidate.is_absolute():
+        candidate = source_dir / candidate
+    return ReportTraceArtifact(test_id=artifact.test_id, path=str(candidate.resolve()))
 
 
 def _build_report_transaction(transaction: HttpTransaction) -> ReportHttpTransaction:

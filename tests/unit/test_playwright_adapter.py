@@ -1195,3 +1195,247 @@ def test_value_not_in_known_secret_values_is_never_masked_in_assertion_results(
     result = adapter.run(tests_path=_minimal_suite_dir(tmp_path), known_secret_values=())
 
     assert result.assertion_results[0].actual == public_value
+
+
+# --- P1.3 (Trace em falha): captura de trace_artifacts --------------------------------------
+
+
+def _set_trace_artifacts(monkeypatch, artifacts: list[dict]) -> None:
+    monkeypatch.setenv("FAKE_PYTEST_TRACE_ARTIFACTS", json.dumps(artifacts))
+
+
+def _trace_files(**overrides: str) -> dict:
+    # Mesmos 3 membros de texto que um trace real (snapshots=True,
+    # sources=False) sempre tem — ver trace_masking.py. "trace.stacks" é
+    # sempre um blob mínimo válido; os outros dois, NDJSON com uma linha
+    # cada, mesmo formato real observado empiricamente contra o
+    # Playwright instalado neste projeto.
+    defaults = {
+        "trace.trace": (
+            json.dumps(
+                {
+                    "type": "before",
+                    "callId": "call@1",
+                    "class": "APIRequestContext",
+                    "method": "fetch",
+                    "params": {
+                        "url": "/users",
+                        "method": "POST",
+                        "headers": [
+                            {"name": "Authorization", "value": "Bearer sk_live_super_secret"},
+                        ],
+                        "postData": "eyJwYXNzd29yZCI6ICJodW50ZXIyIn0=",
+                    },
+                }
+            )
+            + "\n"
+        ),
+        "trace.network": (
+            json.dumps(
+                {
+                    "type": "resource-snapshot",
+                    "snapshot": {
+                        "request": {
+                            "method": "POST",
+                            "url": "http://127.0.0.1/users",
+                            "headers": [
+                                {"name": "Cookie", "value": "session=abc123secret"},
+                            ],
+                        },
+                        "response": {"status": 201},
+                    },
+                }
+            )
+            + "\n"
+        ),
+        "trace.stacks": json.dumps({"files": [], "stacks": []}),
+    }
+    defaults.update(overrides)
+    return defaults
+
+
+def _trace_artifact_entry(test_id: str = "test_post_users_fail", **file_overrides: str) -> dict:
+    return {"test_id": test_id, "files": _trace_files(**file_overrides)}
+
+
+def _read_trace_zip_texts(path: str) -> dict:
+    import zipfile
+
+    with zipfile.ZipFile(path) as zip_file:
+        return {name: zip_file.read(name).decode("utf-8") for name in zip_file.namelist()}
+
+
+def test_passing_test_never_persists_a_trace(tmp_path, monkeypatch):
+    # Regra explícita do bloco: PASS -> nenhum trace, nunca um artefato
+    # desnecessário. FAKE_PYTEST_TRACE_ARTIFACTS nem é setado aqui — mesmo
+    # comportamento de uma suíte real onde a fixture nunca chama
+    # tracing.stop(path=...) para um teste que passou.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.trace_artifacts == ()
+
+
+def test_failing_test_persists_a_trace(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    _set_trace_artifacts(monkeypatch, [_trace_artifact_entry()])
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert len(result.trace_artifacts) == 1
+    artifact = result.trace_artifacts[0]
+    assert artifact.type == "playwright-trace"
+    assert artifact.test_id == "test_post_users_fail"
+    assert Path(artifact.path).is_file()
+    assert artifact.path.endswith(".zip")
+
+
+def test_trace_is_associated_with_the_correct_test_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    _set_trace_artifacts(monkeypatch, [_trace_artifact_entry(test_id="test_delete_user_fail")])
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.trace_artifacts[0].test_id == "test_delete_user_fail"
+
+
+def test_multiple_failing_tests_produce_separate_trace_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    _set_trace_artifacts(
+        monkeypatch,
+        [
+            _trace_artifact_entry(test_id="test_a_fail"),
+            _trace_artifact_entry(test_id="test_b_fail"),
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert len(result.trace_artifacts) == 2
+    test_ids = {artifact.test_id for artifact in result.trace_artifacts}
+    assert test_ids == {"test_a_fail", "test_b_fail"}
+    paths = {artifact.path for artifact in result.trace_artifacts}
+    assert len(paths) == 2  # arquivos distintos, nunca o mesmo .zip reaproveitado
+
+
+def test_only_the_failing_test_generates_a_trace_artifact(tmp_path, monkeypatch):
+    # Mesmo cenário de "with_skipped" (2 test cases reais no relatório,
+    # um deles falho) — só o manifesto simulado para o teste que falhou
+    # existe, nunca inventado para o que passou.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    _set_trace_artifacts(monkeypatch, [_trace_artifact_entry(test_id="test_post_users_fail")])
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert [a.test_id for a in result.trace_artifacts] == ["test_post_users_fail"]
+
+
+def test_no_trace_manifest_means_empty_trace_artifacts(tmp_path, monkeypatch):
+    # Suíte gerada antes da P1.3 (conftest.py sem a instrumentação de
+    # trace) nunca seta PLAYWRIGHT_TRACE_ARTIFACTS_PATH com conteúdo —
+    # compatibilidade: nunca um erro, só "nada pra reportar".
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.trace_artifacts == ()
+
+
+def test_malformed_trace_manifest_line_is_skipped(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    monkeypatch.setenv("FAKE_PYTEST_RAW_TRACE_MANIFEST", "isto não é um JSON válido\n")
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.trace_artifacts == ()
+
+
+def test_trace_referencing_a_missing_raw_file_is_skipped(tmp_path, monkeypatch):
+    # Manifesto aponta para um caminho que nunca foi de fato escrito (ex.:
+    # processo morto no meio do tracing.stop) — nunca inventa um artefato.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    monkeypatch.setenv(
+        "FAKE_PYTEST_RAW_TRACE_MANIFEST",
+        json.dumps({"test_id": "test_x", "path": str(tmp_path / "nunca-existiu.zip")}) + "\n",
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.trace_artifacts == ()
+
+
+# --- P1.3: masking do conteúdo do trace (nunca o mesmo mecanismo de --------
+# --- known_secret_values sozinho — ver trace_masking.py) -------------------
+
+
+def test_known_secret_is_masked_inside_the_persisted_trace(tmp_path, monkeypatch):
+    secret_value = "sk_live_super_secret"
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    _set_trace_artifacts(monkeypatch, [_trace_artifact_entry()])
+    adapter = _build_adapter()
+
+    result = adapter.run(
+        tests_path=_minimal_suite_dir(tmp_path), known_secret_values=(secret_value,)
+    )
+
+    texts = _read_trace_zip_texts(result.trace_artifacts[0].path)
+    for text in texts.values():
+        assert secret_value not in text
+
+
+def test_authorization_and_cookie_headers_are_always_redacted_in_the_trace(tmp_path, monkeypatch):
+    # Redação estrutural por NOME de header — nunca depende de o valor
+    # estar em known_secret_values (aqui, deliberadamente, nenhum secret é
+    # informado ao adapter).
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    _set_trace_artifacts(monkeypatch, [_trace_artifact_entry()])
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path), known_secret_values=())
+
+    texts = _read_trace_zip_texts(result.trace_artifacts[0].path)
+    assert "sk_live_super_secret" not in texts["trace.trace"]
+    assert "abc123secret" not in texts["trace.network"]
+    assert "[REDACTED]" in texts["trace.trace"]
+    assert "[REDACTED]" in texts["trace.network"]
+
+
+def test_resource_body_inside_the_trace_is_masked(tmp_path, monkeypatch):
+    # resources/*.bin é o corpo real do request/response no formato do
+    # Playwright — a captura estruturada por nome de header não alcança
+    # este membro (não é trace.trace/trace.network/trace.stacks), mas o
+    # masking por known_secret_values ainda se aplica (ver
+    # trace_masking._mask_resource_member). O caso de um resource
+    # genuinamente binário (não-UTF-8) é coberto em unidade dedicada em
+    # test_trace_masking.py, sem depender do fake pytest.
+    secret_value = "hunter2"
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    _set_trace_artifacts(
+        monkeypatch,
+        [
+            {
+                "test_id": "test_post_users_fail",
+                "files": {
+                    **_trace_files(),
+                    "resources/body.bin": json.dumps({"password": secret_value}),
+                },
+            }
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(
+        tests_path=_minimal_suite_dir(tmp_path), known_secret_values=(secret_value,)
+    )
+
+    texts = _read_trace_zip_texts(result.trace_artifacts[0].path)
+    assert secret_value not in texts["resources/body.bin"]

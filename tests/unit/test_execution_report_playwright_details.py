@@ -13,12 +13,14 @@ Newman continuando a funcionar.
 """
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 from api_quality_agent.domain.models import (
     AssertionResult,
     ExecutionResultRecord,
     HttpTransaction,
     HttpTransactionHeader,
+    TraceArtifact,
 )
 from api_quality_agent.reporting import ReportEngine, render_execution_report_html
 
@@ -75,6 +77,16 @@ def _assertion(**overrides) -> AssertionResult:
     )
     defaults.update(overrides)
     return AssertionResult(**defaults)
+
+
+def _trace_artifact(**overrides) -> TraceArtifact:
+    defaults = dict(
+        type="playwright-trace",
+        test_id="test_post_users_success",
+        path="traces/00-test_post_users_success.zip",
+    )
+    defaults.update(overrides)
+    return TraceArtifact(**defaults)
 
 
 def _render(record: ExecutionResultRecord) -> str:
@@ -374,6 +386,87 @@ def test_newman_result_without_any_playwright_field_renders_exactly_as_before():
     assert "<h2>Testes</h2>" not in html
     assert "<h1>Execution Report</h1>" in html
     assert "Users API" in html
+
+
+# --- P1.3 (Trace em falha): apresentação da referência já persistida -------
+
+
+def test_report_engine_presents_the_trace_when_the_test_has_one():
+    record = _record(
+        assertion_results=(_assertion(status="FAILED", actual=500),),
+        trace_artifacts=(_trace_artifact(),),
+        success=False,
+        failed_assertions=1,
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+
+    test = report.execution.tests[0]
+    assert test.trace is not None
+    assert test.trace.test_id == "test_post_users_success"
+    # Resolvido contra o diretório de result.json (source_path), nunca
+    # relativo ao diretório de saída do próprio report.html.
+    expected_dir = Path(record.source_path).resolve().parent
+    assert test.trace.path == str((expected_dir / "traces/00-test_post_users_success.zip").resolve())
+
+
+def test_report_engine_never_generates_a_trace_itself():
+    # ReportEngine nunca gera trace — um teste PASSED sem trace_artifacts
+    # nunca ganha um `test.trace` inventado.
+    record = _record(assertion_results=(_assertion(status="PASSED"),), trace_artifacts=())
+
+    report = ReportEngine().generate_from_execution_summary(record)
+
+    assert report.execution.tests[0].trace is None
+
+
+def test_html_shows_the_trace_link_when_available():
+    record = _record(
+        assertion_results=(_assertion(status="FAILED", actual=500),),
+        trace_artifacts=(_trace_artifact(),),
+        success=False,
+        failed_assertions=1,
+    )
+
+    html = _render(record)
+
+    assert "Ver Trace" in html
+    assert "Trace dispon" in html  # "Trace disponível" (acento pode variar por escaping)
+
+
+def test_html_never_shows_a_trace_link_for_a_passing_test():
+    record = _record(assertion_results=(_assertion(status="PASSED"),), trace_artifacts=())
+
+    html = _render(record)
+
+    assert "Ver Trace" not in html
+
+
+def test_old_result_without_trace_artifacts_still_renders():
+    # schema 1.5 (trace_artifacts ainda não existe) — compatibilidade.
+    record = _record(
+        assertion_results=(_assertion(status="PASSED"),),
+        trace_artifacts=(),
+        schema_version="1.5",
+    )
+
+    html = _render(record)
+
+    assert "Ver Trace" not in html
+    assert "<h1>Execution Report</h1>" in html
+
+
+def test_trace_link_is_a_clickable_file_uri():
+    record = _record(
+        assertion_results=(_assertion(status="FAILED", actual=500),),
+        trace_artifacts=(_trace_artifact(),),
+        success=False,
+        failed_assertions=1,
+    )
+
+    html = _render(record)
+
+    assert 'href="file://' in html
 
 
 # --- Masking: dados já chegam mascarados, nunca reprocessados aqui ----------

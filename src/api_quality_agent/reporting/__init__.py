@@ -28,6 +28,7 @@ from api_quality_agent.reporting.report import (
     ReportInfrastructureFailure,
     ReportTestExecution,
     ReportTestFailure,
+    ReportTraceArtifact,
     ReportUpdateSection,
 )
 from api_quality_agent.reporting.report_engine import ReportEngine
@@ -52,6 +53,7 @@ __all__ = [
     "ReportInfrastructureFailure",
     "ReportTestExecution",
     "ReportTestFailure",
+    "ReportTraceArtifact",
     "ReportUpdateSection",
     "build_contract_match_report",
     "render_contract_match_report_html",
