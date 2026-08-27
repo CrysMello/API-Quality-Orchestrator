@@ -942,7 +942,7 @@ def test_no_auth_block_produces_no_preamble_and_no_authorization_header():
     generated = _generate({"request": {"method": "GET", "url": "https://api.exemplo.com/users"}})
 
     assert "Authorization" not in generated.content
-    assert "os.environ" not in generated.content
+    assert 'os.environ.get("AQO_' not in generated.content
     assert "sem autenticação" in generated.content
 
 
@@ -1069,7 +1069,7 @@ def test_multipart_text_field_with_partial_variable_is_kept_as_literal_text():
     )
 
     assert '"note": "prefixo-{{comment}}",' in generated.content
-    assert "os.environ" not in generated.content
+    assert 'os.environ.get("AQO_' not in generated.content
 
 
 def test_multipart_file_field_without_key_falls_back_with_a_specific_warning():
@@ -1298,7 +1298,7 @@ def test_query_parameter_with_pure_variable_resolves_via_environment_as_a_litera
 
     assert "@pytest.mark.skip" not in generated.content
     assert '"region": "us-east-1",' in generated.content
-    assert "os.environ" not in generated.content
+    assert 'os.environ.get("AQO_' not in generated.content
     assert generated.required_environment_variables == ()
     ast.parse(generated.content)
 
@@ -1310,7 +1310,7 @@ def test_header_with_pure_variable_resolves_via_environment_as_a_literal():
     )
 
     assert '"X-Tenant": "tenant-42",' in generated.content
-    assert "os.environ" not in generated.content
+    assert 'os.environ.get("AQO_' not in generated.content
     ast.parse(generated.content)
 
 
@@ -1348,7 +1348,7 @@ def test_bearer_auth_embeds_a_non_secret_environment_value_as_a_literal():
     )
 
     assert 'token = "literal-token-value"' in generated.content
-    assert "os.environ" not in generated.content
+    assert 'os.environ.get("AQO_' not in generated.content
     assert '"Authorization": f"Bearer {token}",' in generated.content
     assert generated.required_environment_variables == ()
     assert generated.resolved_variables == (("accessToken", "literal-token-value"),)
@@ -1400,7 +1400,7 @@ def test_json_body_pure_variable_value_resolves_via_environment():
     )
 
     assert '"region": "us-east-1",' in generated.content
-    assert "os.environ" not in generated.content
+    assert 'os.environ.get("AQO_' not in generated.content
     ast.parse(generated.content)
 
 
@@ -1411,7 +1411,7 @@ def test_multipart_text_field_pure_variable_resolves_via_environment():
     )
 
     assert '"note": "hello",' in generated.content
-    assert "os.environ" not in generated.content
+    assert 'os.environ.get("AQO_' not in generated.content
     ast.parse(generated.content)
 
 
@@ -1844,7 +1844,10 @@ def test_patch_partial_object_never_adds_the_other_fields():
     generated = _generate(_json_body_request("PATCH", "https://api.exemplo.com/users/10", {"active": False}))
 
     assert '    request_body = {\n        "active": False,\n    }\n' in generated.content
-    assert '"name"' not in generated.content
+    # '"name": "' (valor string literal) — nunca confundir com o
+    # '"name": name,' do helper _record_assertion_result (P1.1), que
+    # sempre está presente e não tem relação com o body do PATCH.
+    assert '"name": "' not in generated.content
     assert '"email"' not in generated.content
     assert "response = api_context.patch(\n" in generated.content
     ast.parse(generated.content)
@@ -2109,7 +2112,7 @@ def test_body_root_level_variable_resolves_via_environment():
     )
 
     assert '"region": "us-east-1",' in generated.content
-    assert "os.environ" not in generated.content
+    assert 'os.environ.get("AQO_' not in generated.content
     ast.parse(generated.content)
 
 
@@ -2122,7 +2125,7 @@ def test_body_nested_object_variable_resolves_recursively():
     )
 
     assert '"id": "cust-123",' in generated.content
-    assert "os.environ" not in generated.content
+    assert 'os.environ.get("AQO_' not in generated.content
     ast.parse(generated.content)
 
 

@@ -700,3 +700,344 @@ def test_run_without_environment_flag_still_defaults_to_none(
     exit_code = main(["run", "--collection-id", COLLECTION_A_ID])
 
     assert exit_code == SUCCESS
+
+
+# --- run --target playwright (gap 2 da revisão P0) ----------------------------------------
+
+
+def _make_suite_dir(base: Path) -> Path:
+    suite_dir = base / "playwright_suite"
+    suite_dir.mkdir()
+    (suite_dir / "conftest.py").write_text("", encoding="utf-8")
+    return suite_dir
+
+
+def test_run_target_playwright_succeeds(offline_env, fake_pytest_offline, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    suite_dir = _make_suite_dir(offline_env)
+
+    exit_code = main(["run", "--target", "playwright", "--file", str(suite_dir)])
+
+    assert exit_code == SUCCESS
+    out = capsys.readouterr().out
+    assert "Execution finished successfully." in out
+    assert "pytest" in out
+
+
+def test_run_target_playwright_with_test_failures_returns_functional_failure(
+    offline_env, fake_pytest_offline, monkeypatch
+):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures")
+    suite_dir = _make_suite_dir(offline_env)
+
+    exit_code = main(["run", "--target", "playwright", "--file", str(suite_dir)])
+
+    assert exit_code == FUNCTIONAL_FAILURE
+
+
+def test_run_target_playwright_requires_file(offline_env):
+    exit_code = main(["run", "--target", "playwright"])
+
+    assert exit_code == INVALID_INPUT_OR_CONFIGURATION
+
+
+def test_run_target_playwright_missing_executable_returns_integration_failure_and_guidance(
+    offline_env, capsys
+):
+    # Sem fake_pytest_offline: PlaywrightAdapter real apontado para um
+    # executável que não existe — mesma prova (nenhum mock da lógica de
+    # detecção) que test_run_with_executable_not_found... faz pro Newman.
+    exit_code = main(
+        [
+            "run",
+            "--target",
+            "playwright",
+            "--file",
+            str(_make_suite_dir(offline_env)),
+            "--pytest-executable",
+            "pytest-que-nao-existe",
+        ]
+    )
+
+    assert exit_code == INTEGRATION_FAILURE
+    out = capsys.readouterr().out
+    assert "infrastructure error" in out
+    assert "pytest" in out.lower()
+
+
+def test_run_target_playwright_executable_env_var_is_used_when_flag_absent(
+    offline_env, fake_pytest_offline, monkeypatch
+):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    monkeypatch.setenv("PYTEST_EXECUTABLE", "caminho-da-env")
+    suite_dir = _make_suite_dir(offline_env)
+
+    exit_code = main(["run", "--target", "playwright", "--file", str(suite_dir)])
+
+    # fake_pytest_offline ignora o valor resolvido (sempre roda o fake real),
+    # mas confirma que a resolução env var > default não quebra a execução —
+    # mesma cobertura de precedência que os testes de --newman-executable já
+    # fazem para o Newman.
+    assert exit_code == SUCCESS
+
+
+def test_run_target_playwright_never_touches_newman_output(
+    offline_env, fake_pytest_offline, monkeypatch, capsys
+):
+    # Prova de que a mensagem de infraestrutura é a variante própria do
+    # Playwright, não a do Newman (que fala "Newman execution failed").
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    exit_code = main(["run", "--target", "playwright", "--file", str(offline_env / "nao-existe")])
+
+    assert exit_code == INTEGRATION_FAILURE
+    out = capsys.readouterr().out
+    assert "Newman" not in out
+    assert "Playwright execution failed" in out
+
+
+def test_run_target_playwright_summary_shows_skipped(
+    offline_env, fake_pytest_offline, monkeypatch, capsys
+):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "with_skipped")
+    suite_dir = _make_suite_dir(offline_env)
+
+    exit_code = main(["run", "--target", "playwright", "--file", str(suite_dir)])
+
+    assert exit_code == FUNCTIONAL_FAILURE
+    out = capsys.readouterr().out
+    assert "Skipped: 1" in out
+
+
+def test_run_target_playwright_no_tests_collected_returns_integration_failure(
+    offline_env, fake_pytest_offline, monkeypatch, capsys
+):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "no_tests_collected")
+    suite_dir = _make_suite_dir(offline_env)
+
+    exit_code = main(["run", "--target", "playwright", "--file", str(suite_dir)])
+
+    assert exit_code == INTEGRATION_FAILURE
+    out = capsys.readouterr().out
+    assert "infrastructure error" in out
+
+
+def test_run_target_playwright_persists_result_json(
+    offline_env, fake_pytest_offline, monkeypatch
+):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    suite_dir = _make_suite_dir(offline_env)
+
+    exit_code = main(["run", "--target", "playwright", "--file", str(suite_dir)])
+
+    assert exit_code == SUCCESS
+    matches = list(offline_env.glob("artifacts/run_*/result.json"))
+    assert len(matches) == 1
+    payload = json.loads(matches[0].read_text(encoding="utf-8"))
+    assert payload["success"] is True
+    assert payload["collection"] == {"id": None, "name": "playwright_suite"}
+    assert payload["workspace"] == {"id": None, "name": None}
+
+
+def test_run_target_playwright_infrastructure_failure_does_not_persist_result_json(
+    offline_env, fake_pytest_offline, monkeypatch
+):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+
+    exit_code = main(["run", "--target", "playwright", "--file", str(offline_env / "nao-existe")])
+
+    assert exit_code == INTEGRATION_FAILURE
+    assert list(offline_env.glob("artifacts/run_*/result.json")) == []
+
+
+def test_run_target_playwright_never_requires_postman_api_key(
+    offline_env, fake_pytest_offline, monkeypatch
+):
+    monkeypatch.delenv("POSTMAN_API_KEY", raising=False)
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    suite_dir = _make_suite_dir(offline_env)
+
+    exit_code = main(["run", "--target", "playwright", "--file", str(suite_dir)])
+
+    assert exit_code == SUCCESS
+
+
+def test_run_target_postman_is_still_the_default(cli_env, selected_workspace, fake_newman, monkeypatch):
+    # Regressão explícita: omitir --target continua se comportando
+    # exatamente como antes desta flag existir.
+    configure_server(cli_env)
+    monkeypatch.setenv("FAKE_NEWMAN_MODE", "success")
+
+    exit_code = main(["run", "--collection-id", COLLECTION_A_ID])
+
+    assert exit_code == SUCCESS
+
+
+def test_run_target_postman_explicit_behaves_like_default(
+    cli_env, selected_workspace, fake_newman, monkeypatch
+):
+    configure_server(cli_env)
+    monkeypatch.setenv("FAKE_NEWMAN_MODE", "success")
+
+    exit_code = main(["run", "--target", "postman", "--collection-id", COLLECTION_A_ID])
+
+    assert exit_code == SUCCESS
+
+
+# --- run --target playwright: mascaramento de secret via --environment ----------------------
+
+
+def _write_environment_with_secret(path: Path, *, secret_value: str) -> Path:
+    payload = {
+        "values": [
+            {"key": "base_url", "value": "https://api.exemplo.com", "type": "default"},
+            {"key": "token", "value": secret_value, "type": "secret"},
+        ]
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_run_target_playwright_masks_known_secret_in_test_failures(
+    offline_env, fake_pytest_offline, monkeypatch, capsys
+):
+    secret_value = "sk_live_super_secret_token_playwright"
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures_with_secret")
+    monkeypatch.setenv("FAKE_PYTEST_SECRET_VALUE", secret_value)
+    suite_dir = _make_suite_dir(offline_env)
+    environment_path = _write_environment_with_secret(
+        offline_env / "environment.json", secret_value=secret_value
+    )
+
+    exit_code = main(
+        [
+            "run",
+            "--target",
+            "playwright",
+            "--file",
+            str(suite_dir),
+            "--environment",
+            str(environment_path),
+        ]
+    )
+
+    assert exit_code == FUNCTIONAL_FAILURE
+    captured = capsys.readouterr()
+    assert secret_value not in captured.out
+    assert secret_value not in captured.err
+
+
+def test_run_target_playwright_persisted_json_never_contains_secret(
+    offline_env, fake_pytest_offline, monkeypatch
+):
+    secret_value = "sk_live_super_secret_token_playwright"
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures_with_secret")
+    monkeypatch.setenv("FAKE_PYTEST_SECRET_VALUE", secret_value)
+    suite_dir = _make_suite_dir(offline_env)
+    environment_path = _write_environment_with_secret(
+        offline_env / "environment.json", secret_value=secret_value
+    )
+
+    main(
+        [
+            "run",
+            "--target",
+            "playwright",
+            "--file",
+            str(suite_dir),
+            "--environment",
+            str(environment_path),
+        ]
+    )
+
+    matches = list(offline_env.glob("artifacts/run_*/result.json"))
+    assert len(matches) == 1
+    assert secret_value not in matches[0].read_text(encoding="utf-8")
+
+
+def _read_persisted_result_json(base: Path) -> str:
+    matches = list(base.glob("artifacts/run_*/result.json"))
+    assert len(matches) == 1
+    return matches[0].read_text(encoding="utf-8")
+
+
+def test_run_target_playwright_never_masks_a_value_not_marked_secret(
+    offline_env, fake_pytest_offline, monkeypatch
+):
+    # "não mascarar indiscriminadamente": um valor sem "type": "secret" no
+    # Environment precisa continuar visível na evidência persistida
+    # (result.json — onde o error_message da falha realmente é gravado; o
+    # resumo impresso no console nunca chega a exibir o texto da falha).
+    public_value = "valor-publico-sem-risco"
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures_with_secret")
+    monkeypatch.setenv("FAKE_PYTEST_SECRET_VALUE", public_value)
+    suite_dir = _make_suite_dir(offline_env)
+    environment_path = offline_env / "environment.json"
+    environment_path.write_text(
+        json.dumps({"values": [{"key": "base_url", "value": public_value, "type": "default"}]}),
+        encoding="utf-8",
+    )
+
+    main(
+        [
+            "run",
+            "--target",
+            "playwright",
+            "--file",
+            str(suite_dir),
+            "--environment",
+            str(environment_path),
+        ]
+    )
+
+    assert public_value in _read_persisted_result_json(offline_env)
+
+
+def test_run_target_playwright_without_environment_never_masks_anything(
+    offline_env, fake_pytest_offline, monkeypatch
+):
+    value = "aparece-normalmente-sem-environment"
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "test_failures_with_secret")
+    monkeypatch.setenv("FAKE_PYTEST_SECRET_VALUE", value)
+    suite_dir = _make_suite_dir(offline_env)
+
+    main(["run", "--target", "playwright", "--file", str(suite_dir)])
+
+    assert value in _read_persisted_result_json(offline_env)
+
+
+def test_run_target_playwright_malformed_environment_never_blocks_execution(
+    offline_env, fake_pytest_offline, monkeypatch
+):
+    # Mascaramento é best-effort: um Environment inválido nunca deveria
+    # impedir a execução em si.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    suite_dir = _make_suite_dir(offline_env)
+    environment_path = offline_env / "environment.json"
+    environment_path.write_text("isto não é um json válido", encoding="utf-8")
+
+    exit_code = main(
+        [
+            "run",
+            "--target",
+            "playwright",
+            "--file",
+            str(suite_dir),
+            "--environment",
+            str(environment_path),
+        ]
+    )
+
+    assert exit_code == SUCCESS
+
+
+def test_run_target_playwright_environment_empty_value_reports_invalid_input(
+    offline_env, fake_pytest_offline, monkeypatch
+):
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    suite_dir = _make_suite_dir(offline_env)
+
+    exit_code = main(
+        ["run", "--target", "playwright", "--file", str(suite_dir), "--environment", ""]
+    )
+
+    assert exit_code == INVALID_INPUT_OR_CONFIGURATION

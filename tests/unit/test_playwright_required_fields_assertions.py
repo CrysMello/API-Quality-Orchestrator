@@ -34,8 +34,10 @@ from api_quality_agent.parsers import PostmanCollectionParser
 
 @pytest.fixture
 def helpers():
-    source = _render_helpers_block(
-        frozenset({"assert_required_field_present", "get_nested_value"})
+    source = "import json\nimport os\n\n\n" + _render_helpers_block(
+        frozenset(
+            {"assert_required_field_present", "get_nested_value", "record_assertion_result"}
+        )
     )
     namespace: dict = {}
     exec(source, namespace)  # noqa: S102 - texto do próprio gerador, não input externo
@@ -43,40 +45,82 @@ def helpers():
 
 
 def test_required_field_present_passes(helpers):
-    helpers["_assert_required_field_present"]({"id": "1"}, ("id",))
+    helpers["_assert_required_field_present"]({"id": "1"}, ("id",), "t1", "porque sim (teste)")
 
 
 def test_required_field_absent_fails_with_the_full_path(helpers):
     with pytest.raises(AssertionError, match=r"Campo obrigatório ausente: user\.address\.zipCode"):
         helpers["_assert_required_field_present"](
-            {"user": {"address": {}}}, ("user", "address", "zipCode")
+            {"user": {"address": {}}}, ("user", "address", "zipCode"), "t1", "porque sim (teste)"
         )
 
 
 def test_nested_field_present_passes(helpers):
     helpers["_assert_required_field_present"](
-        {"user": {"address": {"zipCode": "12345"}}}, ("user", "address", "zipCode")
+        {"user": {"address": {"zipCode": "12345"}}},
+        ("user", "address", "zipCode"),
+        "t1",
+        "porque sim (teste)",
     )
 
 
 def test_field_present_with_null_never_fails(helpers):
     # "Diferenciar campo ausente de campo presente com null" — presente
     # (mesmo que null) nunca é tratado como ausente.
-    helpers["_assert_required_field_present"]({"address": None}, ("address",))
+    helpers["_assert_required_field_present"](
+        {"address": None}, ("address",), "t1", "porque sim (teste)"
+    )
 
 
 def test_nullable_parent_skips_children_instead_of_crashing(helpers):
     # "Respeitar nullable quando documentado": um pai null nunca falha só
     # por não ter como navegar até o filho, e nunca lança TypeError.
     helpers["_assert_required_field_present"](
-        {"user": None}, ("user", "address", "zipCode")
+        {"user": None}, ("user", "address", "zipCode"), "t1", "porque sim (teste)"
     )
 
 
 def test_non_dict_intermediate_node_never_crashes(helpers):
     # Nunca uma validação de tipo (fora de escopo) — um nó inesperadamente
     # não-navegável simplesmente interrompe, nunca lança exceção.
-    helpers["_assert_required_field_present"]({"user": "not-an-object"}, ("user", "address"))
+    helpers["_assert_required_field_present"](
+        {"user": "not-an-object"}, ("user", "address"), "t1", "porque sim (teste)"
+    )
+
+
+def test_helper_records_a_passed_assertion_result(monkeypatch, tmp_path, helpers):
+    # P1.1: o MESMO helper que valida também registra — nunca uma segunda
+    # comparação paralela.
+    results_path = tmp_path / "results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+
+    helpers["_assert_required_field_present"](
+        {"id": "1"}, ("id",), "test_get_users_success", "1 campo obrigatório (evidência: contract)."
+    )
+
+    entries = [json.loads(line) for line in results_path.read_text(encoding="utf-8").splitlines()]
+    assert len(entries) == 1
+    assert entries[0]["test_id"] == "test_get_users_success"
+    assert entries[0]["name"] == "required_field:id"
+    assert entries[0]["status"] == "PASSED"
+    assert entries[0]["precision"] == "EXACT"
+    assert entries[0]["expected"] == "presente"
+    assert entries[0]["actual"] == "presente"
+
+
+def test_helper_records_a_failed_assertion_result(monkeypatch, tmp_path, helpers):
+    results_path = tmp_path / "results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+
+    with pytest.raises(AssertionError):
+        helpers["_assert_required_field_present"](
+            {}, ("id",), "test_get_users_success", "1 campo obrigatório (evidência: contract)."
+        )
+
+    entries = [json.loads(line) for line in results_path.read_text(encoding="utf-8").splitlines()]
+    assert len(entries) == 1
+    assert entries[0]["status"] == "FAILED"
+    assert entries[0]["actual"] == "ausente"
 
 
 def test_empty_array_via_get_nested_value_and_iteration_never_fails(helpers):
@@ -166,8 +210,10 @@ def test_required_field_generates_a_presence_assertion():
     schema = {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}
     generated = _generate(_GET_USERS, _base_assertions(_schema_assertion(schema)))
 
-    assert "_assert_required_field_present(body, ('id',))" in generated.content
-    assert "def _assert_required_field_present(node, path):" in generated.content
+    assert "_assert_required_field_present(body, ('id',), 'test_get_users_success'" in (
+        generated.content
+    )
+    assert "def _assert_required_field_present(node, path, test_id, reason):" in generated.content
     ast.parse(generated.content)
 
 
@@ -185,8 +231,10 @@ def test_optional_field_never_generates_a_presence_assertion():
     }
     generated = _generate(_GET_USERS, _base_assertions(_schema_assertion(schema)))
 
-    assert "_assert_required_field_present(body, ('nickname',))" not in generated.content
-    assert "_assert_required_field_present(body, ('id',))" in generated.content
+    assert "_assert_required_field_present(body, ('nickname',)" not in generated.content
+    assert "_assert_required_field_present(body, ('id',), 'test_get_users_success'" in (
+        generated.content
+    )
     ast.parse(generated.content)
 
 
@@ -222,11 +270,16 @@ def test_nested_required_field_uses_the_full_path():
     }
     generated = _generate(_GET_USERS, _base_assertions(_schema_assertion(schema)))
 
-    assert "_assert_required_field_present(body, ('user',))" in generated.content
-    assert "_assert_required_field_present(body, ('user', 'address'))" in generated.content
+    assert "_assert_required_field_present(body, ('user',), 'test_get_users_success'" in (
+        generated.content
+    )
     assert (
-        "_assert_required_field_present(body, ('user', 'address', 'zipCode'))"
+        "_assert_required_field_present(body, ('user', 'address'), 'test_get_users_success'"
         in generated.content
+    )
+    assert (
+        "_assert_required_field_present(body, ('user', 'address', 'zipCode'), "
+        "'test_get_users_success'" in generated.content
     )
     ast.parse(generated.content)
 
@@ -242,7 +295,9 @@ def test_nullable_field_still_generates_a_presence_assertion():
     }
     generated = _generate(_GET_USERS, _base_assertions(_schema_assertion(schema)))
 
-    assert "_assert_required_field_present(body, ('address',))" in generated.content
+    assert "_assert_required_field_present(body, ('address',), 'test_get_users_success'" in (
+        generated.content
+    )
     # "type" ambíguo (lista) — nunca desce para gerar requireds do que teria
     # dentro de "address", mesmo que ele também declarasse "required".
     ast.parse(generated.content)
@@ -268,7 +323,9 @@ def test_array_field_with_structured_items_generates_a_safe_iteration():
     }
     generated = _generate(_GET_USERS, _base_assertions(_schema_assertion(schema)))
 
-    assert "_assert_required_field_present(body, ('orders',))" in generated.content
+    assert "_assert_required_field_present(body, ('orders',), 'test_get_users_success'" in (
+        generated.content
+    )
     assert "_get_nested_value(body, ('orders',))" in generated.content
     assert "for _item in _orders_items:" in generated.content
     assert "if not isinstance(_item, dict):" in generated.content
@@ -289,7 +346,9 @@ def test_array_field_without_item_schema_generates_only_presence():
     }
     generated = _generate(_GET_USERS, _base_assertions(_schema_assertion(schema)))
 
-    assert "_assert_required_field_present(body, ('tags',))" in generated.content
+    assert "_assert_required_field_present(body, ('tags',), 'test_get_users_success'" in (
+        generated.content
+    )
     # O helper _get_nested_value é definido (sempre junto do outro helper),
     # mas nunca CHAMADO — nenhuma iteração de item foi gerada para "tags",
     # já que seu "items" não é um schema de objeto com "required" próprio.

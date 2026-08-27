@@ -9,6 +9,8 @@ evidência (ex.: resposta 204 sem Content-Type documentado).
 import ast
 import json
 
+import pytest
+
 from api_quality_agent.domain.models import (
     AssertionDefinition,
     AssertionType,
@@ -268,6 +270,116 @@ def test_postman_flow_keeps_generating_the_same_content_type_assertion():
 
 
 # --- geração sintaticamente válida em todo cenário --------------------------
+
+
+# --- P1.1 (complementação): registro de AssertionResult ---------------------
+
+
+class _FakeResponse:
+    def __init__(self, status: int, headers: dict[str, str] | None = None, body_text: str = ""):
+        self.status = status
+        self.headers = headers or {}
+        self._body_text = body_text
+
+    def text(self) -> str:
+        return self._body_text
+
+
+class _FakeApiContext:
+    def __init__(self, response: _FakeResponse):
+        self._response = response
+
+    def get(self, path, params=None, headers=None, data=None, multipart=None):
+        return self._response
+
+
+def _load_generated_test_function(content: str):
+    # Mesmo texto exato que vira o arquivo gerado — nunca uma cópia
+    # reescrita à mão que possa divergir (mesmo padrão de
+    # test_playwright_false_positive_prevention.py).
+    ast.parse(content)
+    namespace: dict = {}
+    exec(content, namespace)  # noqa: S102 - texto do próprio gerador, não input externo
+    functions = [
+        value for key, value in namespace.items() if key.startswith("test_") and callable(value)
+    ]
+    assert len(functions) == 1
+    return functions[0]
+
+
+def test_content_type_assertion_records_a_passed_result(tmp_path, monkeypatch):
+    results_path = tmp_path / "assertion-results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+
+    analysis, normalized_request = _analyzed(_GET_USERS)
+    strategy = TestStrategy(
+        endpoint_source=analysis.source,
+        assertions=(_content_type_assertion("application/json", origin="contract"),),
+        variable_extractions=(),
+        negative_cases=(),
+        warnings=(),
+    )
+    generated = PlaywrightEndpointTestGenerator().generate_endpoint(strategy, normalized_request)
+    test_function = _load_generated_test_function(generated.content)
+
+    test_function(
+        _FakeApiContext(
+            _FakeResponse(status=200, headers={"content-type": "application/json"}, body_text="{}")
+        )
+    )
+
+    lines = results_path.read_text(encoding="utf-8").strip().splitlines()
+    recorded = [json.loads(line) for line in lines]
+    content_type_entry = next(e for e in recorded if e["name"] == "Content-Type")
+    assert content_type_entry["expected"] == "application/json"
+    assert content_type_entry["actual"] == "application/json"
+    assert content_type_entry["status"] == "PASSED"
+    assert content_type_entry["precision"] == "EXACT"
+    assert "contract" in content_type_entry["reason"]
+
+
+def test_content_type_assertion_records_a_failed_result_and_still_raises(tmp_path, monkeypatch):
+    results_path = tmp_path / "assertion-results.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_ASSERTION_RESULTS_PATH", str(results_path))
+
+    analysis, normalized_request = _analyzed(_GET_USERS)
+    strategy = TestStrategy(
+        endpoint_source=analysis.source,
+        assertions=(_content_type_assertion("application/json", origin="contract"),),
+        variable_extractions=(),
+        negative_cases=(),
+        warnings=(),
+    )
+    generated = PlaywrightEndpointTestGenerator().generate_endpoint(strategy, normalized_request)
+    test_function = _load_generated_test_function(generated.content)
+
+    with pytest.raises(AssertionError):
+        test_function(_FakeApiContext(_FakeResponse(status=200, headers={"content-type": "text/html"})))
+
+    lines = results_path.read_text(encoding="utf-8").strip().splitlines()
+    recorded = [json.loads(line) for line in lines]
+    content_type_entry = next(e for e in recorded if e["name"] == "Content-Type")
+    assert content_type_entry["expected"] == "application/json"
+    assert content_type_entry["actual"] == "text/html"
+    assert content_type_entry["status"] == "FAILED"
+
+
+def test_content_type_assertion_result_shares_the_test_id_with_its_transaction():
+    # Correlação test_id -> assertion (o outro lado, test_id -> transação,
+    # já é responsabilidade da fixture autouse de conftest.py — Parte P1.2)
+    # — aqui só confirma que o mesmo test_id literal (nome da função gerada)
+    # é o que chega em cada _record_assertion_result do Content-Type.
+    analysis, normalized_request = _analyzed(_GET_USERS)
+    strategy = TestStrategy(
+        endpoint_source=analysis.source,
+        assertions=(_content_type_assertion("application/json"),),
+        variable_extractions=(),
+        negative_cases=(),
+        warnings=(),
+    )
+    generated = PlaywrightEndpointTestGenerator().generate_endpoint(strategy, normalized_request)
+
+    assert "'test_get_users_success', \"Content-Type\"" in generated.content
 
 
 def test_all_content_type_scenarios_produce_syntactically_valid_python():

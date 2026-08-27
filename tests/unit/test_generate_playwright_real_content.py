@@ -242,7 +242,10 @@ def test_get_post_put_patch_delete_all_produce_real_tests_via_cli(tmp_path, monk
     # PATCH preserva só o body parcial recebido — nunca expandido para o
     # recurso inteiro (nenhum "id"/"name"/"email" aparece).
     assert '    request_body = {\n        "active": False,\n    }\n' in patch_content
-    assert '"name"' not in patch_content
+    # '"name": "' (valor string literal) — nunca confundir com o
+    # '"name": name,' do helper _record_assertion_result (P1.1), sempre
+    # presente e sem relação com o body do PATCH.
+    assert '"name": "' not in patch_content
     assert '"email"' not in patch_content
     assert "response = api_context.patch(\n" in patch_content
 

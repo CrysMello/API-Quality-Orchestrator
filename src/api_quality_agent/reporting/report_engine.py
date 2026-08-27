@@ -10,10 +10,15 @@ from api_quality_agent.application.orchestration.endpoint_generation_outcome imp
 from api_quality_agent.application.use_cases import CollectionUpdateResult
 from api_quality_agent.domain.models import (
     ArtifactLocation,
+    AssertionResult,
     ExecutionResult,
     ExecutionResultRecord,
     GeneratedArtifact,
+    HttpTransaction,
+    InfrastructureFailure,
     SelectionOrigin,
+    TestFailure,
+    TraceArtifact,
 )
 from api_quality_agent.ports.outbound import ArtifactRepository
 from api_quality_agent.reporting.execution_report_html_renderer import (
@@ -21,12 +26,17 @@ from api_quality_agent.reporting.execution_report_html_renderer import (
 )
 from api_quality_agent.reporting.report import (
     Report,
+    ReportAssertionResult,
     ReportDiffEntry,
     ReportDiffSection,
     ReportEndpointSummary,
     ReportExecutionSection,
+    ReportHttpTransaction,
+    ReportHttpTransactionHeader,
     ReportInfrastructureFailure,
+    ReportTestExecution,
     ReportTestFailure,
+    ReportTraceArtifact,
     ReportUpdateSection,
 )
 from api_quality_agent.reporting.report_html_renderer import render_report_html
@@ -271,6 +281,7 @@ def _build_execution_section(
             failed_assertions=None,
             test_failures=(),
             infrastructure_failure=None,
+            skipped_tests=None,
         )
 
     infrastructure_failure = None
@@ -297,6 +308,19 @@ def _build_execution_section(
             for failure in execution_result.test_failures
         ),
         infrastructure_failure=infrastructure_failure,
+        skipped_tests=execution_result.skipped_tests,
+        tests=_build_test_executions(
+            execution_result.http_transactions,
+            execution_result.assertion_results,
+            execution_result.trace_artifacts,
+            execution_result.evidence_failures,
+            execution_result.test_failures,
+            # Fluxo "ao vivo" (generate/update): nunca houve persistência
+            # ainda, então TraceArtifact.path já é um caminho ABSOLUTO de
+            # arquivo temporário (ver PlaywrightAdapter) — nada a resolver
+            # contra um diretório de origem.
+            source_dir=None,
+        ),
     )
 
 
@@ -336,4 +360,172 @@ def _build_execution_section_from_record(record: ExecutionResultRecord) -> Repor
         infrastructure_failure=infrastructure_failure,
         started_at=record.started_at,
         finished_at=record.finished_at,
+        skipped_tests=record.skipped_tests,
+        tests=_build_test_executions(
+            record.http_transactions,
+            record.assertion_results,
+            record.trace_artifacts,
+            record.evidence_failures,
+            record.test_failures,
+            # Fluxo persistido (report): TraceArtifact.path já vem RELATIVO
+            # ao diretório de result.json (ver PersistExecutionResultUseCase)
+            # — resolvido aqui contra esse diretório, nunca contra o
+            # diretório de saída do próprio report.html (que pode ser
+            # outro, via --output), pra o link continuar válido.
+            source_dir=Path(record.source_path).resolve().parent,
+        ),
+    )
+
+
+def _build_test_executions(
+    http_transactions: tuple[HttpTransaction, ...],
+    assertion_results: tuple[AssertionResult, ...],
+    trace_artifacts: tuple[TraceArtifact, ...],
+    evidence_failures: tuple[InfrastructureFailure, ...],
+    test_failures: tuple[TestFailure, ...],
+    *,
+    source_dir: Path | None,
+) -> tuple[ReportTestExecution, ...]:
+    # P1.2 (integração com ReportEngine): agrupa por test_id, na ordem de
+    # primeira aparição em http_transactions — com fallback para
+    # assertion_results só para um test_id que não tenha nenhuma transação
+    # (ex.: asserção BROAD de status, que ainda assim registra um
+    # AssertionResult). Dentro de cada grupo, a ordem original de cada
+    # tupla é preservada — nunca reordenada, nunca misturada com outro
+    # test_id. Resultado antigo (sem estes campos) devolve () — nenhuma
+    # seção nova é inventada no relatório.
+    order: list[str] = []
+    seen: set[str] = set()
+    for transaction in http_transactions:
+        if transaction.test_id not in seen:
+            seen.add(transaction.test_id)
+            order.append(transaction.test_id)
+    for assertion in assertion_results:
+        if assertion.test_id not in seen:
+            seen.add(assertion.test_id)
+            order.append(assertion.test_id)
+    # P1.4 (hardening): um teste que falha por erro de TRANSPORTE (nunca
+    # chega a existir uma resposta, logo nenhuma HttpTransaction nem
+    # AssertionResult é registrada) ainda assim gera um trace — sem este
+    # fallback, o trace desse teste nunca apareceria em lugar nenhum do
+    # relatório, mesmo tendo sido persistido corretamente.
+    for artifact in trace_artifacts:
+        if artifact.test_id not in seen:
+            seen.add(artifact.test_id)
+            order.append(artifact.test_id)
+    # P1.5 (infrastructure failure das evidências): mesmo raciocínio — uma
+    # falha de evidência sem HttpTransaction/AssertionResult/TraceArtifact
+    # (ex.: mkdir do diretório de destino falhou antes de qualquer trace
+    # existir) nunca pode desaparecer do relatório. test_id=None (falha
+    # sem correlação conhecida) nunca entra aqui — nunca inventa um
+    # test_id só para exibir.
+    for failure in evidence_failures:
+        if failure.test_id is not None and failure.test_id not in seen:
+            seen.add(failure.test_id)
+            order.append(failure.test_id)
+    # P1.6 (sanity check pós-hardening): um teste que falha sem deixar
+    # NENHUMA evidência correlacionável (nem HttpTransaction, nem
+    # AssertionResult, nem TraceArtifact, nem evidence_failure — ex.: erro
+    # de transporte antes de qualquer request) ainda tinha um TestFailure
+    # registrado, mas nunca aparecia em report.execution.tests, sumindo da
+    # visão detalhada por teste (só sobrava na seção "Falhas" legada, sem
+    # nenhum agrupamento). test_name é o mesmo identificador usado como
+    # test_id em toda a correlação (ver PlaywrightAdapter/request.node.name)
+    # — nenhum test_id artificial é inventado aqui.
+    for test_failure in test_failures:
+        if test_failure.test_name not in seen:
+            seen.add(test_failure.test_name)
+            order.append(test_failure.test_name)
+
+    if not order:
+        return ()
+
+    # P1.3 (Trace em falha): no máximo um trace por test_id nesta fase (a
+    # fixture api_context só chama tracing.start/stop uma vez por função de
+    # teste) — se por algum motivo existir mais de um, o último vence
+    # (nunca uma lista, pra não inventar uma estrutura de "múltiplos traces
+    # por teste" que não existe ainda).
+    trace_by_test_id = {artifact.test_id: artifact for artifact in trace_artifacts}
+
+    return tuple(
+        ReportTestExecution(
+            test_id=test_id,
+            transactions=tuple(
+                _build_report_transaction(transaction)
+                for transaction in http_transactions
+                if transaction.test_id == test_id
+            ),
+            assertions=tuple(
+                _build_report_assertion(assertion)
+                for assertion in assertion_results
+                if assertion.test_id == test_id
+            ),
+            trace=_build_report_trace(trace_by_test_id.get(test_id), source_dir=source_dir),
+            evidence_failures=tuple(
+                _build_report_evidence_failure(failure)
+                for failure in evidence_failures
+                if failure.test_id == test_id
+            ),
+        )
+        for test_id in order
+    )
+
+
+def _build_report_evidence_failure(failure: InfrastructureFailure) -> ReportInfrastructureFailure:
+    return ReportInfrastructureFailure(
+        failure_type=failure.failure_type.value,
+        message=failure.message,
+        source=failure.source,
+        test_id=failure.test_id,
+    )
+
+
+def _build_report_trace(
+    artifact: TraceArtifact | None, *, source_dir: Path | None
+) -> ReportTraceArtifact | None:
+    if artifact is None:
+        return None
+    candidate = Path(artifact.path)
+    if source_dir is not None and not candidate.is_absolute():
+        candidate = source_dir / candidate
+    resolved = candidate.resolve()
+    # P1.4 (hardening): a referência nunca é apagada (result.json/histórico
+    # continuam intactos) — só marcada como indisponível quando o arquivo
+    # físico não existe mais (movido, apagado, disco diferente etc.), pra
+    # o renderer nunca produzir um link morto silenciosamente.
+    return ReportTraceArtifact(
+        test_id=artifact.test_id, path=str(resolved), available=resolved.is_file()
+    )
+
+
+def _build_report_transaction(transaction: HttpTransaction) -> ReportHttpTransaction:
+    return ReportHttpTransaction(
+        method=transaction.method,
+        url=transaction.url,
+        request_headers=tuple(
+            ReportHttpTransactionHeader(name=header.name, value=header.value)
+            for header in transaction.request_headers
+        ),
+        request_body=transaction.request_body,
+        query_parameters=tuple(
+            ReportHttpTransactionHeader(name=param.name, value=param.value)
+            for param in transaction.query_parameters
+        ),
+        response_status=transaction.response_status,
+        response_headers=tuple(
+            ReportHttpTransactionHeader(name=header.name, value=header.value)
+            for header in transaction.response_headers
+        ),
+        response_body=transaction.response_body,
+    )
+
+
+def _build_report_assertion(assertion: AssertionResult) -> ReportAssertionResult:
+    return ReportAssertionResult(
+        name=assertion.name,
+        expected=assertion.expected,
+        actual=assertion.actual,
+        status=assertion.status,
+        precision=assertion.precision,
+        reason=assertion.reason,
     )

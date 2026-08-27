@@ -10,6 +10,7 @@ from api_quality_agent.domain.models.approval_result import ApprovalResult
 from api_quality_agent.domain.models.artifact_location import ArtifactLocation
 from api_quality_agent.domain.models.assertion_definition import AssertionDefinition
 from api_quality_agent.domain.models.assertion_origin import AssertionOrigin
+from api_quality_agent.domain.models.assertion_result import AssertionResult
 from api_quality_agent.domain.models.assertion_type import AssertionType
 from api_quality_agent.domain.models.auth_source import AuthSource
 from api_quality_agent.domain.models.auth_type import AuthType
@@ -48,6 +49,7 @@ from api_quality_agent.domain.models.execution_result_location import ExecutionR
 from api_quality_agent.domain.models.execution_result_record import ExecutionResultRecord
 from api_quality_agent.domain.models.environment_variable import EnvironmentVariable
 from api_quality_agent.domain.models.generated_artifact import GeneratedArtifact
+from api_quality_agent.domain.models.http_transaction import HttpTransaction, HttpTransactionHeader
 from api_quality_agent.domain.models.infrastructure_failure import InfrastructureFailure
 from api_quality_agent.domain.models.infrastructure_failure_type import InfrastructureFailureType
 from api_quality_agent.domain.models.input_origin import InputOrigin
@@ -97,6 +99,7 @@ from api_quality_agent.domain.models.strategy_warning import StrategyWarning
 from api_quality_agent.domain.models.test_failure import TestFailure
 from api_quality_agent.domain.models.test_strategy import TestStrategy
 from api_quality_agent.domain.models.test_strategy_options import TestStrategyOptions
+from api_quality_agent.domain.models.trace_artifact import TraceArtifact
 from api_quality_agent.domain.models.variable_extraction import VariableExtraction
 from api_quality_agent.domain.models.variable_scope import VariableScope
 from api_quality_agent.domain.models.workspace_ref import WorkspaceRef
@@ -112,6 +115,7 @@ __all__ = [
     "ArtifactLocation",
     "AssertionDefinition",
     "AssertionOrigin",
+    "AssertionResult",
     "AssertionType",
     "AuthSource",
     "AuthType",
@@ -155,6 +159,8 @@ __all__ = [
     "ExecutionResultLocation",
     "ExecutionResultRecord",
     "GeneratedArtifact",
+    "HttpTransaction",
+    "HttpTransactionHeader",
     "InfrastructureFailure",
     "InfrastructureFailureType",
     "InputOrigin",
@@ -195,6 +201,7 @@ __all__ = [
     "TestFailure",
     "TestStrategy",
     "TestStrategyOptions",
+    "TraceArtifact",
     "UnknownCollectionItem",
     "VariableExtraction",
     "VariableScope",

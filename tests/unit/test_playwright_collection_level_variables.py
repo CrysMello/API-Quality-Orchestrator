@@ -115,8 +115,11 @@ def test_pure_path_variable_declared_only_at_collection_level_resolves_as_a_lite
     assert "@pytest.mark.skip" not in get_post
     assert 'api_context.get("/posts/1")' in get_post
     # Nunca deferido para uma variável de ambiente do sistema (regra: só
-    # prioridades 1/2 resolvem path em tempo de geração).
-    assert "os.environ.get" not in get_post
+    # prioridades 1/2 resolvem path em tempo de geração) — "AQO_" é o
+    # prefixo exclusivo de variável deferida (variable_resolver.py); não
+    # confundir com o os.environ.get incondicional de
+    # PLAYWRIGHT_ASSERTION_RESULTS_PATH (P1.1).
+    assert 'os.environ.get("AQO_' not in get_post
     ast.parse(get_post)
 
 

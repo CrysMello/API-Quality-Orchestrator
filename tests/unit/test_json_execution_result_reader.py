@@ -49,6 +49,82 @@ def _valid_payload_1_2(**overrides) -> dict:
     return payload
 
 
+def _valid_payload_1_3(**overrides) -> dict:
+    payload = _valid_payload_1_2(schema_version="1.3")
+    payload["summary"] = {**payload["summary"], "skipped": 2}
+    payload.update(overrides)
+    return payload
+
+
+def _valid_payload_1_4(**overrides) -> dict:
+    payload = _valid_payload_1_3(schema_version="1.4")
+    payload["http_transactions"] = [
+        {
+            "method": "GET",
+            "url": "https://api.exemplo.com/users",
+            "request_headers": {"Accept": "application/json"},
+            "request_body": None,
+            "response_status": 200,
+            "response_headers": {"content-type": "application/json"},
+            "response_body": '{"items": []}',
+        },
+    ]
+    payload.update(overrides)
+    return payload
+
+
+def _valid_payload_1_5(**overrides) -> dict:
+    payload = _valid_payload_1_4(schema_version="1.5")
+    payload["http_transactions"][0]["test_id"] = "test_get_users_success"
+    payload["assertion_results"] = [
+        {
+            "test_id": "test_get_users_success",
+            "name": "HTTP status",
+            "expected": 200,
+            "actual": 200,
+            "status": "PASSED",
+            "precision": "EXACT",
+            "reason": "Status HTTP 200 documentado explicitamente (evidência: contract).",
+        },
+    ]
+    payload.update(overrides)
+    return payload
+
+
+def _valid_payload_1_6(**overrides) -> dict:
+    payload = _valid_payload_1_5(schema_version="1.6")
+    payload["trace_artifacts"] = [
+        {
+            "type": "playwright-trace",
+            "test_id": "test_get_users_success",
+            "path": "traces/00-test_get_users_success.zip",
+        },
+    ]
+    payload.update(overrides)
+    return payload
+
+
+def _valid_payload_1_7(**overrides) -> dict:
+    payload = _valid_payload_1_6(schema_version="1.7")
+    payload["evidence_failures"] = [
+        {
+            "type": "evidence_persistence_failed",
+            "source": "playwright_trace",
+            "test_id": "test_post_orders_fail",
+            "message": "Falha ao mascarar o Trace; artefato não persistido por segurança.",
+        },
+    ]
+    payload.update(overrides)
+    return payload
+
+
+def _valid_payload_1_8(**overrides) -> dict:
+    payload = _valid_payload_1_7(schema_version="1.8")
+    payload["http_transactions"][0]["query_parameters"] = {"page": "2", "limit": "10"}
+    payload.update(overrides)
+    return payload
+
+
 def _valid_payload_1_0() -> dict:
     # Schema 1.0: sem schema_version e sem workspace no arquivo.
     return {
@@ -88,6 +164,8 @@ def test_read_schema_1_1_populates_workspace(tmp_path):
     assert record.finished_at == datetime(2026, 7, 20, 10, 35, 46, tzinfo=timezone.utc)
     assert record.source_path == str(path)
     assert record.test_failures == ()
+    assert record.skipped_tests == 0
+    assert record.http_transactions == ()
 
 
 # --- Leitura: schema 1.2 ----------------------------------------------------------------
@@ -106,6 +184,276 @@ def test_read_schema_1_2_populates_test_failures(tmp_path):
     assert record.test_failures[0].error_message == "boom"
 
 
+def test_read_schema_1_2_defaults_skipped_tests_to_zero(tmp_path):
+    # "summary.skipped" só existe a partir do 1.3 — um result.json 1.2
+    # legado (sem essa chave) precisa continuar sendo lido, com 0.
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_2())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.skipped_tests == 0
+
+
+# --- Leitura: schema 1.3 ----------------------------------------------------------------
+
+
+def test_read_schema_1_3_populates_skipped_tests(tmp_path):
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_3())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.schema_version == "1.3"
+    assert record.skipped_tests == 2
+    # Demais campos continuam populados normalmente (regressão do que já
+    # existia no 1.2).
+    assert len(record.test_failures) == 1
+    assert record.total_requests == 28
+    assert record.total_assertions == 312
+    assert record.failed_assertions == 3
+
+
+def test_read_schema_1_3_with_zero_skipped_tests(tmp_path):
+    payload = _valid_payload_1_3()
+    payload["summary"]["skipped"] = 0
+    path = _write(tmp_path / "run_x" / "result.json", payload)
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.skipped_tests == 0
+
+
+def test_read_schema_1_3_defaults_http_transactions_to_empty(tmp_path):
+    # "http_transactions" só existe a partir do 1.4 — um result.json 1.3
+    # legado (sem essa chave) precisa continuar sendo lido, com tupla vazia.
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_3())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.http_transactions == ()
+
+
+# --- Leitura: schema 1.4 ----------------------------------------------------------------
+
+
+def test_read_schema_1_4_populates_http_transactions(tmp_path):
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_4())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.schema_version == "1.4"
+    assert len(record.http_transactions) == 1
+    transaction = record.http_transactions[0]
+    assert transaction.method == "GET"
+    assert transaction.url == "https://api.exemplo.com/users"
+    assert transaction.request_body is None
+    assert transaction.response_status == 200
+    assert transaction.response_body == '{"items": []}'
+    assert {h.name: h.value for h in transaction.request_headers} == {
+        "Accept": "application/json"
+    }
+    assert {h.name: h.value for h in transaction.response_headers} == {
+        "content-type": "application/json"
+    }
+    # Demais campos continuam populados normalmente (regressão do que já
+    # existia no 1.3).
+    assert record.skipped_tests == 2
+    assert len(record.test_failures) == 1
+
+
+def test_read_schema_1_4_with_no_http_transactions(tmp_path):
+    payload = _valid_payload_1_4(http_transactions=[])
+    path = _write(tmp_path / "run_x" / "result.json", payload)
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.http_transactions == ()
+
+
+def test_read_schema_1_4_defaults_http_transaction_test_id_and_assertion_results(tmp_path):
+    # "http_transactions[].test_id" e "assertion_results" só existem a
+    # partir do 1.5 — um result.json 1.4 legado precisa continuar sendo
+    # lido, com "" e tupla vazia respectivamente.
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_4())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.http_transactions[0].test_id == ""
+    assert record.assertion_results == ()
+
+
+# --- Leitura: schema 1.5 ----------------------------------------------------------------
+
+
+def test_read_schema_1_5_populates_test_id_and_assertion_results(tmp_path):
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_5())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.schema_version == "1.5"
+    assert record.http_transactions[0].test_id == "test_get_users_success"
+    assert len(record.assertion_results) == 1
+    assertion_result = record.assertion_results[0]
+    assert assertion_result.test_id == "test_get_users_success"
+    assert assertion_result.name == "HTTP status"
+    assert assertion_result.expected == 200
+    assert assertion_result.actual == 200
+    assert assertion_result.status == "PASSED"
+    assert assertion_result.precision == "EXACT"
+    assert "evidência: contract" in assertion_result.reason
+    # Correlação: mesmo test_id na transação e na assertion.
+    assert record.http_transactions[0].test_id == assertion_result.test_id
+
+
+def test_read_schema_1_5_with_no_assertion_results(tmp_path):
+    payload = _valid_payload_1_5(assertion_results=[])
+    path = _write(tmp_path / "run_x" / "result.json", payload)
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.assertion_results == ()
+
+
+def test_read_schema_1_5_defaults_trace_artifacts_to_empty(tmp_path):
+    # "trace_artifacts" só existe a partir do schema 1.6 — ausente em 1.5,
+    # tratado como tupla vazia, nunca inventado.
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_5())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.trace_artifacts == ()
+
+
+# --- Leitura: schema 1.6 (P1.3 — Trace em falha) ----------------------------------------
+
+
+def test_read_schema_1_6_populates_trace_artifacts(tmp_path):
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_6())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.schema_version == "1.6"
+    assert len(record.trace_artifacts) == 1
+    artifact = record.trace_artifacts[0]
+    assert artifact.type == "playwright-trace"
+    assert artifact.test_id == "test_get_users_success"
+    assert artifact.path == "traces/00-test_get_users_success.zip"
+    # Correlação: mesmo test_id na transação, na assertion e no trace.
+    assert record.http_transactions[0].test_id == artifact.test_id
+    assert record.assertion_results[0].test_id == artifact.test_id
+
+
+def test_read_schema_1_6_with_no_trace_artifacts(tmp_path):
+    payload = _valid_payload_1_6(trace_artifacts=[])
+    path = _write(tmp_path / "run_x" / "result.json", payload)
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.trace_artifacts == ()
+
+
+def test_read_schema_1_6_defaults_evidence_failures_to_empty(tmp_path):
+    # "evidence_failures" só existe a partir do schema 1.7 — ausente em
+    # 1.6, tratado como tupla vazia, nunca inventado (item 15).
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_6())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.evidence_failures == ()
+
+
+# --- Leitura: schema 1.7 (P1.5 — infrastructure failure das evidências) -----------------
+
+
+def test_read_schema_1_7_populates_evidence_failures(tmp_path):
+    from api_quality_agent.domain.models import InfrastructureFailureType
+
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_7())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.schema_version == "1.7"
+    assert len(record.evidence_failures) == 1
+    failure = record.evidence_failures[0]
+    assert failure.failure_type == InfrastructureFailureType.EVIDENCE_PERSISTENCE_FAILED
+    assert failure.source == "playwright_trace"
+    assert failure.test_id == "test_post_orders_fail"
+    assert "mascarar" in failure.message.lower()
+
+
+def test_read_schema_1_7_with_no_evidence_failures(tmp_path):
+    payload = _valid_payload_1_7(evidence_failures=[])
+    path = _write(tmp_path / "run_x" / "result.json", payload)
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.evidence_failures == ()
+
+
+def test_read_schema_1_6_defaults_query_parameters_to_empty(tmp_path):
+    # "http_transactions[].query_parameters" só existe a partir do schema
+    # 1.8 — ausente em 1.6/1.7, tratado como tupla vazia, nunca inventado
+    # (caso 18/compatibilidade do P2.1).
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_6())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.http_transactions[0].query_parameters == ()
+
+
+# --- Leitura: schema 1.8 (P2.1 — evidência HTTP: query parameters) ----------------------
+
+
+def test_read_schema_1_8_populates_query_parameters(tmp_path):
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_8())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.schema_version == "1.8"
+    query_parameters = {p.name: p.value for p in record.http_transactions[0].query_parameters}
+    assert query_parameters == {"page": "2", "limit": "10"}
+
+
+def test_read_schema_1_8_with_no_query_parameters(tmp_path):
+    payload = _valid_payload_1_8()
+    payload["http_transactions"][0]["query_parameters"] = {}
+    path = _write(tmp_path / "run_x" / "result.json", payload)
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.http_transactions[0].query_parameters == ()
+
+
+def test_read_schema_1_7_result_json_is_still_readable_after_the_1_8_bump(tmp_path):
+    # Compatibilidade: um result.json 1.7 real (sem query_parameters em
+    # nenhuma transação) continua sendo lido normalmente depois do bump
+    # para 1.8 — nunca quebra um resultado antigo já persistido em disco.
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_7())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.schema_version == "1.7"
+    assert record.http_transactions[0].query_parameters == ()
+
+
 # --- Leitura: schema 1.0 (retrocompatibilidade) ----------------------------------------------------------------
 
 
@@ -120,6 +468,8 @@ def test_read_schema_1_0_defaults_workspace_to_none(tmp_path):
     assert record.workspace_name is None
     assert record.collection_id == "col-1"
     assert record.success is True
+    assert record.skipped_tests == 0
+    assert record.http_transactions == ()
 
 
 # --- Falha de infraestrutura persistida ----------------------------------------------------------------

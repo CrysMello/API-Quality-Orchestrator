@@ -1,8 +1,11 @@
 from dataclasses import dataclass
 from datetime import datetime
 
+from api_quality_agent.domain.models.assertion_result import AssertionResult
+from api_quality_agent.domain.models.http_transaction import HttpTransaction
 from api_quality_agent.domain.models.infrastructure_failure import InfrastructureFailure
 from api_quality_agent.domain.models.test_failure import TestFailure
+from api_quality_agent.domain.models.trace_artifact import TraceArtifact
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,23 @@ class ExecutionResultRecord:
     success: bool
     infrastructure_failure: InfrastructureFailure | None
     test_failures: tuple[TestFailure, ...]
+    # Só existe a partir do schema 1.3 (ver JsonExecutionResultReader) —
+    # default 0 preserva toda construção existente (schema 1.0/1.1/1.2 lido,
+    # e os testes de ReportEngine/HTML renderer que constroem este record
+    # direto, sem passar por esse campo).
+    skipped_tests: int = 0
+    # P1.2: só existe a partir do schema 1.4 — mesmo raciocínio aditivo de
+    # skipped_tests (default preserva toda construção existente).
+    http_transactions: tuple[HttpTransaction, ...] = ()
+    # P1.1 (detalhamento de assertions): só existe a partir do schema 1.5 —
+    # mesmo raciocínio aditivo.
+    assertion_results: tuple[AssertionResult, ...] = ()
+    # P1.3 (Trace em falha): só existe a partir do schema 1.6 — mesmo
+    # raciocínio aditivo.
+    trace_artifacts: tuple[TraceArtifact, ...] = ()
+    # P1.5 (infrastructure failure das evidências): só existe a partir do
+    # schema 1.7 — mesmo raciocínio aditivo.
+    evidence_failures: tuple[InfrastructureFailure, ...] = ()
 
     @property
     def passed_assertions(self) -> int:
