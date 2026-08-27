@@ -665,6 +665,88 @@ def test_no_transactions_file_means_no_http_transactions(tmp_path, monkeypatch):
     assert result.http_transactions == ()
 
 
+# --- P2.1: evidência HTTP — query parameters (separados da URL) -------------------------
+
+
+def test_query_parameters_are_captured_when_present(tmp_path, monkeypatch):
+    # Caso 4 do P2.1: query_parameters vem de `params={...}` no call site
+    # gerado — nunca reparseado a partir de `url` (que já contém a query
+    # string real devolvida pelo Playwright, ver PlaywrightAdapter).
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(
+        monkeypatch,
+        [_get_transaction(query_parameters={"page": "2", "limit": "10"})],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    query_parameters = {p.name: p.value for p in result.http_transactions[0].query_parameters}
+    assert query_parameters == {"page": "2", "limit": "10"}
+
+
+def test_absence_of_query_parameters_is_preserved_as_empty_tuple(tmp_path, monkeypatch):
+    # Request sem nenhum `params=` no call site — nunca inventa query
+    # parameters que não existiram.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(monkeypatch, [_get_transaction()])
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    assert result.http_transactions[0].query_parameters == ()
+
+
+def test_query_parameters_never_duplicate_what_is_already_in_the_url(tmp_path, monkeypatch):
+    # A URL final (já com a query string real devolvida pelo Playwright)
+    # e query_parameters (o dict `params=` do call site) coexistem sem que
+    # um seja derivado do outro — este teste prova que a captura de
+    # query_parameters não altera nem duplica `url`.
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(
+        monkeypatch,
+        [
+            _get_transaction(
+                url="https://api.exemplo.com/users?page=2&limit=10",
+                query_parameters={"page": "2", "limit": "10"},
+            )
+        ],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(tests_path=_minimal_suite_dir(tmp_path))
+
+    transaction = result.http_transactions[0]
+    assert transaction.url == "https://api.exemplo.com/users?page=2&limit=10"
+    assert {p.name: p.value for p in transaction.query_parameters} == {
+        "page": "2",
+        "limit": "10",
+    }
+
+
+def test_known_secret_is_masked_in_query_parameters(tmp_path, monkeypatch):
+    # Caso 16 do P2.1: mesmo mecanismo de masking de headers/body
+    # (known_secret_values) reaproveitado para query_parameters.
+    secret_value = "sk_live_super_secret_token_123456"
+    monkeypatch.setenv("FAKE_PYTEST_MODE", "success")
+    _set_transactions(
+        monkeypatch,
+        [_get_transaction(query_parameters={"api_key": secret_value, "page": "1"})],
+    )
+    adapter = _build_adapter()
+
+    result = adapter.run(
+        tests_path=_minimal_suite_dir(tmp_path), known_secret_values=(secret_value,)
+    )
+
+    query_parameters = {p.name: p.value for p in result.http_transactions[0].query_parameters}
+    assert secret_value not in query_parameters["api_key"]
+    assert "****" in query_parameters["api_key"]
+    # Caso 17: conteúdo não secreto no mesmo transporte continua intacto —
+    # masking não é indiscriminado.
+    assert query_parameters["page"] == "1"
+
+
 # --- P1.2: masking de secret na evidência de transação HTTP ------------------------------
 
 

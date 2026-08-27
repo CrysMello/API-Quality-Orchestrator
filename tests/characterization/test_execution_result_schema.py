@@ -1,16 +1,15 @@
-"""Caracterização do schema de `result.json` (schema_version "1.7") exatamente
+"""Caracterização do schema de `result.json` (schema_version "1.8") exatamente
 como ele é serializado hoje.
 
-"1.7" foi introduzida no bloco P1.5 seguinte — infrastructure failure das
-evidências (aditivo: `evidence_failures`, uma InfrastructureFailure por
-falha real na infraestrutura de captura/masking/persistência de uma
-evidência — hoje só o Playwright Trace — nunca uma falha funcional do
-teste) — bumps anteriores foram "1.6" (P1.3, `trace_artifacts`), "1.5"
-(detalhamento de assertions: `assertion_results` + `http_transactions[].
-test_id`), "1.4" (P1.2, http_transactions), "1.3" (P1.1/skipped_tests,
-summary.skipped) e "1.2" (test_failures). A Fase 9 do plano Playwright
-ainda vai introduzir o campo aditivo `tool` e bumpar de novo,
-deliberadamente.
+"1.8" foi introduzida no bloco P2.1 — evidência HTTP estruturada (aditivo:
+`http_transactions[].query_parameters`, os query parameters passados
+explicitamente via `params={...}` no call site gerado, nunca reparseados a
+partir de `url`) — bumps anteriores foram "1.7" (P1.5, `evidence_failures`),
+"1.6" (P1.3, `trace_artifacts`), "1.5" (detalhamento de assertions:
+`assertion_results` + `http_transactions[].test_id`), "1.4" (P1.2,
+http_transactions), "1.3" (P1.1/skipped_tests, summary.skipped) e "1.2"
+(test_failures). A Fase 9 do plano Playwright ainda vai introduzir o campo
+aditivo `tool` e bumpar de novo, deliberadamente.
 
 Ver tests/characterization/README.md: se este teste quebrar durante uma
 dessas mudanças planejadas, é esperado — atualize-o conscientemente. Se
@@ -59,8 +58,8 @@ def _serialize(result: ExecutionResult, **overrides: object) -> dict:
     return persist_module._serialize(result, **kwargs)  # type: ignore[arg-type]
 
 
-def test_schema_version_is_now_1_7() -> None:
-    assert persist_module.EXECUTION_RESULT_SCHEMA_VERSION == "1.7"
+def test_schema_version_is_now_1_8() -> None:
+    assert persist_module.EXECUTION_RESULT_SCHEMA_VERSION == "1.8"
 
 
 def test_serialized_top_level_keys_are_unchanged() -> None:
@@ -80,7 +79,7 @@ def test_serialized_top_level_keys_are_unchanged() -> None:
         "success",
         "infrastructure_failure",
     }
-    assert serialized["schema_version"] == "1.7"
+    assert serialized["schema_version"] == "1.8"
     assert set(serialized["execution"].keys()) == {
         "started_at",
         "finished_at",
@@ -128,6 +127,7 @@ def test_http_transaction_keys_are_unchanged() -> None:
         "url",
         "request_headers",
         "request_body",
+        "query_parameters",
         "response_status",
         "response_headers",
         "response_body",

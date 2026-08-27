@@ -519,6 +519,13 @@ def _parse_transaction_entry(
             url=mask_all_occurrences(str(entry["url"]), known_secret_values),
             request_headers=_masked_headers(entry.get("request_headers"), known_secret_values),
             request_body=_masked_body(entry.get("request_body"), known_secret_values),
+            # P2.1 (evidência HTTP): mesmo mecanismo de masking de
+            # request_headers/response_headers (_masked_headers já cobre o
+            # formato nome/valor) — nenhuma segunda implementação de
+            # masking introduzida.
+            query_parameters=_masked_headers(
+                entry.get("query_parameters"), known_secret_values
+            ),
             response_status=int(entry["response_status"]),
             response_headers=_masked_headers(entry.get("response_headers"), known_secret_values),
             response_body=_masked_body(entry.get("response_body"), known_secret_values),

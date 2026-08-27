@@ -1015,3 +1015,144 @@ def test_report_engine_never_alters_an_already_masked_value():
 
     assert "sk_l****3456" in html
     assert "sk_live" not in html
+
+
+# --- P2.1 (evidência HTTP): query parameters --------------------------------
+
+
+def test_report_engine_groups_query_parameters_under_its_transaction():
+    record = _record(
+        http_transactions=(
+            _transaction(
+                query_parameters=(
+                    HttpTransactionHeader(name="page", value="2"),
+                    HttpTransactionHeader(name="limit", value="10"),
+                ),
+            ),
+        ),
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+
+    transaction = report.execution.tests[0].transactions[0]
+    assert {p.name: p.value for p in transaction.query_parameters} == {
+        "page": "2",
+        "limit": "10",
+    }
+
+
+def test_html_shows_query_parameters_section_when_present():
+    record = _record(
+        http_transactions=(
+            _transaction(
+                query_parameters=(HttpTransactionHeader(name="page", value="2"),),
+            ),
+        ),
+    )
+
+    html = _render(record)
+
+    assert "Query Parameters" in html
+    assert "page" in html
+
+
+def test_html_omits_query_parameters_section_when_absent():
+    # Query parameters são opcionais por natureza — a seção inteira some
+    # (nunca "Nenhum query parameter registrado" poluindo toda transação
+    # sem query string), diferente do comportamento de Request/Response
+    # Headers (que sempre mostram a seção, mesmo vazia).
+    record = _record(http_transactions=(_transaction(query_parameters=()),))
+
+    html = _render(record)
+
+    assert "Query Parameters" not in html
+
+
+def test_old_result_without_query_parameters_still_renders():
+    # Resultado anterior ao P2.1 (schema < 1.8): HttpTransaction construído
+    # sem query_parameters (default ()) — nunca quebra a renderização.
+    record = _record(http_transactions=(_transaction(),), schema_version="1.7")
+
+    html = _render(record)
+
+    assert "Query Parameters" not in html
+    assert "<h1>Execution Report</h1>" in html
+
+
+def test_query_parameters_never_alter_the_url_field():
+    record = _record(
+        http_transactions=(
+            _transaction(
+                url="https://api.exemplo.com/users?page=2",
+                query_parameters=(HttpTransactionHeader(name="page", value="2"),),
+            ),
+        ),
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+
+    transaction = report.execution.tests[0].transactions[0]
+    assert transaction.url == "https://api.exemplo.com/users?page=2"
+
+
+def test_query_parameters_of_one_test_never_leak_into_another():
+    # Correlação obrigatória do P2.1: test_A (POST /cotacao, 201) e test_B
+    # (POST /cotacao, 500) nunca compartilham request/response/query
+    # parameters, mesmo com o mesmo endpoint/método.
+    record = _record(
+        http_transactions=(
+            _transaction(
+                test_id="test_A",
+                url="https://api.exemplo.com/cotacao",
+                response_status=201,
+                query_parameters=(HttpTransactionHeader(name="plano", value="basico"),),
+                request_body="cliente-somente-em-A",
+            ),
+            _transaction(
+                test_id="test_B",
+                url="https://api.exemplo.com/cotacao",
+                response_status=500,
+                query_parameters=(HttpTransactionHeader(name="plano", value="premium"),),
+                request_body="cliente-somente-em-B",
+            ),
+        ),
+        assertion_results=(
+            _assertion(test_id="test_A", expected=201, actual=201, status="PASSED"),
+            _assertion(test_id="test_B", expected=201, actual=500, status="FAILED"),
+        ),
+    )
+
+    report = ReportEngine().generate_from_execution_summary(record)
+    tests_by_id = {t.test_id: t for t in report.execution.tests}
+
+    a_transaction = tests_by_id["test_A"].transactions[0]
+    b_transaction = tests_by_id["test_B"].transactions[0]
+    assert a_transaction.response_status == 201
+    assert b_transaction.response_status == 500
+    assert {p.name: p.value for p in a_transaction.query_parameters} == {"plano": "basico"}
+    assert {p.name: p.value for p in b_transaction.query_parameters} == {"plano": "premium"}
+    assert a_transaction.request_body != b_transaction.request_body
+
+    html = _render(record)
+    blocks = html.split('<div class="test-block">')[1:]
+    block_a = next(b for b in blocks if "<h3>test_A</h3>" in b)
+    block_b = next(b for b in blocks if "<h3>test_B</h3>" in b)
+    assert "basico" in block_a and "premium" not in block_a
+    assert "premium" in block_b and "basico" not in block_b
+    assert "cliente-somente-em-A" in block_a and "cliente-somente-em-A" not in block_b
+    assert "cliente-somente-em-B" in block_b and "cliente-somente-em-B" not in block_a
+
+
+def test_known_secret_is_masked_in_query_parameters_html():
+    record = _record(
+        http_transactions=(
+            _transaction(
+                query_parameters=(HttpTransactionHeader(name="api_key", value="sk_l****3456"),),
+            ),
+        ),
+    )
+
+    html = _render(record)
+
+    assert "sk_l****3456" in html
+    assert "sk_live" not in html

@@ -507,6 +507,10 @@ def _build_report_transaction(transaction: HttpTransaction) -> ReportHttpTransac
             for header in transaction.request_headers
         ),
         request_body=transaction.request_body,
+        query_parameters=tuple(
+            ReportHttpTransactionHeader(name=param.name, value=param.value)
+            for param in transaction.query_parameters
+        ),
         response_status=transaction.response_status,
         response_headers=tuple(
             ReportHttpTransactionHeader(name=header.name, value=header.value)

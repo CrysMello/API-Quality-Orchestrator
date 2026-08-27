@@ -118,6 +118,13 @@ def _valid_payload_1_7(**overrides) -> dict:
     return payload
 
 
+def _valid_payload_1_8(**overrides) -> dict:
+    payload = _valid_payload_1_7(schema_version="1.8")
+    payload["http_transactions"][0]["query_parameters"] = {"page": "2", "limit": "10"}
+    payload.update(overrides)
+    return payload
+
+
 def _valid_payload_1_0() -> dict:
     # Schema 1.0: sem schema_version e sem workspace no arquivo.
     return {
@@ -395,6 +402,56 @@ def test_read_schema_1_7_with_no_evidence_failures(tmp_path):
     record = reader.read(path=path)
 
     assert record.evidence_failures == ()
+
+
+def test_read_schema_1_6_defaults_query_parameters_to_empty(tmp_path):
+    # "http_transactions[].query_parameters" só existe a partir do schema
+    # 1.8 — ausente em 1.6/1.7, tratado como tupla vazia, nunca inventado
+    # (caso 18/compatibilidade do P2.1).
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_6())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.http_transactions[0].query_parameters == ()
+
+
+# --- Leitura: schema 1.8 (P2.1 — evidência HTTP: query parameters) ----------------------
+
+
+def test_read_schema_1_8_populates_query_parameters(tmp_path):
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_8())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.schema_version == "1.8"
+    query_parameters = {p.name: p.value for p in record.http_transactions[0].query_parameters}
+    assert query_parameters == {"page": "2", "limit": "10"}
+
+
+def test_read_schema_1_8_with_no_query_parameters(tmp_path):
+    payload = _valid_payload_1_8()
+    payload["http_transactions"][0]["query_parameters"] = {}
+    path = _write(tmp_path / "run_x" / "result.json", payload)
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.http_transactions[0].query_parameters == ()
+
+
+def test_read_schema_1_7_result_json_is_still_readable_after_the_1_8_bump(tmp_path):
+    # Compatibilidade: um result.json 1.7 real (sem query_parameters em
+    # nenhuma transação) continua sendo lido normalmente depois do bump
+    # para 1.8 — nunca quebra um resultado antigo já persistido em disco.
+    path = _write(tmp_path / "run_x" / "result.json", _valid_payload_1_7())
+    reader = JsonExecutionResultReader(tmp_path)
+
+    record = reader.read(path=path)
+
+    assert record.schema_version == "1.7"
+    assert record.http_transactions[0].query_parameters == ()
 
 
 # --- Leitura: schema 1.0 (retrocompatibilidade) ----------------------------------------------------------------

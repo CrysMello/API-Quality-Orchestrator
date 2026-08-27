@@ -28,11 +28,12 @@ DEFAULT_EXECUTION_RESULTS_BASE_PATH = Path("artifacts")
 # http_transactions (P1.2); "1.5" adiciona http_transactions[].test_id e
 # assertion_results (P1.1/detalhamento de assertions); "1.6" adiciona
 # trace_artifacts (P1.3/Trace em falha); "1.7" adiciona evidence_failures
-# (P1.5/infrastructure failure das evidências). Cada versão é aditiva
-# sobre a anterior. Qualquer outra versão é recusada — nunca interpretada
-# parcialmente.
+# (P1.5/infrastructure failure das evidências); "1.8" adiciona
+# http_transactions[].query_parameters (P2.1/evidência HTTP estruturada).
+# Cada versão é aditiva sobre a anterior. Qualquer outra versão é
+# recusada — nunca interpretada parcialmente.
 _SUPPORTED_SCHEMA_VERSIONS = frozenset(
-    {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6", "1.7"}
+    {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8"}
 )
 _DEFAULT_SCHEMA_VERSION = "1.0"
 
@@ -113,6 +114,9 @@ def _deserialize(payload: dict[str, Any], *, schema_version: str, source_path: s
         # 1.0/1.1/1.2/1.3, tratado como tupla vazia, nunca inventado.
         # ".test_id" só existe a partir do 1.5 — ausente em 1.4, tratado
         # como "" (mesmo default de HttpTransaction.test_id).
+        # ".query_parameters" só existe a partir do 1.8 — ausente em
+        # 1.4-1.7, tratado como tupla vazia (mesmo default de
+        # HttpTransaction.query_parameters), nunca inventado.
         http_transactions = tuple(
             HttpTransaction(
                 test_id=transaction.get("test_id") or "",
@@ -120,6 +124,7 @@ def _deserialize(payload: dict[str, Any], *, schema_version: str, source_path: s
                 url=transaction["url"],
                 request_headers=_headers_from_payload(transaction.get("request_headers")),
                 request_body=transaction.get("request_body"),
+                query_parameters=_headers_from_payload(transaction.get("query_parameters")),
                 response_status=int(transaction["response_status"]),
                 response_headers=_headers_from_payload(transaction.get("response_headers")),
                 response_body=transaction.get("response_body"),

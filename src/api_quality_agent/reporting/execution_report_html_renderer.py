@@ -305,6 +305,7 @@ def _render_transaction(transaction: ReportHttpTransaction, index: int, total: i
     <tr><th scope="row">URL</th><td>{_e(transaction.url)}</td></tr>
   </table>
   {_render_headers("Request Headers", transaction.request_headers)}
+  {_render_query_parameters(transaction.query_parameters)}
   {request_body}
   <h4>Response{label} — O que a API devolveu</h4>
   <table>
@@ -323,6 +324,18 @@ def _render_headers(title: str, headers: tuple[Any, ...]) -> str:
         for header in headers
     )
     return f"<p><strong>{_e(title)}:</strong></p><table>{rows}</table>"
+
+
+def _render_query_parameters(query_parameters: tuple[Any, ...]) -> str:
+    # P2.1 (evidência HTTP): diferente de _render_headers (sempre mostra a
+    # seção, mesmo vazia — headers são universais em toda transação), query
+    # parameters são OPCIONAIS por natureza (a maioria das requests não tem
+    # nenhum) — a seção inteira só aparece quando há pelo menos um, nunca
+    # "Nenhum query parameter registrado" poluindo toda transação sem
+    # query string.
+    if not query_parameters:
+        return ""
+    return _render_headers("Query Parameters", query_parameters)
 
 
 def _render_assertions(assertions: tuple[ReportAssertionResult, ...]) -> str:

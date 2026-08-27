@@ -68,7 +68,7 @@ def test_persisted_json_has_expected_structure():
     assert location.path == "artifacts/run_fake/result.json"
     payload = json.loads(repository.captured_content)
     assert payload == {
-        "schema_version": "1.7",
+        "schema_version": "1.8",
         "execution": {
             "started_at": _STARTED_AT.isoformat(),
             "finished_at": _FINISHED_AT.isoformat(),
@@ -193,11 +193,58 @@ def test_http_transactions_is_persisted_correctly():
             "url": "https://api.exemplo.com/users",
             "request_headers": {"Accept": "application/json"},
             "request_body": None,
+            "query_parameters": {},
             "response_status": 200,
             "response_headers": {"content-type": "application/json"},
             "response_body": '{"items": []}',
         }
     ]
+
+
+def test_http_transaction_query_parameters_are_persisted_correctly():
+    # P2.1 (evidência HTTP): query_parameters persistido no mesmo formato
+    # (dict nome->valor) de request_headers/response_headers.
+    repository = _CapturingRepository()
+    use_case = PersistExecutionResultUseCase(repository)
+    result = _success_result(
+        http_transactions=(
+            _transaction(
+                query_parameters=(
+                    HttpTransactionHeader(name="page", value="2"),
+                    HttpTransactionHeader(name="limit", value="10"),
+                )
+            ),
+        )
+    )
+
+    use_case.execute(
+        result,
+        collection_id="col-1",
+        collection_name="PetStore",
+        started_at=_STARTED_AT,
+        finished_at=_FINISHED_AT,
+    )
+
+    payload = json.loads(repository.captured_content)
+    assert payload["http_transactions"][0]["query_parameters"] == {"page": "2", "limit": "10"}
+
+
+def test_http_transaction_without_query_parameters_persists_an_empty_dict():
+    # Ausência de `params=` no call site — nunca inventa query parameters.
+    repository = _CapturingRepository()
+    use_case = PersistExecutionResultUseCase(repository)
+    result = _success_result(http_transactions=(_transaction(),))
+
+    use_case.execute(
+        result,
+        collection_id="col-1",
+        collection_name="PetStore",
+        started_at=_STARTED_AT,
+        finished_at=_FINISHED_AT,
+    )
+
+    payload = json.loads(repository.captured_content)
+    assert payload["http_transactions"][0]["query_parameters"] == {}
 
 
 def test_http_transactions_empty_is_persisted_as_empty_list():

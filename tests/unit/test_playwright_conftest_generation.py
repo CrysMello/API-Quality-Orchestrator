@@ -401,6 +401,33 @@ def test_wrapped_context_records_multiple_calls(tmp_path, fake_playwright, monke
     assert [t["method"] for t in transactions] == ["GET", "POST", "DELETE"]
 
 
+def test_wrapped_context_records_query_parameters(tmp_path, fake_playwright, monkeypatch):
+    # P2.1 (evidência HTTP): `params={...}` passado explicitamente no call
+    # site — capturado à parte de request_headers/request_body, nunca
+    # reparseado a partir da URL.
+    transactions_path = tmp_path / "transactions.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_HTTP_TRANSACTIONS_PATH", str(transactions_path))
+    generator, context = _load_wrapped_context(tmp_path, "generated_conftest_query_params")
+
+    context.get("/users", params={"page": "2", "limit": "10"})
+
+    transactions = _read_transactions(transactions_path)
+    assert transactions[0]["query_parameters"] == {"page": "2", "limit": "10"}
+
+
+def test_wrapped_context_records_absence_of_query_parameters_as_empty_dict(
+    tmp_path, fake_playwright, monkeypatch
+):
+    transactions_path = tmp_path / "transactions.ndjson"
+    monkeypatch.setenv("PLAYWRIGHT_HTTP_TRANSACTIONS_PATH", str(transactions_path))
+    generator, context = _load_wrapped_context(tmp_path, "generated_conftest_no_query_params")
+
+    context.get("/users")
+
+    transactions = _read_transactions(transactions_path)
+    assert transactions[0]["query_parameters"] == {}
+
+
 def test_wrapped_context_uses_method_kwarg_for_fetch(tmp_path, fake_playwright, monkeypatch):
     transactions_path = tmp_path / "transactions.ndjson"
     monkeypatch.setenv("PLAYWRIGHT_HTTP_TRANSACTIONS_PATH", str(transactions_path))

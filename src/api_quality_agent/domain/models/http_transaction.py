@@ -38,3 +38,13 @@ class HttpTransaction:
     # mesmo quando desconhecido) preserva toda construção existente da P1.2
     # que nunca passava isto.
     test_id: str = ""
+    # P2.1 (evidência HTTP): query parameters passados explicitamente via
+    # `params={...}` no call site gerado (ver playwright_endpoint_test_
+    # generator.py/_build_query_params) — nunca derivados/reparseados a
+    # partir de `url` (isso inventaria estrutura que não foi de fato
+    # observada; `url` já contém a query string real devolvida pelo
+    # Playwright, os dois convivem sem se substituir). Mesmo formato de
+    # HttpTransactionHeader (par nome/valor) por não haver nada específico
+    # de header nesse par — não duplicado como um novo dataclass. Default
+    # () preserva toda construção existente anterior ao P2.1.
+    query_parameters: tuple[HttpTransactionHeader, ...] = ()

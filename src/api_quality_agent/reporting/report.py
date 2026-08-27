@@ -84,6 +84,12 @@ class ReportHttpTransaction:
     response_status: int
     response_headers: tuple[ReportHttpTransactionHeader, ...]
     response_body: str | None
+    # P2.1 (evidência HTTP): query parameters passados explicitamente no
+    # call site gerado — nunca reparseados a partir de `url` (que já
+    # contém a query string real). Mesmo formato de
+    # ReportHttpTransactionHeader (par nome/valor); vazio quando o
+    # resultado é anterior ao P2.1 ou quando a request não teve nenhum.
+    query_parameters: tuple[ReportHttpTransactionHeader, ...] = ()
 
 
 @dataclass(frozen=True)

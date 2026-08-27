@@ -19,11 +19,13 @@ from api_quality_agent.shared import sanitize_filename_component
 # aditivo — P1.1/skipped_tests), "1.4" (http_transactions, aditivo — P1.2),
 # "1.5" (http_transactions[].test_id + assertion_results, aditivo — P1.1/
 # detalhamento de assertions), "1.6" (trace_artifacts, aditivo — P1.3/Trace
-# em falha) e "1.7" (evidence_failures, aditivo — P1.5/infrastructure
-# failure das evidências) são as versões que api-quality-orchestrator
-# report sabe ler — ver JsonExecutionResultReader. Mudanças de schema são
-# sempre aditivas; nenhum campo existente é removido ou renomeado.
-EXECUTION_RESULT_SCHEMA_VERSION = "1.7"
+# em falha), "1.7" (evidence_failures, aditivo — P1.5/infrastructure
+# failure das evidências) e "1.8" (http_transactions[].query_parameters,
+# aditivo — P2.1/evidência HTTP estruturada) são as versões que
+# api-quality-orchestrator report sabe ler — ver JsonExecutionResultReader.
+# Mudanças de schema são sempre aditivas; nenhum campo existente é removido
+# ou renomeado.
+EXECUTION_RESULT_SCHEMA_VERSION = "1.8"
 
 # Subdiretório, irmão de result.json, onde os .zip de trace (já mascarados
 # pelo PlaywrightAdapter) são movidos — mesma convenção de "report.html ao
@@ -277,6 +279,12 @@ def _serialize(
                     header.name: header.value for header in transaction.request_headers
                 },
                 "request_body": transaction.request_body,
+                # P2.1 (evidência HTTP): mesmo formato de request_headers/
+                # response_headers (dict nome->valor) — nunca reparseado a
+                # partir de `url`, que já contém a query string real.
+                "query_parameters": {
+                    param.name: param.value for param in transaction.query_parameters
+                },
                 "response_status": transaction.response_status,
                 "response_headers": {
                     header.name: header.value for header in transaction.response_headers
