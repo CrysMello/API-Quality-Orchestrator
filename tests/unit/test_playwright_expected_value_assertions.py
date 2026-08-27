@@ -90,6 +90,15 @@ def _build_validator(schema: dict, request_json: dict | None = None):
     # — mesmo texto exato do arquivo gerado, precisa do helper de registro
     # (e "os"/"json") definidos junto, mesmo padrão já usado pelas outras
     # categorias instrumentadas.
+    # P2.2 (assertions independentes): resolution.lines agora acumula em
+    # _assertion_failures em vez de levantar na hora — mesmo padrão de
+    # agregação final de _generate_positive_success_test é reproduzido
+    # aqui (_assertion_failures = [] no início, pytest.fail(...) agregado
+    # no final) para o wrapper continuar levantando pytest.fail.Exception
+    # exatamente como antes quando a checagem falha, só que agora via o
+    # caminho adiado — nunca uma segunda validação, é o MESMO texto de
+    # resolution.lines, só executado dentro de um wrapper equivalente ao
+    # da função gerada de verdade.
     source = (
         "import json\n"
         "import os\n\n\n"
@@ -103,7 +112,10 @@ def _build_validator(schema: dict, request_json: dict | None = None):
         + _RECORD_ASSERTION_RESULT_SOURCE
         + "\n\n"
         "import pytest\n\n\n"
-        "def _run(body, request_body=None):\n" + "".join(resolution.lines)
+        "def _run(body, request_body=None):\n"
+        "    _assertion_failures = []\n" + "".join(resolution.lines) + "\n"
+        "    if _assertion_failures:\n"
+        '        pytest.fail("Assertion(s) reprovada(s): " + "; ".join(_assertion_failures))\n'
     )
     namespace: dict = {}
     exec(source, namespace)  # noqa: S102 - texto do próprio gerador, não input externo

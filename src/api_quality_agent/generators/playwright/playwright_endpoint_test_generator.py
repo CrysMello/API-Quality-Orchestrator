@@ -1170,9 +1170,10 @@ def _resolve_status_assertion(strategy: TestStrategy, test_id: str) -> _StatusAs
     # mesma classe HTTP de outro código aceitável.
     #
     # P1.1: o `assert` original (linha exata que já existia) fica INTACTO
-    # dentro do try — só envolvido para poder registrar o resultado antes
-    # de relançar a MESMA exceção (bare "raise") no caminho de falha, nunca
-    # uma segunda comparação/validação paralela.
+    # dentro do try — só envolvido para poder registrar o resultado, nunca
+    # uma segunda comparação/validação paralela. P2.2: o caminho de falha
+    # não relança mais a exceção — acumula em _assertion_failures e segue
+    # para a próxima assertion (ver _generate_positive_success_test).
     assertion = _find_status_code_assertion(strategy)
     if assertion is not None:
         status_code = int(assertion.expected_value)
@@ -1189,11 +1190,21 @@ def _resolve_status_assertion(strategy: TestStrategy, test_id: str) -> _StatusAs
             f"            {test_id!r}, \"HTTP status\", {status_code}, response.status, "
             f"\"FAILED\", \"EXACT\", {reason!r},\n"
             "        )\n"
-            "        raise\n"
-            f"    _record_assertion_result(\n"
-            f"        {test_id!r}, \"HTTP status\", {status_code}, response.status, "
+            # P2.2: assertions são avaliadas de forma independente — a falha
+            # é registrada e a checagem seguinte continua, nunca um `raise`
+            # que interromperia o teste antes das demais assertions
+            # declaradas serem avaliadas (ver _assertion_failures ao final
+            # da função gerada). Mensagem construída explicitamente (nunca
+            # str(err)): o `assert` acima não tem mensagem própria, e
+            # str(err) só seria enriquecido pelo assertion rewriting do
+            # pytest quando o arquivo é coletado de verdade — nunca
+            # garantido (ex.: execução via exec() em teste unitário).
+            f'        _assertion_failures.append("HTTP status esperado {status_code}, recebido " + str(response.status))\n'
+            "    else:\n"
+            f"        _record_assertion_result(\n"
+            f"            {test_id!r}, \"HTTP status\", {status_code}, response.status, "
             f"\"PASSED\", \"EXACT\", {reason!r},\n"
-            "    )\n"
+            "        )\n"
         )
         return _StatusAssertionResolution(
             assertion_line=assertion_line,
@@ -1226,11 +1237,14 @@ def _resolve_status_assertion(strategy: TestStrategy, test_id: str) -> _StatusAs
         f"            {test_id!r}, \"HTTP status\", \"resposta presente\", \"ausente\", "
         f"\"FAILED\", \"BROAD\", {broad_reason!r},\n"
         "        )\n"
-        "        raise\n"
-        "    _record_assertion_result(\n"
-        f"        {test_id!r}, \"HTTP status\", \"resposta presente\", \"presente\", "
+        # P2.2: ver nota da variante EXACT acima — nunca um `raise` aqui;
+        # mensagem explícita, mesmo raciocínio (nunca str(err)).
+        '        _assertion_failures.append("Nenhuma resposta HTTP foi recebida.")\n'
+        "    else:\n"
+        "        _record_assertion_result(\n"
+        f"            {test_id!r}, \"HTTP status\", \"resposta presente\", \"presente\", "
         f"\"PASSED\", \"BROAD\", {broad_reason!r},\n"
-        "    )\n"
+        "        )\n"
     )
     return _StatusAssertionResolution(
         assertion_line=broad_assertion_line,
@@ -1346,12 +1360,17 @@ def _resolve_content_type_assertion(
         'content_type.split(";")[0].strip().lower(), "FAILED", "EXACT", '
         f"{reason!r},\n",
         "        )\n",
-        "        raise\n",
-        "    _record_assertion_result(\n",
-        f"        {test_id!r}, \"Content-Type\", {expected_literal}, "
+        # P2.2: assertions independentes — nunca um `raise` aqui (ver nota
+        # em _resolve_status_assertion); mensagem explícita (nunca
+        # str(err), mesmo raciocínio).
+        f'        _assertion_failures.append("Content-Type esperado " + {expected_literal} + '
+        '", recebido " + content_type.split(";")[0].strip().lower())\n',
+        "    else:\n",
+        "        _record_assertion_result(\n",
+        f"            {test_id!r}, \"Content-Type\", {expected_literal}, "
         'content_type.split(";")[0].strip().lower(), "PASSED", "EXACT", '
         f"{reason!r},\n",
-        "    )\n",
+        "        )\n",
     )
     # Content-Type documentado explicitamente (JSON Schema/OpenAPI/contrato)
     # — sempre EXACT quando gerado; nunca uma aproximação (o media type
@@ -1660,8 +1679,13 @@ def _render_required_array_field_lines(array_field: _RequiredArrayField) -> tupl
         # "Não acessar item[0] sem garantir existência": nunca indexado,
         # sempre um for — uma lista vazia simplesmente não itera (nunca
         # falha por causa disso).
-        f'                assert _field in _item, "Campo obrigatório ausente: {array_path_label}." '
+        "                try:\n",
+        f'                    assert _field in _item, "Campo obrigatório ausente: {array_path_label}." '
         '+ _field\n',
+        # P2.2: assertions independentes — nunca interrompe a iteração nem
+        # o restante do teste (ver nota em _resolve_status_assertion).
+        "                except AssertionError as _error:\n",
+        "                    _assertion_failures.append(str(_error))\n",
     ]
     return tuple(lines)
 
@@ -1709,8 +1733,16 @@ def _resolve_required_fields_assertion(
 
     lines: list[str] = []
     for path in required_paths:
+        # P2.2: assertions independentes — _assert_required_field_present
+        # continua levantando AssertionError normalmente (nenhuma mudança
+        # no helper, nem nos testes que o exercitam isoladamente), mas o
+        # call site agora captura a falha e continua para a próxima
+        # assertion em vez de deixá-la propagar e interromper o teste.
         lines.append(
-            f"    _assert_required_field_present(body, {path!r}, {test_id!r}, {reason!r})\n"
+            "    try:\n"
+            f"        _assert_required_field_present(body, {path!r}, {test_id!r}, {reason!r})\n"
+            "    except AssertionError as _error:\n"
+            "        _assertion_failures.append(str(_error))\n"
         )
     for array_field in required_arrays:
         lines.extend(_render_required_array_field_lines(array_field))
@@ -1981,9 +2013,14 @@ def _render_array_item_type_check_lines(
         # o `path` sozinho ((item_name,), relativo a cada `_item`) não
         # carrega esse contexto, então precisa ser passado à parte.
         name_literal = repr(f"field_type:{array_label}[].{item_name}")
+        # P2.2: assertions independentes (ver nota em
+        # _resolve_field_types_assertion).
         lines.append(
-            f"            _assert_field_type(_item, {(item_name,)!r}, "
+            "            try:\n"
+            f"                _assert_field_type(_item, {(item_name,)!r}, "
             f"{item_type!r}, {item_nullable!r}, {test_id!r}, {name_literal}, {reason!r})\n"
+            "            except AssertionError as _error:\n"
+            "                _assertion_failures.append(str(_error))\n"
         )
     return tuple(lines)
 
@@ -2051,9 +2088,15 @@ def _resolve_field_types_assertion(
     lines: list[str] = []
     for check in field_checks:
         name_literal = repr(f"field_type:{'.'.join(check.path)}")
+        # P2.2: assertions independentes — mesmo raciocínio de
+        # _resolve_required_fields_assertion (helper continua igual, o
+        # call site é quem captura e continua).
         lines.append(
-            f"    _assert_field_type(body, {check.path!r}, {check.json_type!r}, "
+            "    try:\n"
+            f"        _assert_field_type(body, {check.path!r}, {check.json_type!r}, "
             f"{check.nullable!r}, {test_id!r}, {name_literal}, {reason!r})\n"
+            "    except AssertionError as _error:\n"
+            "        _assertion_failures.append(str(_error))\n"
         )
     for array_check in array_checks:
         lines.extend(_render_array_item_type_check_lines(array_check, test_id, reason))
@@ -2231,11 +2274,14 @@ def _resolve_json_schema_assertion(
         f"            {test_id!r}, \"json_schema\", \"válido conforme schema documentado\",\n",
         '            "inválido: " + error.message, "FAILED", "EXACT", ' + repr(reason) + ",\n",
         "        )\n",
-        "        pytest.fail(\n",
-        # Caminho, keyword, valor esperado e mensagem do validator (regra
-        # 5) — nunca só "schema inválido" genérico. error.path é um
-        # deque de chaves/índices; join com "." só depois de garantir que
-        # cada elemento vira string (índice de array vem como int).
+        # P2.2: assertions independentes — a validação de JSON Schema
+        # (categoria própria, "json_schema") nunca pode impedir que outras
+        # assertions declaradas (ex.: expected_value:id) sejam avaliadas.
+        # Antes disto chamava pytest.fail(...) aqui, interrompendo o teste
+        # imediatamente; agora só registra a falha e continua — a MESMA
+        # mensagem (caminho/keyword/valor esperado/mensagem do validator,
+        # regra 5) é preservada, só deixa de abortar a execução.
+        "        _assertion_failures.append(\n",
         '            "Body não corresponde ao JSON Schema esperado — "\n',
         '            + "caminho: " + ".".join(str(part) for part in error.path)\n',
         '            + "; keyword: " + str(error.validator)\n',
@@ -2435,7 +2481,12 @@ def _render_expected_value_check_lines(
     # pelo mascaramento de secrets do PlaywrightAdapter antes de persistir
     # — nunca aparece na saída/mensagem de falha do pytest.
     message = f"Valor inesperado para o campo '{label}' (ver contrato)."
-    fail_line = f"        pytest.fail({_python_string_literal(message)})\n"
+    # P2.2: assertions independentes — a falha é registrada e acumulada
+    # (nunca pytest.fail() aqui, que interromperia o teste antes das
+    # demais assertions declaradas serem avaliadas); a mensagem em si
+    # continua a mesma, citando só o CAMPO, nunca o valor esperado/recebido
+    # (regra 6 preservada).
+    fail_line = f"        _assertion_failures.append({_python_string_literal(message)})\n"
     name_literal = repr(f"expected_value:{label}")
     if check.kind == "const":
         expected_literal = _render_schema_literal(check.value, "    ")
@@ -2454,10 +2505,11 @@ def _render_expected_value_check_lines(
         f"{precision!r}, {reason!r},\n",
         "        )\n",
         fail_line,
-        "    _record_assertion_result(\n",
-        f"        {test_id!r}, {name_literal}, {expected_literal}, _value, \"PASSED\", "
+        "    else:\n",
+        "        _record_assertion_result(\n",
+        f"            {test_id!r}, {name_literal}, {expected_literal}, _value, \"PASSED\", "
         f"{precision!r}, {reason!r},\n",
-        "    )\n",
+        "        )\n",
     )
 
 
@@ -2483,6 +2535,8 @@ def _render_correlation_check_lines(check: _CorrelationCheck, test_id: str, reas
         f"request_body['{check.source_field}'] (ver contrato)."
     )
     name_literal = repr(f"correlation:{label}")
+    # P2.2: assertions independentes — nunca pytest.fail() aqui (ver nota em
+    # _render_expected_value_check_lines).
     return (
         f"    _value = _get_nested_value(body, {path_literal})\n",
         f"    if _value != request_body.get({source_literal}):\n",
@@ -2490,11 +2544,12 @@ def _render_correlation_check_lines(check: _CorrelationCheck, test_id: str, reas
         f"            {test_id!r}, {name_literal}, request_body.get({source_literal}), "
         f"_value, \"FAILED\", \"EXACT\", {reason!r},\n",
         "        )\n",
-        f"        pytest.fail({_python_string_literal(message)})\n",
-        "    _record_assertion_result(\n",
-        f"        {test_id!r}, {name_literal}, request_body.get({source_literal}), "
+        f"        _assertion_failures.append({_python_string_literal(message)})\n",
+        "    else:\n",
+        "        _record_assertion_result(\n",
+        f"            {test_id!r}, {name_literal}, request_body.get({source_literal}), "
         f"_value, \"PASSED\", \"EXACT\", {reason!r},\n",
-        "    )\n",
+        "        )\n",
     )
 
 
@@ -2684,11 +2739,17 @@ def _generate_positive_success_test(
     # "os"/"json" (P1.1): o helper record_assertion_result é usado
     # incondicionalmente (a asserção de status, EXACT ou BROAD, sempre
     # registra um resultado) — nunca dependente de outra condição.
+    # "pytest" (P2.2): o bloco final de agregação (`if _assertion_failures:
+    # pytest.fail(...)`) agora é emitido incondicionalmente — antes,
+    # "pytest" só entrava via response_body_resolution.extra_imports
+    # (parse de JSON), o que deixaria um NameError esperando pra acontecer
+    # num cenário sem nenhuma assertion de corpo (ex.: só status code) cuja
+    # única assertion falhasse.
     all_imports = (
         session.extra_imports
         | response_body_resolution.extra_imports
         | json_schema_resolution.extra_imports
-        | {"os", "json"}
+        | {"os", "json", "pytest"}
     )
     imports_block = "".join(f"import {name}\n" for name in sorted(all_imports))
     if imports_block:
@@ -2743,6 +2804,15 @@ def _generate_positive_success_test(
         "\n"
         f"{preamble}"
         f"{http_call}"
+        # P2.2 (assertions independentes): cada categoria abaixo passou a
+        # registrar sua falha e CONTINUAR em vez de interromper o teste
+        # (`raise`/`pytest.fail()` imediato) — `_assertion_failures`
+        # acumula uma entrada por assertion efetivamente avaliada e
+        # reprovada; só ao final, depois de TODAS as categorias terem
+        # rodado, o teste é marcado como falho (uma única vez), nunca antes
+        # disso. Nenhuma assertion deixa de gerar seu próprio
+        # AssertionResult por causa de outra ter falhado primeiro.
+        "    _assertion_failures = []\n"
         "\n"
         f"{status_resolution.assertion_line}"
         f"{''.join(content_type_resolution.lines)}"
@@ -2751,6 +2821,9 @@ def _generate_positive_success_test(
         f"{''.join(field_types_resolution.lines)}"
         f"{''.join(json_schema_resolution.lines)}"
         f"{''.join(expected_values_resolution.lines)}"
+        "\n"
+        "    if _assertion_failures:\n"
+        '        pytest.fail("Assertion(s) reprovada(s): " + "; ".join(_assertion_failures))\n'
     )
 
     warnings = (
