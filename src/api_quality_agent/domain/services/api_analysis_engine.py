@@ -356,6 +356,12 @@ def _analyze_postman_endpoint(
         variables_used=variables_used,
         has_examples=has_examples,
         example_count=example_count,
+        # P3.3 — mesma extração já usada por _find_variable_dependencies
+        # (pm.collectionVariables.set(...)/pm.environment.set(...)/etc. no
+        # script de teste desta request) — nunca uma segunda
+        # implementação, só reaproveitada aqui para expor o nome ao
+        # TestStrategyEngine.
+        variables_defined=_extract_defined_variables(raw),
     )
 
 

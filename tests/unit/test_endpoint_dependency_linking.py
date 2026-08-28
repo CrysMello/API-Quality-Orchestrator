@@ -51,11 +51,11 @@ def _normalized_request(method: str, path_segments: tuple[str, ...], url_variabl
     return analyzed.normalized_request
 
 
-def _extraction(variable_name: str) -> VariableExtraction:
+def _extraction(variable_name: str, *, json_path: str | None = None) -> VariableExtraction:
     return VariableExtraction(
         variable_name=variable_name,
         source="response.body",
-        json_path=f"$.{variable_name}",
+        json_path=json_path or f"$.{variable_name}",
         scope=VariableScope.COLLECTION,
         origin="contract",
     )
@@ -254,4 +254,113 @@ def test_producer_test_id_is_the_same_formula_generator_uses_for_the_function_na
     endpoint_source = "POST /customers"
     assert producer_test_id_for(endpoint_source) == (
         f"test_{endpoint_source_to_slug(endpoint_source)}_success"
+    )
+
+
+# === P3.3 — matching é sempre por variable_name, nunca por json_path =========
+# O linker nunca vê json_path (só variable_name, via
+# EndpointDependencyInput.variable_extractions) — estes testes provam,
+# explicitamente, que json_path pode divergir livremente do variable_name
+# sem afetar (nem habilitar por acidente) o matching.
+
+
+def test_caso_a_producer_json_path_id_variable_name_customer_id_links():
+    # json_path="id" (onde buscar o valor) e variable_name="customer_id"
+    # (nome de negócio) coexistem — o consumidor casa pelo variable_name.
+    producer = _endpoint(
+        "POST /customers",
+        ("customers",),
+        extractions=(_extraction("customer_id", json_path="$.id"),),
+    )
+    consumer = _endpoint("GET /customers/{customer_id}", ("customers", "{customer_id}"))
+
+    result = link_endpoint_dependencies([producer, consumer])
+
+    assert len(result.linked_endpoints[1].variable_usages) == 1
+    usage = result.linked_endpoints[1].variable_usages[0]
+    assert usage.variable_name == "customer_id"
+    assert usage.producer_test_id == producer_test_id_for("POST /customers")
+
+
+def test_caso_b_producer_variable_name_id_never_matches_consumer_customer_id():
+    # Mesmo json_path ("id"), mas SEM um nome semântico explícito
+    # (variable_name também "id") — nunca "parecido o suficiente" com
+    # "customer_id"; nenhum matching heurístico é aplicado.
+    producer = _endpoint(
+        "POST /customers", ("customers",), extractions=(_extraction("id", json_path="$.id"),)
+    )
+    consumer = _endpoint("GET /customers/{customer_id}", ("customers", "{customer_id}"))
+
+    result = link_endpoint_dependencies([producer, consumer])
+
+    assert result.linked_endpoints[1].variable_usages == ()
+    assert result.linked_endpoints[0].claimed_extraction_names == set()
+
+
+def test_caso_c_customer_id_order_id_user_id_stay_isolated():
+    # Três cadeias independentes, três nomes semânticos distintos, mesmo
+    # json_path ("id") nas três — nenhuma se confunde com a outra.
+    customers_producer = _endpoint(
+        "POST /customers",
+        ("customers",),
+        extractions=(_extraction("customer_id", json_path="$.id"),),
+    )
+    customers_consumer = _endpoint("GET /customers/{customer_id}", ("customers", "{customer_id}"))
+    orders_producer = _endpoint(
+        "POST /orders", ("orders",), extractions=(_extraction("order_id", json_path="$.id"),)
+    )
+    orders_consumer = _endpoint("GET /orders/{order_id}", ("orders", "{order_id}"))
+    users_producer = _endpoint(
+        "POST /users", ("users",), extractions=(_extraction("user_id", json_path="$.id"),)
+    )
+    users_consumer = _endpoint("GET /users/{user_id}", ("users", "{user_id}"))
+
+    result = link_endpoint_dependencies(
+        [
+            customers_producer,
+            customers_consumer,
+            orders_producer,
+            orders_consumer,
+            users_producer,
+            users_consumer,
+        ]
+    )
+
+    assert result.linked_endpoints[1].variable_usages[0].producer_test_id == (
+        producer_test_id_for("POST /customers")
+    )
+    assert result.linked_endpoints[3].variable_usages[0].producer_test_id == (
+        producer_test_id_for("POST /orders")
+    )
+    assert result.linked_endpoints[5].variable_usages[0].producer_test_id == (
+        producer_test_id_for("POST /users")
+    )
+
+
+def test_caso_d_two_producers_same_variable_name_no_cross_chain_leak():
+    # Dois produtores diferentes produzindo o MESMO nome de variável
+    # ("customer_id", ex.: um script de teste nomeando os dois assim) —
+    # cada consumidor liga ao produtor mais próximo, nunca ao outro.
+    producer_1 = _endpoint(
+        "POST /customers",
+        ("customers",),
+        extractions=(_extraction("customer_id", json_path="$.id"),),
+    )
+    consumer_1 = _endpoint("GET /customers/{customer_id}", ("customers", "{customer_id}"))
+    producer_2 = _endpoint(
+        "POST /legacy-customers",
+        ("legacy-customers",),
+        extractions=(_extraction("customer_id", json_path="$.id"),),
+    )
+    consumer_2 = _endpoint(
+        "GET /legacy-customers/{customer_id}", ("legacy-customers", "{customer_id}")
+    )
+
+    result = link_endpoint_dependencies([producer_1, consumer_1, producer_2, consumer_2])
+
+    assert result.linked_endpoints[1].variable_usages[0].producer_test_id == (
+        producer_test_id_for("POST /customers")
+    )
+    assert result.linked_endpoints[3].variable_usages[0].producer_test_id == (
+        producer_test_id_for("POST /legacy-customers")
     )

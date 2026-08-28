@@ -4,6 +4,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 
 @dataclass
@@ -30,19 +31,39 @@ class _RoutedRequestHandler(http.server.BaseHTTPRequestHandler):
         # um teste precisaria).
         self._handle("POST")
 
+    def do_DELETE(self) -> None:  # noqa: N802 (nome exigido pela stdlib)
+        # P3.3 — múltiplos consumidores (GET/PUT/DELETE) do mesmo valor
+        # produzido: sem isto, BaseHTTPRequestHandler responde 501 por
+        # conta própria (nunca chega a este handler), o que confundia um
+        # "método não suportado pela infraestrutura de teste" com uma
+        # falha real da feature de dependências. Mesmo tratamento
+        # (equivalente) que GET/POST/PUT já recebem — nunca um segundo
+        # mecanismo de rota/captura.
+        self._handle("DELETE")
+
     def _handle(self, method: str) -> None:
         server: "PostmanTestServer" = self.server.test_server  # type: ignore[attr-defined]
         server.received_paths.append(self.path)
         server.received_methods.append(method)
         server.received_headers.append(dict(self.headers))
+        # path e query são sempre correlacionados por posição (mesmo
+        # índice em received_paths/received_queries) com o restante —
+        # nunca uma segunda lista de correlação por request_id.
+        split_path = urlsplit(self.path)
+        server.received_queries.append(dict(parse_qsl(split_path.query)))
 
-        if method in ("PUT", "POST"):
+        if method in ("PUT", "POST", "DELETE"):
             length = int(self.headers.get("Content-Length", "0") or "0")
             raw_body = self.rfile.read(length) if length else b""
             try:
                 server.received_bodies.append(json.loads(raw_body) if raw_body else None)
             except json.JSONDecodeError:
                 server.received_bodies.append(raw_body.decode("utf-8", errors="replace"))
+        else:
+            # Mesma correlação por posição de received_bodies com as
+            # demais listas — GET nunca tem corpo, mas a lista precisa
+            # continuar alinhada por índice.
+            server.received_bodies.append(None)
 
         route = server.routes.get((method, self.path))
         if route is None:
@@ -90,6 +111,7 @@ class PostmanTestServer:
         self.received_methods: list[str] = []
         self.received_headers: list[dict[str, str]] = []
         self.received_bodies: list[Any] = []
+        self.received_queries: list[dict[str, str]] = []
         self._httpd = _SilentHTTPServer(("127.0.0.1", 0), _RoutedRequestHandler)
         self._httpd.test_server = self  # type: ignore[attr-defined]
         self._thread = threading.Thread(

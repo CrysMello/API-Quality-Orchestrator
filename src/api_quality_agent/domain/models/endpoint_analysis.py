@@ -18,3 +18,14 @@ class EndpointAnalysis:
     variables_used: tuple[str, ...]
     has_examples: bool
     example_count: int
+    # P3.3 — nomes de variável definidos por um script de teste REAL da
+    # própria Collection (ex.: pm.collectionVariables.set("customer_id",
+    # ...)), já detectados por api_analysis_engine._extract_defined_
+    # variables para outro propósito (DependencyCandidate) — aditivo
+    # (default preserva toda construção existente, inclusive o caminho
+    # OpenAPI, que nunca tem scripts de teste e nunca preenche isto).
+    # Consumido por TestStrategyEngine como a ÚNICA fonte aceita de nome
+    # semântico explícito para uma VariableExtraction cujo campo de
+    # resposta é genérico (ex.: "id") — nunca um matching heurístico entre
+    # nomes.
+    variables_defined: tuple[str, ...] = ()

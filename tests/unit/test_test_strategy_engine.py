@@ -14,6 +14,7 @@ def _build_endpoint(
     path="/pets",
     response_status_codes=(),
     response_content_types=(),
+    variables_defined=(),
 ) -> EndpointAnalysis:
     return EndpointAnalysis(
         source=source,
@@ -29,6 +30,7 @@ def _build_endpoint(
         variables_used=(),
         has_examples=False,
         example_count=0,
+        variables_defined=variables_defined,
     )
 
 
@@ -228,6 +230,87 @@ def test_non_id_fields_do_not_generate_variable_extraction():
     strategy = TestStrategyEngine().build_strategy(endpoint, response_schema=response_schema)
 
     assert strategy.variable_extractions == ()
+
+
+# --- P3.3: nome semântico explícito (json_path != variable_name) ---------------
+#
+# Fonte: pm.collectionVariables.set(...)/pm.environment.set(...)/etc. no
+# script de teste da PRÓPRIA request (api_analysis_engine.
+# _extract_defined_variables, exposto via EndpointAnalysis.
+# variables_defined) — NUNCA um matching heurístico de nomes ("id" e
+# "customer_id" nunca são comparados textualmente entre si).
+
+
+def test_a_single_defined_variable_names_the_single_id_candidate():
+    # Caso A do enunciado: json_path continua "id" (de onde o valor é
+    # extraído), mas variable_name vira o nome definido pelo script
+    # ("customer_id") — nunca o nome literal do campo.
+    endpoint = _build_endpoint(
+        response_status_codes=("201",),
+        response_content_types=("application/json",),
+        variables_defined=("customer_id",),
+    )
+    response_schema = {
+        "type": "object",
+        "properties": {"id": {"type": "integer"}, "name": {"type": "string"}},
+    }
+
+    strategy = TestStrategyEngine().build_strategy(endpoint, response_schema=response_schema)
+
+    assert len(strategy.variable_extractions) == 1
+    extraction = strategy.variable_extractions[0]
+    assert extraction.variable_name == "customer_id"
+    assert extraction.json_path == "$.id"
+
+
+def test_no_defined_variable_keeps_the_field_name_as_variable_name():
+    # Sem nenhum script definindo variável (variables_defined=(), o
+    # default) — comportamento de sempre, nunca alterado: variable_name é
+    # o nome literal do campo.
+    endpoint = _build_endpoint(
+        response_status_codes=("201",),
+        response_content_types=("application/json",),
+        variables_defined=(),
+    )
+    response_schema = {"type": "object", "properties": {"id": {"type": "integer"}}}
+
+    strategy = TestStrategyEngine().build_strategy(endpoint, response_schema=response_schema)
+
+    assert strategy.variable_extractions[0].variable_name == "id"
+
+
+def test_multiple_defined_variables_never_guess_which_one_applies():
+    # Ambíguo (dois nomes definidos, um só campo candidato) — nunca
+    # adivinha, preserva o nome literal do campo.
+    endpoint = _build_endpoint(
+        response_status_codes=("201",),
+        response_content_types=("application/json",),
+        variables_defined=("customer_id", "orderId"),
+    )
+    response_schema = {"type": "object", "properties": {"id": {"type": "integer"}}}
+
+    strategy = TestStrategyEngine().build_strategy(endpoint, response_schema=response_schema)
+
+    assert strategy.variable_extractions[0].variable_name == "id"
+
+
+def test_multiple_id_like_fields_never_guess_which_gets_the_defined_name():
+    # Ambíguo (um nome definido, dois campos candidatos "*_id"/"id") —
+    # nunca adivinha qual dos dois; cada um mantém seu nome literal.
+    endpoint = _build_endpoint(
+        response_status_codes=("201",),
+        response_content_types=("application/json",),
+        variables_defined=("customer_id",),
+    )
+    response_schema = {
+        "type": "object",
+        "properties": {"id": {"type": "integer"}, "order_id": {"type": "integer"}},
+    }
+
+    strategy = TestStrategyEngine().build_strategy(endpoint, response_schema=response_schema)
+
+    variable_names = {extraction.variable_name for extraction in strategy.variable_extractions}
+    assert variable_names == {"id", "order_id"}
 
 
 # --- Required ausente ------------------------------------------------------------

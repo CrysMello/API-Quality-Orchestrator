@@ -129,7 +129,7 @@ class TestStrategyEngine:
             )
 
         variable_extractions = (
-            _find_variable_extraction_candidates(response_schema)
+            _find_variable_extraction_candidates(response_schema, endpoint.variables_defined)
             if has_json_content and response_schema is not None
             else ()
         )
@@ -236,27 +236,48 @@ def _build_schema_related_assertions(
 
 def _find_variable_extraction_candidates(
     response_schema: dict[str, Any],
+    defined_variables: tuple[str, ...] = (),
 ) -> tuple[VariableExtraction, ...]:
     if response_schema.get("type") != "object":
         return ()
 
     properties = response_schema.get("properties", {})
-    extractions = []
-    for field_name, field_schema in properties.items():
-        if not isinstance(field_schema, dict) or not _ID_FIELD_PATTERN.match(field_name):
-            continue
-        if field_schema.get("type") not in ("string", "integer"):
-            continue
-        extractions.append(
-            VariableExtraction(
-                variable_name=field_name,
-                source="response.body",
-                json_path=f"$.{field_name}",
-                scope=VariableScope.COLLECTION,
-                origin=AssertionOrigin.CONTRACT.value,
-            )
+    candidate_fields = [
+        field_name
+        for field_name, field_schema in properties.items()
+        if isinstance(field_schema, dict)
+        and _ID_FIELD_PATTERN.match(field_name)
+        and field_schema.get("type") in ("string", "integer")
+    ]
+
+    # Nome semântico explícito (P3.3): quando a PRÓPRIA Collection já diz,
+    # por um script de teste real (pm.collectionVariables.set(...)/
+    # pm.environment.set(...)/etc., ver api_analysis_engine.
+    # _extract_defined_variables), que nome de negócio foi produzido —
+    # NUNCA comparado textualmente ao nome do campo da resposta (isso
+    # seria o matching heurístico proibido nesta parte: "id" e
+    # "customer_id" nunca são considerados "parecidos"). Só aplicado sem
+    # NENHUMA ambiguidade: exatamente um campo candidato na resposta E
+    # exatamente um nome definido pelo script desta MESMA request —
+    # qualquer outra combinação (nenhum script, mais de um nome definido,
+    # mais de um campo candidato) preserva o comportamento de sempre
+    # (variable_name = nome literal do campo), nunca uma adivinhação.
+    semantic_name = (
+        defined_variables[0]
+        if len(candidate_fields) == 1 and len(defined_variables) == 1
+        else None
+    )
+
+    return tuple(
+        VariableExtraction(
+            variable_name=semantic_name or field_name,
+            source="response.body",
+            json_path=f"$.{field_name}",
+            scope=VariableScope.COLLECTION,
+            origin=AssertionOrigin.CONTRACT.value,
         )
-    return tuple(extractions)
+        for field_name in candidate_fields
+    )
 
 
 def _generate_negative_cases(
