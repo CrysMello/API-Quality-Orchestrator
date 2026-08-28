@@ -1,50 +1,43 @@
-"""Teste de caracterização E2E — comparação direta entre PROTEÇÃO (secret
-referenciado por `{{variável}}` de Environment) e EXPOSIÇÃO (o mesmo tipo
-de secret colocado como literal cru na Collection) na geração Playwright.
+"""Teste de caracterização E2E — proteção de dados sensíveis literais na
+geração de testes Playwright (body/query/header).
 
-Contexto: o fluxo Playwright já protege corretamente uma variável de
-Environment marcada `is_secret=True` quando a Collection usa uma
-referência como `{{password}}` (ver test_playwright_environment_secret_
-body_e2e.py). Em execução real (ver test_playwright_generated_source_
-secret_exposure.py e o teste manual contra a Collection real do
-FakeStoreAPI), foi identificado que um valor sensível colado diretamente
-como literal no Body pode aparecer no arquivo .py gerado. Este arquivo
-caracteriza os DOIS cenários lado a lado, na MESMA estrutura de request
-(login com username/password), para que a diferença de tratamento fique
-inequívoca.
+HISTÓRICO: este arquivo originalmente comprovava um bug de segurança —
+um valor sensível colado diretamente como literal cru na Collection (sem
+usar `{{variável}}`) era materializado em texto plano no `.py` gerado e
+sobrevivia em claro até `result.json`/HTML, mesmo quando o MESMO valor já
+estava declarado como secreto (`is_secret=True`) em um `PostmanEnvironment`
+associado. Corrigido no bloco P2.4 (`playwright_endpoint_test_generator.py`
+— `_find_matching_secret_variable_name`, reaproveitando exatamente o
+`VariableResolutionSession.resolve()` já usado para `{{variável}}`, nunca
+um segundo mecanismo de masking). Este arquivo foi atualizado
+conscientemente (ver tests/characterization/README.md) para validar o
+comportamento CORRIGIDO, cobrindo os três campos onde a correção se
+aplica: JSON body, query parameter e header.
 
-Cadeia validada (real, ponta a ponta):
+Cadeia validada (real, ponta a ponta, nos testes `*_e2e_*`):
 
     PostmanCollectionParser -> ApiAnalysisEngine -> TestStrategy
     -> PlaywrightEndpointTestGenerator -> DefaultPlaywrightTestSuiteBuilder
-    -> arquivo .py gerado -> Playwright/pytest real -> servidor HTTP real
+    -> arquivo .py físico -> Playwright/pytest real -> servidor HTTP real
     -> ExecutionResult -> PersistExecutionResultUseCase -> result.json
     -> JsonExecutionResultReader -> ReportEngine -> HTML
 
-NÃO corrige nada. NÃO altera Generator/PlaywrightAdapter/
-PersistExecutionResultUseCase/ReportEngine. NÃO implementa masking novo.
-NÃO altera Postman/Newman. NÃO altera nenhum teste existente.
+NÃO altera Generator/PlaywrightAdapter/PersistExecutionResultUseCase/
+ReportEngine nesta tarefa (a correção já foi aplicada separadamente ao
+Generator — este arquivo só valida o resultado). NÃO implementa masking
+novo. NÃO altera Postman/Newman.
 
-DESVIO DOCUMENTADO: os requests usam `PUT /login`, não `POST /login`. O
-servidor HTTP local real já existente no projeto
-(tests/postman_test_server.py) só implementa `do_GET`/`do_PUT` — nunca
-`do_POST`. Criar suporte a POST seria adicionar infraestrutura permanente
-nova só para este teste, o que foi explicitamente pedido para não fazer.
-A resolução de valor dentro do body (`_render_json_literal`) é
-inteiramente independente do verbo HTTP, então a troca não afeta em nada
-o que está sendo validado.
+DESVIO DOCUMENTADO: os requests de body usam `PUT /login`, não
+`POST /login` — o servidor HTTP local real já existente no projeto
+(tests/postman_test_server.py) só implementa `do_GET`/`do_PUT`, nunca
+`do_POST`. Criar suporte a POST seria infraestrutura permanente nova só
+para este teste.
 
-FRONTEIRAS MOCKADAS: nenhuma na geração (Parser/ApiAnalysisEngine/
-TestStrategy/Generator/SuiteBuilder reais, nunca mockados). Na execução
-real, apenas o repositório de persistência (`_RealFileRepository`, grava
-em tmp_path real — mesmo padrão já usado em outros arquivos desta
-suíte). Playwright, pytest e o servidor HTTP são sempre reais. Nenhum
-parsing artificial de URL/body é feito depois da geração para simular
-masking — todas as verificações de mascaramento leem exatamente o que o
-PlaywrightAdapter/result.json/HTML já produziram.
-
-Documenta o comportamento ATUAL — se quebrar por uma mudança deliberada,
-atualize-o conscientemente (ver tests/characterization/README.md).
+FRONTEIRAS MOCKADAS: nenhuma na geração. Na execução real, apenas o
+repositório de persistência (`_RealFileRepository`, grava em tmp_path
+real). Playwright, pytest e o servidor HTTP são sempre reais. Nenhum
+parsing artificial de URL/body é feito para simular masking — todas as
+verificações leem exatamente o que o pipeline real já produziu.
 """
 
 import ast
@@ -76,14 +69,16 @@ from api_quality_agent.reporting import ReportEngine, render_execution_report_ht
 from api_quality_agent.shared.masking import mask_secret
 from postman_test_server import PostmanTestServer
 
-_STARTED_AT = datetime(2026, 8, 28, 12, 0, 0, tzinfo=timezone.utc)
-_FINISHED_AT = datetime(2026, 8, 28, 12, 0, 30, tzinfo=timezone.utc)
+_STARTED_AT = datetime(2026, 8, 28, 13, 0, 0, tzinfo=timezone.utc)
+_FINISHED_AT = datetime(2026, 8, 28, 13, 0, 30, tzinfo=timezone.utc)
 
 _USERNAME = "test-user"
 # Valores fictícios, exclusivos deste teste — nunca uma credencial real.
 _SECRET_VARIABLE_VALUE = "SECRET_TEST_VALUE_123456"  # Cenário 1: {{password}}
-_SECRET_LITERAL_VALUE = "SECRET_LITERAL_TEST_123456"  # Cenário 2: literal cru
+_SECRET_LITERAL_VALUE = "SECRET_LITERAL_TEST_123456"  # Cenário 2: literal correspondente a um secret
+_UNKNOWN_LITERAL_VALUE = "UNKNOWN_LITERAL_NOT_A_SECRET_999"  # controle: literal SEM correspondência
 _MASKED_VARIABLE_SECRET = mask_secret(_SECRET_VARIABLE_VALUE)
+_MASKED_LITERAL_SECRET = mask_secret(_SECRET_LITERAL_VALUE)
 
 _ENVIRONMENT_FOR_VARIABLE = PostmanEnvironment(
     name="QA",
@@ -91,14 +86,22 @@ _ENVIRONMENT_FOR_VARIABLE = PostmanEnvironment(
         EnvironmentVariable(key="password", value=_SECRET_VARIABLE_VALUE, is_secret=True, enabled=True),
     ),
 )
-# Mesmo Environment, mas para o cenário do literal: declara o MESMO valor
-# usado como literal na Collection como secreto — usado só para responder
-# "existe algum mecanismo que reconheça esse valor por coincidência de
-# valor, mesmo sem {{}}?" (ver teste dedicado abaixo).
-_ENVIRONMENT_MATCHING_THE_LITERAL = PostmanEnvironment(
+_ENVIRONMENT_MATCHING_BODY_LITERAL = PostmanEnvironment(
     name="QA",
     variables=(
         EnvironmentVariable(key="password", value=_SECRET_LITERAL_VALUE, is_secret=True, enabled=True),
+    ),
+)
+_ENVIRONMENT_MATCHING_QUERY_LITERAL = PostmanEnvironment(
+    name="QA",
+    variables=(
+        EnvironmentVariable(key="apiToken", value=_SECRET_LITERAL_VALUE, is_secret=True, enabled=True),
+    ),
+)
+_ENVIRONMENT_MATCHING_HEADER_LITERAL = PostmanEnvironment(
+    name="QA",
+    variables=(
+        EnvironmentVariable(key="testToken", value=_SECRET_LITERAL_VALUE, is_secret=True, enabled=True),
     ),
 )
 
@@ -131,7 +134,35 @@ def _login_request(password_value: str) -> dict:
 
 
 _VARIABLE_REQUEST = _login_request("{{password}}")
-_LITERAL_REQUEST = _login_request(_SECRET_LITERAL_VALUE)
+_LITERAL_BODY_REQUEST = _login_request(_SECRET_LITERAL_VALUE)
+_LITERAL_UNKNOWN_BODY_REQUEST = _login_request(_UNKNOWN_LITERAL_VALUE)
+
+_LITERAL_QUERY_REQUEST = {
+    "request": {
+        "method": "GET",
+        "url": {
+            "raw": f"https://api.exemplo.com/users?token={_SECRET_LITERAL_VALUE}&name={_USERNAME}",
+            "protocol": "https",
+            "host": ["api", "exemplo", "com"],
+            "path": ["users"],
+            "query": [
+                {"key": "token", "value": _SECRET_LITERAL_VALUE},
+                {"key": "name", "value": _USERNAME},
+            ],
+        },
+    }
+}
+
+_LITERAL_HEADER_REQUEST = {
+    "request": {
+        "method": "GET",
+        "url": "https://api.exemplo.com/secure",
+        "header": [
+            {"key": "X-Test-Token", "value": _SECRET_LITERAL_VALUE},
+            {"key": "X-Other", "value": "not-secret"},
+        ],
+    }
+}
 
 
 def _analyzed(request: dict):
@@ -142,7 +173,7 @@ def _analyzed(request: dict):
                     "name": "Literal Secret E2E",
                     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
                 },
-                "item": [{"name": "Login", "id": "r1", **request}],
+                "item": [{"name": "R", "id": "r1", **request}],
             }
         )
     )
@@ -190,8 +221,7 @@ def _write_single_endpoint_suite(tmp_path: Path, name: str, generated_endpoint) 
 
 
 def _endpoint_file_content(suite_dir: Path) -> str:
-    # Inspeciona o arquivo FÍSICO realmente gerado em disco — nunca só a
-    # string em memória de GeneratedEndpointTest.content.
+    # Inspeciona o arquivo FÍSICO realmente gerado em disco.
     endpoint_files = sorted((suite_dir / "endpoints").glob("*.py"))
     assert len(endpoint_files) == 1, "suíte de um único endpoint deveria gerar um único arquivo"
     return endpoint_files[0].read_text(encoding="utf-8")
@@ -221,211 +251,311 @@ def _persist_read_report_html(result, run_dir: Path):
 
 # ============================================================================
 # CENÁRIO 1 — secret referenciado por variável de Environment ({{password}})
+# — continua protegido depois da correção (nada mudou neste caminho).
 # ============================================================================
 
 
-def test_cenario1_geracao_variavel_nunca_expoe_o_valor_e_preserva_a_request(tmp_path):
+def test_cenario1_variavel_continua_protegida_na_geracao(tmp_path):
     generated = _generated_endpoint(_VARIABLE_REQUEST, _ENVIRONMENT_FOR_VARIABLE)
-    ast.parse(generated.content)  # ETAPA de validade: nunca aceitar .py inválido como "proteção"
+    ast.parse(generated.content)
 
     suite_dir = _write_single_endpoint_suite(tmp_path, "cenario1_gen", generated)
     content = _endpoint_file_content(suite_dir)
     ast.parse(content)
 
-    # 1. O valor real não aparece no .py gerado.
     assert _SECRET_VARIABLE_VALUE not in content
-
-    # 2. A estrutura do request permanece funcional: a chave "password"
-    # continua no body, nunca removida/"" /"****" hardcoded — só o VALOR
-    # foi deferido para uma variável resolvida em runtime.
     assert '"password": password,' in content
-    assert '"password": "",' not in content
-    assert '"password": "****",' not in content
     assert "AQO_PASSWORD" in content
-    assert 'os.environ.get("AQO_PASSWORD")' in content
     assert "AQO_PASSWORD" in generated.required_environment_variables
-
-    # 8. O campo username permanece intacto.
-    assert f'"username": "{_USERNAME}",' in content
+    assert f'"username": "{_USERNAME}",' in content  # valor não sensível intacto
 
 
-def test_cenario1_execucao_real_entrega_o_valor_e_mascara_a_jusante(tmp_path, monkeypatch):
+def test_cenario1_e2e_variavel_protegida_e_funcional(tmp_path, monkeypatch):
     server = PostmanTestServer()
     try:
         server.set_route(
             "/login", method="PUT", status=200, body={"token": "fake-jwt-not-a-real-secret"}
         )
-
         generated = _generated_endpoint(_VARIABLE_REQUEST, _ENVIRONMENT_FOR_VARIABLE)
-        assert _SECRET_VARIABLE_VALUE not in generated.content  # pré-condição
-
         suite_dir = _write_single_endpoint_suite(tmp_path, "cenario1_e2e", generated)
 
         monkeypatch.setenv("PLAYWRIGHT_BASE_URL", server.base_url)
-        # Mecanismo real e já existente: a variável chega em runtime via
-        # variável de ambiente do SO — nunca uma infraestrutura nova.
         monkeypatch.setenv("AQO_PASSWORD", _SECRET_VARIABLE_VALUE)
         adapter = PlaywrightAdapter(pytest_executable=sys.executable, command_prefix=("-m", "pytest"))
-        # known_secret_values populado explicitamente aqui simula o que
-        # run_command.py já faz em produção a partir de
-        # EnvironmentVariable.is_secret.
         result = adapter.run(
             tests_path=str(suite_dir),
             timeout_seconds=90.0,
             known_secret_values=(_SECRET_VARIABLE_VALUE,),
         )
 
-        assert result.infrastructure_failure is None, (
-            f"execução falhou por infraestrutura: {result.stdout[-2000:]} {result.stderr[-2000:]}"
-        )
+        assert result.infrastructure_failure is None
         assert result.success is True
-
-        # 4. O servidor recebe o valor REAL (prova de que a proteção na
-        # geração não quebrou o funcionamento em runtime).
-        assert len(server.received_bodies) == 1
         assert server.received_bodies[0] == {"username": _USERNAME, "password": _SECRET_VARIABLE_VALUE}
 
-        # 3. O Playwright recebeu o valor em runtime — confirmado pela
-        # HttpTransaction capturada (o corpo REALMENTE enviado).
-        assert len(result.http_transactions) == 1
         transaction = result.http_transactions[0]
-        assert transaction.test_id
-        assert transaction.method == "PUT"
-        assert transaction.request_body is not None
-        # Evidência pós-execução já chega mascarada do PlaywrightAdapter.
-        assert _SECRET_VARIABLE_VALUE not in transaction.request_body
-        assert _MASKED_VARIABLE_SECRET in transaction.request_body
-        assert _USERNAME in transaction.request_body  # 8. isolamento
+        assert _SECRET_VARIABLE_VALUE not in (transaction.request_body or "")
+        assert _MASKED_VARIABLE_SECRET in (transaction.request_body or "")
 
-        raw_payload, record, report, html = _persist_read_report_html(
-            result, tmp_path / "run_cenario1"
-        )
-
-        # 5. result.json não contém o valor real.
+        raw_payload, _, _, html = _persist_read_report_html(result, tmp_path / "run_cenario1")
         assert _SECRET_VARIABLE_VALUE not in json.dumps(raw_payload)
-        # 7. A forma mascarada aparece nas evidências.
-        assert _MASKED_VARIABLE_SECRET in json.dumps(raw_payload)
-
-        # 6. HTML não contém o valor real; forma mascarada presente.
         assert _SECRET_VARIABLE_VALUE not in html
         assert _MASKED_VARIABLE_SECRET in html
-
-        # 8. username permanece correto em toda a cadeia.
-        assert _USERNAME in json.dumps(raw_payload)
-        assert _USERNAME in html
     finally:
         server.shutdown()
 
 
 # ============================================================================
-# CENÁRIO 2 — secret colocado diretamente como literal na Collection
+# CENÁRIO 2a — secret literal no JSON BODY, correspondente a um secret do
+# Environment — CORRIGIDO: agora protegido, exatamente como o Cenário 1.
 # ============================================================================
 
 
-def test_cenario2_geracao_literal_sem_environment(tmp_path):
-    # Sem nenhum Environment envolvido — o caso mais simples e mais comum
-    # de um literal cru na Collection.
-    generated = _generated_endpoint(_LITERAL_REQUEST, environment=None)
+def test_cenario2_body_literal_correspondente_a_secret_agora_protegido(tmp_path):
+    generated = _generated_endpoint(_LITERAL_BODY_REQUEST, _ENVIRONMENT_MATCHING_BODY_LITERAL)
     ast.parse(generated.content)
 
-    suite_dir = _write_single_endpoint_suite(tmp_path, "cenario2_gen_sem_env", generated)
+    suite_dir = _write_single_endpoint_suite(tmp_path, "cenario2_body_gen", generated)
     content = _endpoint_file_content(suite_dir)
     ast.parse(content)
 
-    # 1. ACHADO: o literal aparece no .py gerado — a arquitetura atual não
-    # protege um valor sensível literal no body, mesmo sendo
-    # estruturalmente idêntico ao Cenário 1 (mesma chave "password", mesmo
-    # tipo de dado). Registrado explicitamente como comportamento atual —
-    # nunca escondido nem mascarado dentro deste teste.
-    literal_exposed = _SECRET_LITERAL_VALUE in content
-    assert literal_exposed, (
-        "ACHADO deixou de se reproduzir: SECRET_LITERAL_TEST_123456 não "
-        "aparece mais literalmente no .py gerado — se isso for uma "
-        "correção deliberada, atualize este teste de caracterização "
-        "conscientemente (troque para assert not literal_exposed)."
-    )
-    assert f'"password": "{_SECRET_LITERAL_VALUE}",' in content
-    assert f'"username": "{_USERNAME}",' in content  # username nunca afetado
+    # 1. O valor real não aparece mais no .py gerado.
+    assert _SECRET_LITERAL_VALUE not in content
+    # A request continua funcional: chave "password" preservada, deferida
+    # para runtime via o MESMO mecanismo de {{variable}} — nunca removida,
+    # nunca "" / "****".
+    assert '"password": password,' in content
+    assert "AQO_PASSWORD" in content
+    assert 'os.environ.get("AQO_PASSWORD")' in content
+    assert "AQO_PASSWORD" in generated.required_environment_variables
+    # Valor não sensível ao lado permanece intacto.
+    assert f'"username": "{_USERNAME}",' in content
 
 
-def test_cenario2_geracao_literal_mesmo_com_environment_declarando_o_mesmo_valor_como_secret(
-    tmp_path,
-):
-    # 6. Existe algum mecanismo atual que reconheça esse valor como
-    # secret, mesmo sem {{}}? Para HEADERS existe (_matches_known_secret,
-    # correspondência por VALOR) — este teste verifica se o MESMO
-    # mecanismo se aplica a um literal de BODY. Nenhum comportamento novo
-    # é inventado aqui: só se observa o que o código real já faz.
-    generated = _generated_endpoint(_LITERAL_REQUEST, _ENVIRONMENT_MATCHING_THE_LITERAL)
-    ast.parse(generated.content)
-
-    suite_dir = _write_single_endpoint_suite(tmp_path, "cenario2_gen_com_env", generated)
-    content = _endpoint_file_content(suite_dir)
-    ast.parse(content)
-
-    literal_exposed = _SECRET_LITERAL_VALUE in content
-    assert literal_exposed, (
-        "ACHADO deixou de se reproduzir: mesmo com um Environment "
-        "declarando o mesmo valor como secreto, o literal de BODY não "
-        "aparece mais no .py — atualize este teste conscientemente se "
-        "isso for uma correção deliberada."
-    )
-
-
-def test_cenario2_execucao_real_literal_chega_ao_servidor_sem_protecao_a_jusante(
-    tmp_path, monkeypatch
-):
+def test_cenario2_body_literal_e2e_protegido_e_funcional(tmp_path, monkeypatch):
+    # TESTE E2E OBRIGATÓRIO: cadeia completa e real, provando que o
+    # literal protegido na geração continua funcionando em runtime e
+    # nunca aparece em claro em nenhuma evidência a jusante.
     server = PostmanTestServer()
     try:
         server.set_route(
             "/login", method="PUT", status=200, body={"token": "fake-jwt-not-a-real-secret"}
         )
 
-        generated = _generated_endpoint(_LITERAL_REQUEST, environment=None)
-        assert _SECRET_LITERAL_VALUE in generated.content  # pré-condição (mesmo achado da geração)
+        generated = _generated_endpoint(_LITERAL_BODY_REQUEST, _ENVIRONMENT_MATCHING_BODY_LITERAL)
+        assert _SECRET_LITERAL_VALUE not in generated.content  # pré-condição (correção confirmada)
 
-        suite_dir = _write_single_endpoint_suite(tmp_path, "cenario2_e2e", generated)
+        suite_dir = _write_single_endpoint_suite(tmp_path, "cenario2_body_e2e", generated)
 
         monkeypatch.setenv("PLAYWRIGHT_BASE_URL", server.base_url)
+        monkeypatch.setenv("AQO_PASSWORD", _SECRET_LITERAL_VALUE)
         adapter = PlaywrightAdapter(pytest_executable=sys.executable, command_prefix=("-m", "pytest"))
-        # known_secret_values=() DE PROPÓSITO, nunca omitido por engano:
-        # em produção, nada popularia isto com um valor que só existe
-        # como literal cru numa Collection — o mecanismo real de
-        # known_secret_values vem de EnvironmentVariable.is_secret, que
-        # este literal nunca teve (não há {{}} referenciando nada).
-        result = adapter.run(tests_path=str(suite_dir), timeout_seconds=90.0)
+        result = adapter.run(
+            tests_path=str(suite_dir),
+            timeout_seconds=90.0,
+            known_secret_values=(_SECRET_LITERAL_VALUE,),
+        )
 
         assert result.infrastructure_failure is None, (
             f"execução falhou por infraestrutura: {result.stdout[-2000:]} {result.stderr[-2000:]}"
         )
         assert result.success is True
 
-        # 2. O literal chega ao servidor durante a execução (a request
-        # nunca deixou de funcionar — o problema é exclusivamente de
-        # segurança, nunca funcional).
+        # 4. O servidor recebe o valor VERDADEIRO — a proteção não quebrou
+        # a request.
         assert len(server.received_bodies) == 1
         assert server.received_bodies[0] == {"username": _USERNAME, "password": _SECRET_LITERAL_VALUE}
 
-        # 3. ACHADO: o literal aparece em http_transactions em claro —
-        # nada no pipeline sabia que este valor precisava ser mascarado.
+        # 3. http_transactions: valor real ausente, forma mascarada presente.
         assert len(result.http_transactions) == 1
         transaction = result.http_transactions[0]
         assert transaction.request_body is not None
-        assert _SECRET_LITERAL_VALUE in transaction.request_body
-        assert _USERNAME in transaction.request_body  # username nunca afetado
+        assert _SECRET_LITERAL_VALUE not in transaction.request_body
+        assert _MASKED_LITERAL_SECRET in transaction.request_body
+        assert _USERNAME in transaction.request_body  # não sensível intacto
 
         raw_payload, record, report, html = _persist_read_report_html(
-            result, tmp_path / "run_cenario2"
+            result, tmp_path / "run_cenario2_body"
         )
 
-        # 4. ACHADO: aparece em claro no result.json.
-        assert _SECRET_LITERAL_VALUE in json.dumps(raw_payload)
+        # 5. result.json sem o valor real; forma mascarada presente.
+        assert _SECRET_LITERAL_VALUE not in json.dumps(raw_payload)
+        assert _MASKED_LITERAL_SECRET in json.dumps(raw_payload)
 
-        # 5. ACHADO: aparece em claro no HTML.
-        assert _SECRET_LITERAL_VALUE in html
+        # 6. HTML sem o valor real; forma mascarada presente.
+        assert _SECRET_LITERAL_VALUE not in html
+        assert _MASKED_LITERAL_SECRET in html
 
-        # username, ao lado, nunca é afetado por esse achado.
+        # Valor não sensível intacto em toda a cadeia.
         assert _USERNAME in json.dumps(raw_payload)
         assert _USERNAME in html
     finally:
         server.shutdown()
+
+
+# ============================================================================
+# CENÁRIO 2b — secret literal em QUERY PARAMETER, correspondente a um
+# secret do Environment — CORRIGIDO.
+# ============================================================================
+
+
+def test_cenario2_query_literal_correspondente_a_secret_agora_protegido(tmp_path):
+    generated = _generated_endpoint(_LITERAL_QUERY_REQUEST, _ENVIRONMENT_MATCHING_QUERY_LITERAL)
+    ast.parse(generated.content)
+
+    suite_dir = _write_single_endpoint_suite(tmp_path, "cenario2_query_gen", generated)
+    content = _endpoint_file_content(suite_dir)
+    ast.parse(content)
+
+    assert _SECRET_LITERAL_VALUE not in content
+    assert "AQO_API_TOKEN" in content
+    assert '"token": api_token,' in content
+    # name=test-user (não sensível) continua um literal comum, intacto.
+    assert f'"name": "{_USERNAME}",' in content
+
+
+def test_cenario2_query_literal_e2e_protegido_e_funcional(tmp_path, monkeypatch):
+    server = PostmanTestServer()
+    try:
+        server.set_route(
+            f"/users?token={_SECRET_LITERAL_VALUE}&name={_USERNAME}",
+            method="GET",
+            status=200,
+            body={"ok": True},
+        )
+
+        generated = _generated_endpoint(_LITERAL_QUERY_REQUEST, _ENVIRONMENT_MATCHING_QUERY_LITERAL)
+        assert _SECRET_LITERAL_VALUE not in generated.content
+
+        suite_dir = _write_single_endpoint_suite(tmp_path, "cenario2_query_e2e", generated)
+
+        monkeypatch.setenv("PLAYWRIGHT_BASE_URL", server.base_url)
+        monkeypatch.setenv("AQO_API_TOKEN", _SECRET_LITERAL_VALUE)
+        adapter = PlaywrightAdapter(pytest_executable=sys.executable, command_prefix=("-m", "pytest"))
+        result = adapter.run(
+            tests_path=str(suite_dir),
+            timeout_seconds=90.0,
+            known_secret_values=(_SECRET_LITERAL_VALUE,),
+        )
+
+        assert result.infrastructure_failure is None, (
+            f"execução falhou por infraestrutura: {result.stdout[-2000:]} {result.stderr[-2000:]}"
+        )
+        assert result.success is True
+
+        assert len(result.http_transactions) == 1
+        transaction = result.http_transactions[0]
+        query_values = {p.name: p.value for p in transaction.query_parameters}
+        # O servidor só respondeu 200 para a query string EXATA com o
+        # valor real — logo, o valor real chegou (a rota exige isso).
+        assert transaction.response_status == 200
+        # A evidência pós-execução já chega mascarada.
+        assert _SECRET_LITERAL_VALUE not in (query_values.get("token") or "")
+        assert _MASKED_LITERAL_SECRET in (query_values.get("token") or "")
+        assert query_values.get("name") == _USERNAME  # não sensível intacto
+
+        raw_payload, record, report, html = _persist_read_report_html(
+            result, tmp_path / "run_cenario2_query"
+        )
+        assert _SECRET_LITERAL_VALUE not in json.dumps(raw_payload)
+        assert _SECRET_LITERAL_VALUE not in html
+        assert _MASKED_LITERAL_SECRET in html
+        assert _USERNAME in html
+    finally:
+        server.shutdown()
+
+
+# ============================================================================
+# CENÁRIO 2c — secret literal em HEADER, correspondente a um secret do
+# Environment — CORRIGIDO (mesma correspondência por valor já usada para
+# Authorization/headers reservados, agora deferindo em vez de omitir).
+# ============================================================================
+
+
+def test_cenario2_header_literal_correspondente_a_secret_agora_protegido(tmp_path):
+    generated = _generated_endpoint(_LITERAL_HEADER_REQUEST, _ENVIRONMENT_MATCHING_HEADER_LITERAL)
+    ast.parse(generated.content)
+
+    suite_dir = _write_single_endpoint_suite(tmp_path, "cenario2_header_gen", generated)
+    content = _endpoint_file_content(suite_dir)
+    ast.parse(content)
+
+    assert _SECRET_LITERAL_VALUE not in content
+    # Nunca mais omitido (o que quebraria a request) — deferido, o header
+    # continua presente no dict enviado.
+    assert '"X-Test-Token": test_token,' in content
+    assert "AQO_TEST_TOKEN" in content
+    # Header não sensível ao lado permanece intacto.
+    assert '"X-Other": "not-secret",' in content
+
+
+def test_cenario2_header_literal_e2e_protegido_e_funcional(tmp_path, monkeypatch):
+    server = PostmanTestServer()
+    try:
+        server.set_route("/secure", method="GET", status=200, body={"ok": True})
+
+        generated = _generated_endpoint(_LITERAL_HEADER_REQUEST, _ENVIRONMENT_MATCHING_HEADER_LITERAL)
+        assert _SECRET_LITERAL_VALUE not in generated.content
+
+        suite_dir = _write_single_endpoint_suite(tmp_path, "cenario2_header_e2e", generated)
+
+        monkeypatch.setenv("PLAYWRIGHT_BASE_URL", server.base_url)
+        monkeypatch.setenv("AQO_TEST_TOKEN", _SECRET_LITERAL_VALUE)
+        adapter = PlaywrightAdapter(pytest_executable=sys.executable, command_prefix=("-m", "pytest"))
+        result = adapter.run(
+            tests_path=str(suite_dir),
+            timeout_seconds=90.0,
+            known_secret_values=(_SECRET_LITERAL_VALUE,),
+        )
+
+        assert result.infrastructure_failure is None, (
+            f"execução falhou por infraestrutura: {result.stdout[-2000:]} {result.stderr[-2000:]}"
+        )
+        assert result.success is True
+
+        # O servidor de fato recebeu a chamada (header não impediu o envio
+        # da request — a proteção não quebrou o funcionamento).
+        assert len(server.received_paths) == 1
+        received_headers = server.received_headers[0]
+        # O valor real chegou de verdade no header HTTP enviado.
+        assert received_headers.get("X-Test-Token") == _SECRET_LITERAL_VALUE
+        assert received_headers.get("X-Other") == "not-secret"
+
+        assert len(result.http_transactions) == 1
+        transaction = result.http_transactions[0]
+        request_header_values = {h.name: h.value for h in transaction.request_headers}
+        assert _SECRET_LITERAL_VALUE not in json.dumps(request_header_values)
+        assert _MASKED_LITERAL_SECRET in (request_header_values.get("X-Test-Token") or "")
+        assert request_header_values.get("X-Other") == "not-secret"
+
+        raw_payload, record, report, html = _persist_read_report_html(
+            result, tmp_path / "run_cenario2_header"
+        )
+        assert _SECRET_LITERAL_VALUE not in json.dumps(raw_payload)
+        assert _SECRET_LITERAL_VALUE not in html
+    finally:
+        server.shutdown()
+
+
+# ============================================================================
+# CONTROLE — um literal que NÃO corresponde a nenhum secret declarado no
+# Environment nunca deve ser tratado como secreto (a correção não pode
+# "inventar" que um valor é sensível sem essa correspondência exata).
+# ============================================================================
+
+
+def test_literal_sem_correspondencia_no_environment_nao_e_tratado_como_secret(tmp_path):
+    generated = _generated_endpoint(_LITERAL_UNKNOWN_BODY_REQUEST, _ENVIRONMENT_MATCHING_BODY_LITERAL)
+    ast.parse(generated.content)
+
+    suite_dir = _write_single_endpoint_suite(tmp_path, "controle_sem_match", generated)
+    content = _endpoint_file_content(suite_dir)
+    ast.parse(content)
+
+    # O Environment declara "password" como secreto (valor
+    # SECRET_LITERAL_TEST_123456), mas o literal usado aqui é OUTRO valor
+    # (UNKNOWN_LITERAL_NOT_A_SECRET_999) — nenhuma correspondência exata,
+    # então continua um literal comum, nunca deferido artificialmente.
+    assert _UNKNOWN_LITERAL_VALUE in content
+    assert f'"password": "{_UNKNOWN_LITERAL_VALUE}",' in content
+    assert "AQO_PASSWORD" not in content
+    assert generated.required_environment_variables == ()

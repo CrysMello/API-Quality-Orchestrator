@@ -555,6 +555,13 @@ def _build_query_params(
         if pure_variable is not None:
             params[parameter.key] = session.resolve(pure_variable)
             continue
+        # P2.4: literal cujo valor bate com uma EnvironmentVariable
+        # secreta — mesmo mecanismo de defer de {{variable}}, nunca um
+        # segundo masking (ver _find_matching_secret_variable_name).
+        matched_secret_name = _find_matching_secret_variable_name(value, session.environment)
+        if matched_secret_name is not None:
+            params[parameter.key] = session.resolve(matched_secret_name)
+            continue
         params[parameter.key] = _render_python_literal(_coerce_query_value(value))
     return params
 
@@ -616,15 +623,16 @@ def _resolve_headers(
             )
             continue
 
-        if _matches_known_secret(value, environment):
-            warnings.append(
-                _header_warning(
-                    SENSITIVE_HEADER_OMITTED,
-                    endpoint_source,
-                    key,
-                    "valor corresponde a uma variável marcada como secreta no Environment",
-                )
-            )
+        # P2.4: um literal cujo valor bate com uma EnvironmentVariable
+        # secreta é deferido para runtime (mesmo mecanismo de {{variable}}
+        # — session.resolve), nunca mais omitido silenciosamente: omitir
+        # quebraria a request (header nunca chegaria a ser enviado); o
+        # header continua enviado, só o valor deixa de aparecer no código
+        # gerado. Nenhum warning aqui — resolvido com sucesso, mesmo
+        # critério de uma referência {{variable}} que resolve normalmente.
+        matched_secret_name = _find_matching_secret_variable_name(value, environment)
+        if matched_secret_name is not None:
+            resolved[lower_key] = (key, session.resolve(matched_secret_name))
             continue
 
         if lower_key in resolved:
@@ -656,13 +664,25 @@ def _reserved_reason(lower_key: str) -> str:
     return "reservado para uma geração futura derivada do tipo de body"
 
 
-def _matches_known_secret(value: str, environment: PostmanEnvironment | None) -> bool:
+def _find_matching_secret_variable_name(
+    value: str, environment: PostmanEnvironment | None
+) -> str | None:
+    # P2.4 (correção do bug comprovado por test_playwright_literal_secret_
+    # e2e.py): um literal cru (nunca uma referência {{nome}}) cujo VALOR
+    # bate com uma EnvironmentVariable marcada is_secret=True precisa ser
+    # tratado como secreto do mesmo jeito que uma referência {{nome}}
+    # seria — devolve o NOME dessa variável (nunca o valor) para quem
+    # chama poder deferir via VariableResolutionSession.resolve(name), o
+    # MESMO mecanismo já usado para {{variable}}, nunca um segundo
+    # masking. None quando nenhuma variável secreta bate com o valor —
+    # nunca inventa que um valor é secreto sem essa correspondência
+    # exata.
     if not value or environment is None:
-        return False
-    return any(
-        variable.is_secret and variable.enabled and variable.value == value
-        for variable in environment.variables
-    )
+        return None
+    for variable in environment.variables:
+        if variable.is_secret and variable.enabled and variable.value == value:
+            return variable.key
+    return None
 
 
 def _header_warning(
@@ -836,6 +856,12 @@ def _render_json_literal(value: Any, base_indent: str, session: VariableResoluti
         pure_variable = extract_pure_variable_name(value)
         if pure_variable is not None:
             return session.resolve(pure_variable)
+        # P2.4: literal cujo valor bate com uma EnvironmentVariable
+        # secreta — mesmo mecanismo de defer de {{variable}}, nunca um
+        # segundo masking (ver _find_matching_secret_variable_name).
+        matched_secret_name = _find_matching_secret_variable_name(value, session.environment)
+        if matched_secret_name is not None:
+            return session.resolve(matched_secret_name)
         return _python_string_literal(value)
     if isinstance(value, list):
         return _render_json_list(value, base_indent, session)

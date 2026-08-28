@@ -34,8 +34,9 @@ tests/unit/test_http_evidence_round_trip.py). Playwright, pytest e o
 servidor HTTP são sempre reais (`postman_test_server`).
 
 IMPORTANTE SOBRE OS RESULTADOS "VERMELHOS": as asserções de segurança
-para os campos SEM proteção hoje (query/body, mesmo quando a Collection
-usa um Environment com o valor marcado secreto) são deliberadamente
+para os campos ainda SEM proteção hoje (query/header/body sem NENHUM
+Environment associado — nada para corresponder, então nada é mascarado,
+por design: "não inventar que um valor é secreto") são deliberadamente
 escritas para esperar o comportamento SEGURO (valor ausente do .py) e
 reportadas via `pytest.xfail(...)` quando o valor aparece — isso
 preserva a suíte executável/reportável (nunca "1 failed" quebrando o
@@ -47,6 +48,20 @@ pipeline de validação), mas deixa o gap:
     — nunca um "xpass" silencioso).
 Nenhum teste foi removido, adaptado para aceitar o segredo, ou mascarado
 manualmente antes da verificação do arquivo gerado.
+
+ATUALIZAÇÃO (P2.4): os dois casos em que o literal de query/body
+correspondia por VALOR a uma EnvironmentVariable secreta ("...-bate-com-
+secret-do-environment") foram corrigidos — `_find_matching_secret_
+variable_name` (playwright_endpoint_test_generator.py) agora detecta essa
+correspondência e defere o valor para runtime, o MESMO mecanismo já usado
+para uma referência `{{variável}}` e para o header comum (que já tinha
+essa proteção via `_matches_known_secret` antes do P2.4). Os `xfail`
+restantes (sem NENHUM Environment envolvido) continuam documentando um
+comportamento correto, nunca um bug: sem uma variável secreta para
+corresponder, não há nada a proteger. Ver
+tests/characterization/test_playwright_literal_secret_e2e.py para a
+cobertura completa e permanente da correção (body/query/header, com
+execução E2E real).
 
 Documenta o comportamento ATUAL — se este arquivo quebrar (xfail virando
 fail, ou vice-versa) por uma mudança deliberada, atualize-o
@@ -263,14 +278,14 @@ _CASES = [
     pytest.param(
         _query_request(),
         _ENV_WITH_MATCHING_SECRET,
-        False,
-        id="query-literal-bate-com-secret-do-environment-AINDA-EXPOSTO",
+        True,
+        id="query-literal-bate-com-secret-do-environment-CORRIGIDO-P2.4",
     ),
     pytest.param(
         _body_request(),
         _ENV_WITH_MATCHING_SECRET,
-        False,
-        id="body-literal-bate-com-secret-do-environment-AINDA-EXPOSTO",
+        True,
+        id="body-literal-bate-com-secret-do-environment-CORRIGIDO-P2.4",
     ),
 ]
 
