@@ -21,13 +21,22 @@ class _RoutedRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_PUT(self) -> None:  # noqa: N802 (nome exigido pela stdlib)
         self._handle("PUT")
 
+    def do_POST(self) -> None:  # noqa: N802 (nome exigido pela stdlib)
+        # Dependências entre endpoints (endpoint_dependency_linking.py):
+        # reaproveitado por várias suítes de teste novas (produtor real —
+        # "criar" é sempre POST na convenção REST), nunca infraestrutura
+        # de uso único (ver DESVIO DOCUMENTADO em
+        # test_playwright_literal_secret_e2e.py, que evitou isso quando só
+        # um teste precisaria).
+        self._handle("POST")
+
     def _handle(self, method: str) -> None:
         server: "PostmanTestServer" = self.server.test_server  # type: ignore[attr-defined]
         server.received_paths.append(self.path)
         server.received_methods.append(method)
         server.received_headers.append(dict(self.headers))
 
-        if method == "PUT":
+        if method in ("PUT", "POST"):
             length = int(self.headers.get("Content-Length", "0") or "0")
             raw_body = self.rfile.read(length) if length else b""
             try:

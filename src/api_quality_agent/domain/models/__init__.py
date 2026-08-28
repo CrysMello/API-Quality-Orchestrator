@@ -102,6 +102,7 @@ from api_quality_agent.domain.models.test_strategy_options import TestStrategyOp
 from api_quality_agent.domain.models.trace_artifact import TraceArtifact
 from api_quality_agent.domain.models.variable_extraction import VariableExtraction
 from api_quality_agent.domain.models.variable_scope import VariableScope
+from api_quality_agent.domain.models.variable_usage import VariableUsage
 from api_quality_agent.domain.models.workspace_ref import WorkspaceRef
 
 __all__ = [
@@ -205,5 +206,6 @@ __all__ = [
     "UnknownCollectionItem",
     "VariableExtraction",
     "VariableScope",
+    "VariableUsage",
     "WorkspaceRef",
 ]

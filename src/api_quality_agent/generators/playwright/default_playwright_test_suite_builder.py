@@ -26,6 +26,27 @@ from api_quality_agent.generators.playwright.warning_catalog import UNRESOLVED_V
 _ENDPOINTS_DIR = "endpoints"
 _CONFTEST_FILE_NAME = "conftest.py"
 _MANIFEST_FILE_NAME = "generation-manifest.json"
+_PYTEST_INI_FILE_NAME = "pytest.ini"
+
+# Etapa 7 (ordem explícita e legível): o prefixo numérico (01_, 02_, ...)
+# fica ANTES de "test_" (ex.: "01_test_post_customers.py"), exatamente
+# como pedido — mas isso quebra a descoberta PADRÃO do pytest
+# (python_files default é "test_*.py"/"*_test.py"; um arquivo começando
+# com dígito não bate com nenhum dos dois, então NUNCA seria coletado sem
+# isto). "não assuma que o prefixo numérico, isoladamente, constitui uma
+# garantia arquitetural de execução pelo pytest" — a forma mínima e
+# confiável de garantir que o arquivo pelo menos SEJA DESCOBERTO é
+# configurar python_files explicitamente para aceitar também esse padrão,
+# via um pytest.ini na raiz da suíte (mecanismo nativo do pytest, nenhuma
+# dependência externa como pytest-order). Emitido SÓ quando a suíte usa
+# numeração (nenhuma mudança para a suíte comum, sem dependências, que
+# continua exatamente "test_*.py"). A GARANTIA de ordem producer->consumer
+# em si nunca depende disto — é sempre o `assert` explícito emitido por
+# VariableResolutionSession.resolve_shared_variable no teste consumidor
+# (fail-loud); o prefixo/pytest.ini são só uma conveniência de legibilidade
+# e (na prática, quando pytest não é forçado a rodar em paralelo/fora de
+# ordem) de execução em sequência alfabética.
+_PYTEST_INI_CONTENT = "[pytest]\npython_files = test_*.py [0-9][0-9]_test_*.py\n"
 
 # Bumpar deliberadamente (nunca por efeito colateral de outra mudança) toda
 # vez que o formato do manifesto ganhar/perder uma chave — mesmo espírito
@@ -37,7 +58,11 @@ _MANIFEST_FILE_NAME = "generation-manifest.json"
 # 1.2 (Parte 24): warnings "de código" ganham method/location/metadata,
 # deduplicados; endpoints ganham "coverage" (complete/partial/not_generated)
 # — nunca remove nem renomeia uma chave existente.
-_MANIFEST_SCHEMA_VERSION = "1.2"
+# 1.3 (dependências entre endpoints): acrescenta "variable_dependencies"
+# (uma entrada por VariableUsage realmente ligado — variável, consumidor,
+# producer_test_id, location) — nunca remove nem renomeia uma chave
+# existente.
+_MANIFEST_SCHEMA_VERSION = "1.3"
 
 # Pode ser sobrescrito em tempo de execução sem regenerar a suíte (ex.:
 # apontar para staging/produção em CI) — nunca uma credencial, só a URL
@@ -57,9 +82,11 @@ class DefaultPlaywrightTestSuiteBuilder:
         endpoint_tests: Sequence[GeneratedEndpointTest],
         context: ExecutionContext,
     ) -> GeneratedTestSuite:
-        naming = resolve_endpoint_file_names(
-            [endpoint_test.endpoint_source for endpoint_test in endpoint_tests]
-        )
+        # endpoint_tests já chega na ordem final (Etapa 7: quem decide/
+        # calcula essa ordem, a partir das dependências, é
+        # GeneratePlaywrightTestSuiteUseCase, ANTES de chamar build() — este
+        # builder nunca reordena nada sozinho, só nomeia na ordem recebida).
+        naming = _resolve_naming_with_dependency_order(endpoint_tests)
 
         # Parte 25 — guarda de qualidade "antes da persistência": levanta
         # imediatamente se algum conteúdo já gerado contiver um padrão
@@ -86,10 +113,44 @@ class DefaultPlaywrightTestSuiteBuilder:
             warning for endpoint_test in endpoint_tests for warning in endpoint_test.warnings
         )
 
+        extra_files: tuple[GeneratedFile, ...] = ()
+        if any(endpoint_test.variable_usages for endpoint_test in endpoint_tests):
+            extra_files = (
+                GeneratedFile(relative_path=_PYTEST_INI_FILE_NAME, content=_PYTEST_INI_CONTENT),
+            )
+
         return GeneratedTestSuite(
-            files=(conftest_file, *endpoint_files, manifest_file),
+            files=(conftest_file, *endpoint_files, manifest_file, *extra_files),
             warnings=warnings,
         )
+
+
+def _resolve_naming_with_dependency_order(
+    endpoint_tests: Sequence[GeneratedEndpointTest],
+) -> ResolvedEndpointFileNames:
+    # Etapa 7 (ordem explícita e legível): prefixo numérico de 2 dígitos —
+    # 01_, 02_, ... — na MESMA ordem em que endpoint_tests chegou (já
+    # topologicamente ordenada por quem chama build(), nunca recalculada
+    # aqui). Só entra quando a suíte tem ALGUMA dependência real entre
+    # endpoints (pelo menos um VariableUsage de fato ligado a um produtor —
+    # nunca um endpoint independente "ganhando" um número à toa): suítes
+    # sem nenhuma dependência mantêm o nome de arquivo EXATAMENTE como
+    # antes desta parte, zero mudança de comportamento para o caso comum.
+    #
+    # O prefixo é só uma convenção de legibilidade (nunca a garantia real
+    # de producer -> consumer, que é sempre o `assert` explícito emitido
+    # por VariableResolutionSession.resolve_shared_variable no teste
+    # consumidor) — mesmo raciocínio documentado em
+    # endpoint_dependency_linking.py.
+    naming = resolve_endpoint_file_names(
+        [endpoint_test.endpoint_source for endpoint_test in endpoint_tests]
+    )
+    if not any(endpoint_test.variable_usages for endpoint_test in endpoint_tests):
+        return naming
+    numbered_file_names = tuple(
+        f"{index + 1:02d}_{file_name}" for index, file_name in enumerate(naming.file_names)
+    )
+    return ResolvedEndpointFileNames(file_names=numbered_file_names, warnings=naming.warnings)
 
 
 def _resolve_suite_base_url(endpoint_tests: Sequence[GeneratedEndpointTest]) -> str:
@@ -525,6 +586,28 @@ def _assertion_classifications_section(
     return {"summary": summary, "entries": entries}
 
 
+def _variable_dependencies_section(
+    endpoint_tests: Sequence[GeneratedEndpointTest],
+) -> list[dict[str, object]]:
+    # Uma entrada por VariableUsage realmente ligado (nunca um candidato
+    # descartado por ciclo — esses nunca chegam a virar VariableUsage, ver
+    # endpoint_dependency_linking.py) — rastreabilidade explícita de
+    # producer -> consumer no manifesto, mesmo espírito de
+    # required_environment_variables/resolved_variables acima.
+    entries: list[dict[str, object]] = []
+    for endpoint_test in endpoint_tests:
+        for usage in endpoint_test.variable_usages:
+            entries.append(
+                {
+                    "variable": usage.variable_name,
+                    "consumer": endpoint_test.endpoint_source,
+                    "producer_test_id": usage.producer_test_id,
+                    "location": usage.location,
+                }
+            )
+    return entries
+
+
 def _render_manifest(
     endpoint_tests: Sequence[GeneratedEndpointTest],
     naming: ResolvedEndpointFileNames,
@@ -555,5 +638,6 @@ def _render_manifest(
         "resolved_variables": _resolved_variables(endpoint_tests),
         "warnings": _warning_entries(endpoint_tests, naming.warnings),
         "assertion_classifications": _assertion_classifications_section(endpoint_tests),
+        "variable_dependencies": _variable_dependencies_section(endpoint_tests),
     }
     return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"

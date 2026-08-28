@@ -1,6 +1,7 @@
 import json
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 from typing import Any
@@ -19,14 +20,17 @@ from api_quality_agent.domain.models import (
     NormalizedUrl,
     PostmanEnvironment,
     TestStrategy,
+    VariableUsage,
 )
 from api_quality_agent.generators.playwright.assertion_classification import (
     AssertionClassification,
 )
 from api_quality_agent.generators.playwright.assertion_precision import AssertionPrecision
+from api_quality_agent.generators.playwright.endpoint_dependency_linking import (
+    producer_test_id_for,
+)
 from api_quality_agent.generators.playwright.endpoint_file_naming import (
     endpoint_source_to_file_name,
-    endpoint_source_to_slug,
     is_parameterized_segment,
     parameterized_segment_key,
 )
@@ -250,7 +254,9 @@ class _UnsupportedReason:
 
 
 def _unsupported_reason(
-    request: NormalizedRequest, environment: PostmanEnvironment | None
+    request: NormalizedRequest,
+    environment: PostmanEnvironment | None,
+    strategy: TestStrategy,
 ) -> tuple[_UnsupportedReason | None, VariableResolutionSession]:
     # Caso mais simples primeiro (Parte 07 em diante): GET ou POST (Parte
     # 13), body ausente, JSON válido ou multipart/form-data resolvível
@@ -296,7 +302,9 @@ def _unsupported_reason(
     # url_reason e query_reason cobrem, juntos, "URL" no sentido amplo (host,
     # path e query string) — mesmo código URL_NOT_RESOLVED para os dois,
     # location diferencia qual parte especificamente (Parte 24).
-    url_reason = _unsupported_url_reason(request.url, session)
+    url_reason = _unsupported_url_reason(
+        request.url, session, _path_variable_usages(strategy)
+    )
     if url_reason is not None:
         return _UnsupportedReason(URL_NOT_RESOLVED, url_reason, location="url"), session
 
@@ -391,7 +399,30 @@ def _unsupported_multipart_reason(body: NormalizedBody) -> _UnsupportedReason | 
 # --- URL: path e base URL (Parte 15) -----------------------------------------
 
 
-def _unsupported_url_reason(url: NormalizedUrl, session: VariableResolutionSession) -> str | None:
+def _path_variable_usages(strategy: TestStrategy) -> Mapping[str, VariableUsage]:
+    # Dependências entre endpoints (Etapa 6): só location="path" é
+    # implementado nesta etapa (ver VariableUsage.location) — uma entrada
+    # por variável, nunca duas (a linkagem, endpoint_dependency_linking.py,
+    # já garante no máximo um produtor por (endpoint, variável)).
+    return {usage.variable_name: usage for usage in strategy.variable_usages if usage.location == "path"}
+
+
+@dataclass(frozen=True)
+class _PathSegment:
+    # text: ou o valor literal já resolvido (dynamic=False, mesmo
+    # comportamento de sempre) ou o nome de uma variável local Python já
+    # resolvida por VariableResolutionSession.resolve_shared_variable
+    # (dynamic=True) — nunca os dois significados misturados no mesmo
+    # campo.
+    text: str
+    dynamic: bool = False
+
+
+def _unsupported_url_reason(
+    url: NormalizedUrl,
+    session: VariableResolutionSession,
+    path_variable_usages: Mapping[str, VariableUsage],
+) -> str | None:
     # Protocolo com {{variável}} é extremamente raro e não tem um "local"
     # melhor para reportar do que base_url — tratado à parte para nunca
     # quebrar a montagem de host/path abaixo com um protocolo incompleto.
@@ -401,7 +432,7 @@ def _unsupported_url_reason(url: NormalizedUrl, session: VariableResolutionSessi
 
     # Ambos sempre rodam (nunca curto-circuita no primeiro None) para que
     # todo problema da URL seja reportado de uma vez, não só o primeiro.
-    path_ok = _resolve_path_segments(url, session) is not None
+    path_ok = _resolve_path_segments(url, session, path_variable_usages) is not None
     host_ok = _resolve_host_segments(url, session) is not None
     if not path_ok or not host_ok:
         return "variáveis não resolvidas na URL ainda não são suportadas"
@@ -409,16 +440,23 @@ def _unsupported_url_reason(url: NormalizedUrl, session: VariableResolutionSessi
 
 
 def _resolve_path_segments(
-    url: NormalizedUrl, session: VariableResolutionSession
-) -> tuple[str, ...] | None:
+    url: NormalizedUrl,
+    session: VariableResolutionSession,
+    path_variable_usages: Mapping[str, VariableUsage],
+) -> tuple[_PathSegment, ...] | None:
     # Só prioridades 1 e 2 do resolvedor (environment/Collection, ambos já
     # conhecidos na geração) — o path= do Playwright é sempre uma string
-    # simples neste gerador, nunca uma f-string; por isso um path variable
-    # que só resolveria via variável de ambiente do sistema (prioridade 3)
-    # continua "não resolvido" aqui, limitação deliberada desta parte.
+    # simples neste gerador quando não há dependência de runtime; por isso
+    # um path variable que só resolveria via variável de ambiente do
+    # sistema (prioridade 3) continua "não resolvido" aqui, limitação
+    # deliberada desta parte. Dependências entre endpoints (Etapa 6) são a
+    # ÚNICA exceção: um segmento parametrizado sem default na Collection,
+    # mas com um VariableUsage correspondente (ligado antes da geração por
+    # endpoint_dependency_linking.py), vira um segmento DINÂMICO — valor
+    # obtido em runtime, nunca "não resolvido".
     variables_by_key = {variable.key: variable.value for variable in url.variables if variable.key}
 
-    resolved: list[str] = []
+    resolved: list[_PathSegment] = []
     ok = True
     for segment in url.path:
         pure_variable = extract_pure_variable_name(segment)
@@ -433,26 +471,33 @@ def _resolve_path_segments(
                 session.mark_unresolved(pure_variable, "path")
                 ok = False
                 continue
-            resolved.append(value)
+            resolved.append(_PathSegment(value))
             continue
 
         if is_parameterized_segment(segment):
-            # :nome ou {nome} (Postman/OpenAPI) — "produzida por outro
-            # teste" por padrão (fora de escopo desta fase); só resolve
-            # quando a própria Collection já declarou um default para essa
-            # chave em url.variable[] (NormalizedUrlVariable.value).
+            # :nome ou {nome} (Postman/OpenAPI) — resolve, nesta ordem: (1)
+            # default literal já declarado na Collection (url.variable[]),
+            # (2) valor produzido por outro endpoint em runtime
+            # (VariableUsage ligado antes da geração), (3) sem resolução.
             key = parameterized_segment_key(segment)
             literal = variables_by_key.get(key) if key else None
-            if not literal:
-                session.mark_unresolved(key or segment, "path")
-                ok = False
+            if literal:
+                assert key is not None  # garantido por literal ser não-None acima
+                session.resolved_variables[key] = literal
+                resolved.append(_PathSegment(literal))
                 continue
-            assert key is not None  # garantido por literal ser não-None acima
-            session.resolved_variables[key] = literal
-            resolved.append(literal)
+
+            usage = path_variable_usages.get(key) if key else None
+            if usage is not None:
+                local_variable = session.resolve_shared_variable(usage)
+                resolved.append(_PathSegment(local_variable, dynamic=True))
+                continue
+
+            session.mark_unresolved(key or segment, "path")
+            ok = False
             continue
 
-        resolved.append(segment)
+        resolved.append(_PathSegment(segment))
 
     return tuple(resolved) if ok else None
 
@@ -489,10 +534,33 @@ def _resolve_host_segments(
     return tuple(resolved) if ok else None
 
 
-def _relative_path_from_segments(segments: tuple[str, ...]) -> str:
-    if segments:
-        return "/" + "/".join(segments)
-    return "/"
+def _relative_path_from_segments(segments: tuple[_PathSegment, ...]) -> str:
+    # Devolve o path já como EXPRESSÃO PYTHON pronta para embutir (mesmo
+    # contrato de params/headers/data em _render_http_call) — nunca mais um
+    # valor cru que precise ser escapado por quem chama. Caso 100%
+    # literal (nenhum segmento dinâmico, a esmagadora maioria dos
+    # endpoints) produz exatamente o mesmo texto de sempre
+    # (_python_string_literal do path completo) — byte a byte idêntico ao
+    # comportamento anterior a esta parte, nenhuma regressão para quem não
+    # usa dependências entre endpoints.
+    if not any(segment.dynamic for segment in segments):
+        raw = "/" + "/".join(segment.text for segment in segments) if segments else "/"
+        return _python_string_literal(raw)
+
+    # Ao menos um segmento dinâmico (Etapa 6: valor produzido por outro
+    # endpoint, obtido em runtime) — vira uma f-string. Texto de segmentos
+    # NÃO dinâmicos tem chaves escapadas ({{ }}) por segurança estrutural
+    # (nenhum segmento de path realista contém chave, mas nunca assumido
+    # impossível); um segmento dinâmico entra como {nome_da_variavel} —
+    # sempre o identificador local já resolvido por
+    # VariableResolutionSession.resolve_shared_variable, nunca uma
+    # expressão arbitrária.
+    template_parts = [
+        f"{{{segment.text}}}" if segment.dynamic else segment.text.replace("{", "{{").replace("}", "}}")
+        for segment in segments
+    ]
+    template = "/" + "/".join(template_parts)
+    return "f" + _python_string_literal(template)
 
 
 def _base_url_from_resolved(protocol: str | None, host_segments: tuple[str, ...]) -> str | None:
@@ -730,7 +798,11 @@ def _render_http_call(
     call = f"api_context.{native_method}" if native_method is not None else "api_context.fetch"
     method_kwarg = None if native_method is not None else _python_string_literal(method)
 
-    path_literal = _python_string_literal(path)
+    # path já chega pré-renderizado como código Python (_relative_path_
+    # from_segments) — um literal escapado ou uma f-string quando um
+    # segmento é dinâmico (Etapa 6) — nunca escapado de novo aqui, mesmo
+    # tratamento que params/headers/data já recebiam.
+    path_literal = path
     if method_kwarg is None and not params and not headers and data is None and not multipart:
         return f"    response = {call}({path_literal})\n"
 
@@ -1138,7 +1210,7 @@ class PlaywrightEndpointTestGenerator:
         request: NormalizedRequest,
         environment: PostmanEnvironment | None = None,
     ) -> GeneratedEndpointTest:
-        reason, session = _unsupported_reason(request, environment)
+        reason, session = _unsupported_reason(request, environment, strategy)
         if reason is None:
             return _generate_positive_success_test(strategy, request, environment)
 
@@ -1475,8 +1547,16 @@ class _BodyJsonResolution:
 def _resolve_body_json_assertion(
     strategy: TestStrategy, content_type_resolution: _ContentTypeAssertionResolution
 ) -> _BodyJsonResolution:
-    should_parse = content_type_resolution.is_json_compatible or (
-        _find_valid_json_body_assertion(strategy) is not None
+    # Dependências entre endpoints (Etapa 5): variable_extractions chega
+    # aqui JÁ FILTRADO para "reivindicado" (linkagem prévia,
+    # endpoint_dependency_linking.py, só mantém o que algum outro endpoint
+    # realmente consome) — quando não vazio, o body precisa ser parseado
+    # mesmo sem evidência de Content-Type JSON/VALID_JSON_BODY, porque o
+    # valor a extrair só existe depois do parse.
+    should_parse = (
+        content_type_resolution.is_json_compatible
+        or (_find_valid_json_body_assertion(strategy) is not None)
+        or bool(strategy.variable_extractions)
     )
     if not should_parse:
         return _BodyJsonResolution(
@@ -1558,6 +1638,87 @@ def _resolve_body_json_assertion(
         warning=warning,
         extra_imports=frozenset({"json", "pytest"}),
         classification=classification,
+    )
+
+
+# --- Dependências entre endpoints: extração no teste produtor (Etapa 5) -----
+
+# Formato hoje sempre produzido por TestStrategyEngine.
+# _find_variable_extraction_candidates ("$.campo", só nível superior) —
+# suportar também "$.a.b" (aninhado) não custa nada extra, já que
+# _get_nested_value aceita qualquer profundidade. Nunca inventa uma
+# segmentação para um formato fora deste padrão (ex.: um índice de array
+# "$.items[0]"): _json_path_segments devolve None e a extração
+# correspondente é simplesmente omitida — ramo de defesa estrutural, não um
+# caminho hoje alcançável (o motor não produz outro formato).
+_JSON_PATH_PREFIX = "$."
+_JSON_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+
+def _json_path_segments(json_path: str) -> tuple[str, ...] | None:
+    if not json_path.startswith(_JSON_PATH_PREFIX):
+        return None
+    segments = json_path[len(_JSON_PATH_PREFIX) :].split(".")
+    if not segments or any(not _JSON_PATH_SEGMENT.match(segment) for segment in segments):
+        return None
+    return tuple(segments)
+
+
+def _tuple_literal(values: tuple[str, ...]) -> str:
+    rendered = ", ".join(_python_string_literal(value) for value in values)
+    return f"({rendered},)" if len(values) == 1 else f"({rendered})"
+
+
+@dataclass(frozen=True)
+class _VariableExtractionResolution:
+    lines: tuple[str, ...]
+    docstring_note: str
+    helper_names: frozenset[str]
+
+
+def _resolve_variable_extraction(
+    strategy: TestStrategy, producer_test_id: str
+) -> _VariableExtractionResolution:
+    # strategy.variable_extractions já chega FILTRADO para "reivindicado"
+    # (endpoint_dependency_linking.py, chamado antes da geração) — todo
+    # item aqui tem, de fato, ao menos um VariableUsage em outro endpoint
+    # consumindo-o; nenhuma extração é gerada "só por via das dúvidas".
+    if not strategy.variable_extractions:
+        return _VariableExtractionResolution(lines=(), docstring_note="", helper_names=frozenset())
+
+    lines: list[str] = []
+    docstring_parts: list[str] = []
+    for extraction in strategy.variable_extractions:
+        path = _json_path_segments(extraction.json_path)
+        if path is None:
+            continue
+        local_variable = sanitize_identifier(extraction.variable_name)
+        fail_message = (
+            f"variable_extraction:{extraction.variable_name}: campo '{extraction.json_path}' "
+            "não encontrado na resposta; nenhum valor foi disponibilizado para os testes que "
+            "dependem desta variável."
+        )
+        lines.append(
+            f"    {local_variable} = _get_nested_value(body, {_tuple_literal(path)})\n"
+        )
+        lines.append(f"    if {local_variable} is None:\n")
+        lines.append(f"        _assertion_failures.append({_python_string_literal(fail_message)})\n")
+        lines.append("    else:\n")
+        lines.append(
+            f"        _set_shared_variable({_python_string_literal(producer_test_id)}, "
+            f"{_python_string_literal(extraction.variable_name)}, {local_variable})\n"
+        )
+        docstring_parts.append(
+            f"    Variable extraction: '{extraction.variable_name}' <- {extraction.json_path}\n"
+        )
+
+    if not lines:
+        return _VariableExtractionResolution(lines=(), docstring_note="", helper_names=frozenset())
+
+    return _VariableExtractionResolution(
+        lines=tuple(lines),
+        docstring_note="".join(docstring_parts),
+        helper_names=frozenset({"get_nested_value", "set_shared_variable"}),
     )
 
 
@@ -1891,19 +2052,79 @@ _RECORD_ASSERTION_RESULT_SOURCE = (
     "        handle.write(json.dumps(entry, ensure_ascii=False, default=str) + \"\\n\")\n"
 )
 
+# Dependências entre endpoints (Etapa 4/5): grava, num arquivo NDJSON
+# (PLAYWRIGHT_SHARED_VARIABLES_PATH — mesmo padrão de _record_assertion_
+# result: arquivo, nunca stdout; ausência da env var = feature desligada,
+# sem erro), o valor que ESTE teste produziu para outro teste consumir
+# depois, na MESMA execução. Nunca AQO_* (isso é sempre um valor resolvido
+# ANTES da execução, ver variable_resolver.py) — este é um estado de
+# RUNTIME, que só existe depois do produtor rodar. A chave de correlação é
+# sempre o PAR (producer_test_id, variable_name), nunca só o nome —
+# isolamento estrutural, ver VariableUsage.
+_SET_SHARED_VARIABLE_SOURCE = (
+    "def _set_shared_variable(producer_test_id, variable_name, value):\n"
+    "    shared_path = os.environ.get(\"PLAYWRIGHT_SHARED_VARIABLES_PATH\")\n"
+    "    if not shared_path:\n"
+    "        return\n"
+    "    entry = {\n"
+    "        \"producer_test_id\": producer_test_id,\n"
+    "        \"variable_name\": variable_name,\n"
+    "        \"value\": value,\n"
+    "    }\n"
+    "    with open(shared_path, \"a\", encoding=\"utf-8\") as handle:\n"
+    "        handle.write(json.dumps(entry, ensure_ascii=False, default=str) + \"\\n\")\n"
+)
+
+# Lê de volta um valor gravado por _set_shared_variable — sempre a ÚLTIMA
+# ocorrência do par (producer_test_id, variable_name) no arquivo (nunca a
+# primeira: uma reexecução do mesmo produtor dentro da mesma suíte deve
+# valer o resultado mais recente). Arquivo ausente, env var ausente, ou
+# par nunca gravado devolvem None — NUNCA inventa um valor; quem chama
+# (o preâmbulo emitido por VariableResolutionSession.resolve_shared_
+# variable) decide o que fazer com None (falhar explicitamente, nunca
+# seguir com um request vazio/inválido).
+_GET_SHARED_VARIABLE_SOURCE = (
+    "def _get_shared_variable(producer_test_id, variable_name):\n"
+    "    shared_path = os.environ.get(\"PLAYWRIGHT_SHARED_VARIABLES_PATH\")\n"
+    "    if not shared_path or not os.path.exists(shared_path):\n"
+    "        return None\n"
+    "    found = None\n"
+    "    with open(shared_path, \"r\", encoding=\"utf-8\") as handle:\n"
+    "        for line in handle:\n"
+    "            line = line.strip()\n"
+    "            if not line:\n"
+    "                continue\n"
+    "            try:\n"
+    "                entry = json.loads(line)\n"
+    "            except json.JSONDecodeError:\n"
+    "                continue\n"
+    "            if (\n"
+    "                entry.get(\"producer_test_id\") == producer_test_id\n"
+    "                and entry.get(\"variable_name\") == variable_name\n"
+    "            ):\n"
+    "                found = entry.get(\"value\")\n"
+    "    return found\n"
+)
+
 # Nome do helper -> texto; ordem estável de emissão (nunca depende de ordem
 # de dict/set em runtime) para manter a geração determinística — usado
 # tanto pela Parte 19 quanto pela Parte 20, deduplicado por nome quando as
 # duas precisam do mesmo helper (get_nested_value). record_assertion_result
-# vem primeiro porque os demais helpers (P1.1) chamam ele.
+# vem primeiro porque os demais helpers (P1.1) chamam ele; set/get_shared_
+# variable (dependências entre endpoints) não dependem de nenhum outro
+# helper, mas vêm logo depois por serem do mesmo "bloco" de evidência.
 _HELPER_SOURCES: dict[str, str] = {
     "record_assertion_result": _RECORD_ASSERTION_RESULT_SOURCE,
+    "set_shared_variable": _SET_SHARED_VARIABLE_SOURCE,
+    "get_shared_variable": _GET_SHARED_VARIABLE_SOURCE,
     "get_nested_value": _GET_NESTED_VALUE_SOURCE,
     "assert_required_field_present": _ASSERT_REQUIRED_FIELD_PRESENT_SOURCE,
     "assert_field_type": _ASSERT_FIELD_TYPE_SOURCE,
 }
 _HELPER_ORDER: tuple[str, ...] = (
     "record_assertion_result",
+    "set_shared_variable",
+    "get_shared_variable",
     "get_nested_value",
     "assert_required_field_present",
     "assert_field_type",
@@ -2692,8 +2913,11 @@ def _generate_positive_success_test(
     request: NormalizedRequest,
     environment: PostmanEnvironment | None,
 ) -> GeneratedEndpointTest:
-    slug = endpoint_source_to_slug(strategy.endpoint_source)
-    function_name = f"test_{slug}_success"
+    # Mesma fórmula usada por endpoint_dependency_linking.producer_test_id_for
+    # (única fonte de verdade para este identificador) — nunca reconstruída
+    # aqui em paralelo: um teste consumidor referencia este MESMO valor como
+    # producer_test_id (VariableUsage), calculado antes da geração em si.
+    function_name = producer_test_id_for(strategy.endpoint_source)
     # Maiúsculas: mesma convenção de _SUPPORTED_METHODS/_NATIVE_HTTP_METHODS
     # (Parte 08A) — _render_http_call decide, a partir daqui, entre um
     # método nativo (api_context.<verbo>) e fetch(..., method=...).
@@ -2717,6 +2941,11 @@ def _generate_positive_success_test(
     expected_values_resolution = _resolve_expected_values_assertion(
         strategy, response_body_resolution, request.body, function_name
     )
+    # Dependências entre endpoints (Etapa 5): producer_test_id é sempre a
+    # PRÓPRIA função sendo gerada agora — este teste É o produtor de
+    # qualquer variable_extractions que carregue (já filtradas para
+    # "reivindicado" antes da geração, ver endpoint_dependency_linking.py).
+    variable_extraction_resolution = _resolve_variable_extraction(strategy, function_name)
 
     # Já sabido "supported" (gate em _unsupported_reason); recomputado aqui
     # (puro, sem efeito colateral) com uma sessão NOVA — mesmo padrão já
@@ -2727,7 +2956,7 @@ def _generate_positive_success_test(
     # preâmbulo/import à MESMA sessão, na ordem em que aparecem abaixo.
     session = VariableResolutionSession(environment=environment)
 
-    path_segments = _resolve_path_segments(request.url, session)
+    path_segments = _resolve_path_segments(request.url, session, _path_variable_usages(strategy))
     host_segments = _resolve_host_segments(request.url, session)
     assert path_segments is not None and host_segments is not None  # garantido pelo gate
     path = _relative_path_from_segments(path_segments)
@@ -2800,10 +3029,15 @@ def _generate_positive_success_test(
 
     # "record_assertion_result" (P1.1): mesma razão do "os"/"json" acima —
     # a asserção de status sempre o usa, nunca condicional a outra parte.
+    # session.needed_helpers (Etapa 6): "get_shared_variable", só quando
+    # algum segmento de path foi resolvido via
+    # VariableResolutionSession.resolve_shared_variable.
     helpers_block = _render_helpers_block(
         required_fields_resolution.helper_names
         | field_types_resolution.helper_names
         | expected_values_resolution.helper_names
+        | variable_extraction_resolution.helper_names
+        | frozenset(session.needed_helpers)
         | {"record_assertion_result"}
     )
 
@@ -2826,6 +3060,7 @@ def _generate_positive_success_test(
         f"{field_types_resolution.docstring_note}"
         f"{json_schema_resolution.docstring_note}"
         f"{expected_values_resolution.docstring_note}"
+        f"{variable_extraction_resolution.docstring_note}"
         '    """\n'
         "\n"
         f"{preamble}"
@@ -2843,6 +3078,12 @@ def _generate_positive_success_test(
         f"{status_resolution.assertion_line}"
         f"{''.join(content_type_resolution.lines)}"
         f"{''.join(response_body_resolution.lines)}"
+        # Dependências entre endpoints (Etapa 5): extração roda logo depois
+        # do body já parseado/validado acima, antes das demais categorias
+        # de asserção — falha de extração vira mais uma entrada em
+        # _assertion_failures, nunca uma exceção que interrompe o teste
+        # antes das outras assertions rodarem (mesmo princípio P2.2).
+        f"{''.join(variable_extraction_resolution.lines)}"
         f"{''.join(required_fields_resolution.lines)}"
         f"{''.join(field_types_resolution.lines)}"
         f"{''.join(json_schema_resolution.lines)}"

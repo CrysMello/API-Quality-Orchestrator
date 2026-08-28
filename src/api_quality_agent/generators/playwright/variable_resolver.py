@@ -44,7 +44,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from api_quality_agent.domain.models import EnvironmentVariable, PostmanEnvironment
+from api_quality_agent.domain.models import EnvironmentVariable, PostmanEnvironment, VariableUsage
 from api_quality_agent.generators.playwright.endpoint_file_naming import to_snake_case
 from api_quality_agent.generators.playwright.warning_catalog import UNRESOLVED_VARIABLE
 
@@ -195,6 +195,16 @@ class VariableResolutionSession:
     # manifesto ("variáveis resolvidas sem expor secrets").
     resolved_variables: dict[str, str] = field(default_factory=dict)
     unresolved: list[UnresolvedVariable] = field(default_factory=list)
+    # Dependências entre endpoints (Etapa 6): nomes de helper module-level
+    # (ver playwright_endpoint_test_generator._HELPER_SOURCES) que
+    # resolve_shared_variable precisou emitir — "get_shared_variable" é o
+    # único usado por esta sessão; acumulado aqui (e não devolvido só como
+    # retorno de uma função de resolução isolada, como os demais helpers)
+    # porque resolve_shared_variable é chamado de dentro de
+    # _resolve_path_segments, que já devolve segmentos, não um conjunto de
+    # helpers — quem monta o arquivo final (_generate_positive_success_test)
+    # une isto aos demais helper_names antes de chamar _render_helpers_block.
+    needed_helpers: set[str] = field(default_factory=set)
 
     def _environment_value(self, name: str) -> tuple[str, bool] | None:
         # Prioridades 1 (Environment) e 2 (variável de Collection, mesclada
@@ -276,6 +286,38 @@ class VariableResolutionSession:
             )
             return local_variable
         return self._defer(name, local_variable)
+
+    def resolve_shared_variable(self, usage: VariableUsage) -> str:
+        # Dependências entre endpoints (Etapa 6): valor PRODUZIDO por outro
+        # teste em runtime — nunca AQO_* (isso é sempre prioridade 4, um
+        # valor resolvido ANTES da execução; este aqui só existe depois do
+        # produtor rodar) e nunca um literal conhecido na geração
+        # (prioridades 1-3, já esgotadas por quem chama antes de chegar
+        # aqui). Local var dedup pelo MESMO padrão de _defer (nome derivado
+        # do nome da variável Postman, nunca escolhido pelo chamador) — mas
+        # a correlação em runtime é sempre o PAR (producer_test_id,
+        # variable_name), nunca só o nome (isolamento estrutural, ver
+        # VariableUsage/endpoint_dependency_linking.py).
+        local_variable = sanitize_identifier(usage.variable_name)
+        if local_variable in self.seen_local_names:
+            return local_variable
+        self.seen_local_names.add(local_variable)
+        self.needed_helpers.add("get_shared_variable")
+        self.extra_imports |= {"os", "json"}
+        message = (
+            f"Variável '{usage.variable_name}' indisponível. "
+            f"Dependência: {usage.producer_test_id}. "
+            "O teste produtor pode ter falhado ou não ter sido executado."
+        )
+        self.preamble_lines.append(
+            f"    {local_variable} = _get_shared_variable("
+            f"{python_string_literal(usage.producer_test_id)}, "
+            f"{python_string_literal(usage.variable_name)})\n"
+        )
+        self.preamble_lines.append(
+            f"    assert {local_variable} is not None, {python_string_literal(message)}\n"
+        )
+        return local_variable
 
     def resolve_compile_time(
         self, name: str, *, collection_literal: str | None = None
