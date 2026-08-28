@@ -1,14 +1,17 @@
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
 from api_quality_agent.application.orchestration import PlaywrightGenerationResult
 from api_quality_agent.domain.models import (
+    AnalyzedCollectionRequest,
     ExecutionContext,
     ExecutionMode,
     GeneratedArtifact,
     PostmanCollectionDocument,
     PostmanEnvironment,
+    TestStrategy,
 )
 from api_quality_agent.domain.services import ApiAnalysisEngine, TestStrategyEngine
 from api_quality_agent.generators.playwright import (
@@ -17,6 +20,13 @@ from api_quality_agent.generators.playwright import (
     GeneratedTestSuite,
     PlaywrightTestSuiteBuilder,
     merge_collection_variables,
+)
+from api_quality_agent.generators.playwright.endpoint_dependency_linking import (
+    EndpointDependencyInput,
+    link_endpoint_dependencies,
+)
+from api_quality_agent.generators.playwright.playwright_generation_warning import (
+    PlaywrightGenerationWarning,
 )
 from api_quality_agent.ports.outbound import ArtifactRepository, SchemaProvider
 from api_quality_agent.shared import sanitize_filename_component
@@ -111,17 +121,79 @@ class GeneratePlaywrightTestSuiteUseCase:
         # merge_collection_variables).
         effective_environment = merge_collection_variables(environment, document.variables)
 
-        endpoint_tests: list[GeneratedEndpointTest] = []
+        # Fase 1 (dependências entre endpoints): uma TestStrategy por
+        # endpoint, na ordem original da Collection — TODAS precisam existir
+        # antes da linkagem (Etapa 3): só depois de conhecer as
+        # variable_extractions de TODO endpoint é possível saber quem produz
+        # o que um outro consome. O PlaywrightEndpointTestGenerator em si
+        # nunca vê essa lista completa — recebe só a TestStrategy (já
+        # linkada) do seu próprio endpoint, uma de cada vez, como sempre.
+        built: list[tuple[AnalyzedCollectionRequest, TestStrategy]] = []
         for analyzed in analyzed_requests:
             resolution = self._schema_provider.resolve(analyzed.raw_request)
             strategy = self._test_strategy_engine.build_strategy(
                 analyzed.analysis, response_schema=resolution.schema
             )
-            endpoint_tests.append(
-                self._endpoint_test_generator.generate_endpoint(
-                    strategy, analyzed.normalized_request, effective_environment
+            built.append((analyzed, strategy))
+
+        # Fase 2: linkagem (endpoint_dependency_linking.py) — pura, nunca
+        # decide nada de geração em si; devolve, por endpoint, o que o
+        # generator precisa (variable_usages), o que cada produtor deve
+        # tratar como reivindicado, a ordem final de execução/arquivo
+        # (Etapa 7) e os warnings de ciclo (Etapa 8).
+        linking_result = link_endpoint_dependencies(
+            [
+                EndpointDependencyInput(
+                    endpoint_source=strategy.endpoint_source,
+                    normalized_request=analyzed.normalized_request,
+                    variable_extractions=strategy.variable_extractions,
                 )
+                for analyzed, strategy in built
+            ]
+        )
+        warnings_by_endpoint: dict[str, list[PlaywrightGenerationWarning]] = {}
+        for warning in linking_result.warnings:
+            # endpoint_dependency_linking.py sempre preenche `endpoint`
+            # (endpoint_source real, nunca None) para este código — a
+            # assinatura de PlaywrightGenerationWarning.endpoint é
+            # `str | None` só porque outros pontos de geração podem deixar
+            # em branco, nunca este.
+            if warning.endpoint is not None:
+                warnings_by_endpoint.setdefault(warning.endpoint, []).append(warning)
+
+        # Fase 3: gera cada endpoint na ORDEM final calculada pela linkagem
+        # (Etapa 7) — nunca a ordem crua da Collection quando ela difere.
+        # variable_extractions chega à TestStrategy já FILTRADA para
+        # "reivindicado" (só o que outro endpoint realmente consome); um
+        # endpoint sem nenhuma dependência atravessa esta fase byte a byte
+        # como antes (strategy sem variable_usages, extractions vazias
+        # continuam vazias).
+        endpoint_tests: list[GeneratedEndpointTest] = []
+        for index in linking_result.order:
+            analyzed, strategy = built[index]
+            linked = linking_result.linked_endpoints[index]
+            linked_strategy = strategy
+            if linked.claimed_extraction_names or linked.variable_usages:
+                linked_strategy = replace(
+                    strategy,
+                    variable_extractions=tuple(
+                        extraction
+                        for extraction in strategy.variable_extractions
+                        if extraction.variable_name in linked.claimed_extraction_names
+                    ),
+                    variable_usages=linked.variable_usages,
+                )
+            generated = self._endpoint_test_generator.generate_endpoint(
+                linked_strategy, analyzed.normalized_request, effective_environment
             )
+            extra_warnings = tuple(warnings_by_endpoint.get(strategy.endpoint_source, ()))
+            if linked.variable_usages or extra_warnings:
+                generated = replace(
+                    generated,
+                    variable_usages=linked.variable_usages,
+                    warnings=generated.warnings + extra_warnings,
+                )
+            endpoint_tests.append(generated)
         return endpoint_tests
 
     def _persist(

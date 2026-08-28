@@ -76,6 +76,12 @@ INFORMATION_INSUFFICIENT = "INFORMATION_INSUFFICIENT"
 
 UNRESOLVED_VARIABLE = "UNRESOLVED_VARIABLE"
 FILE_NAME_COLLISION_RESOLVED = "FILE_NAME_COLLISION_RESOLVED"
+# Dependências entre endpoints (VariableUsage/VariableExtraction, ver
+# endpoint_dependency_linking.py): um ciclo (A depende de B que depende de
+# A, direto ou por uma cadeia maior) nunca vira uma ordem arbitrária — os
+# endpoints envolvidos ficam sem VariableUsage nenhum (caem no mesmo
+# fallback de variável não resolvida de sempre), e isto registra POR QUE.
+CIRCULAR_VARIABLE_DEPENDENCY = "CIRCULAR_VARIABLE_DEPENDENCY"
 
 # Descrição curta só para leitura humana (documentação/depuração/relatório
 # futuro) — nunca usada como a mensagem do warning em si, que é sempre
@@ -118,6 +124,10 @@ PLAYWRIGHT_WARNING_CODE_DESCRIPTIONS: dict[str, str] = {
     ),
     UNRESOLVED_VARIABLE: "Variável {{...}} referenciada sem valor resolvível.",
     FILE_NAME_COLLISION_RESOLVED: "Nome de arquivo gerado colidiu com outro; sufixo aplicado.",
+    CIRCULAR_VARIABLE_DEPENDENCY: (
+        "Dependência circular entre endpoints detectada; nenhum deles foi ligado como "
+        "produtor/consumidor um do outro."
+    ),
 }
 
 # Conjunto estável usado para validar `code` em PlaywrightGenerationWarning

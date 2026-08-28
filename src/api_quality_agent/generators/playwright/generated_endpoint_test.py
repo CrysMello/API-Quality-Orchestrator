@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from api_quality_agent.domain.models import VariableUsage
 from api_quality_agent.generators.playwright.assertion_classification import (
     AssertionClassification,
 )
@@ -50,3 +51,14 @@ class GeneratedEndpointTest:
     # (nada gerado, nada a classificar). Consumida por
     # DefaultPlaywrightTestSuiteBuilder para o generation-manifest.json.
     assertion_classifications: tuple[AssertionClassification, ...] = ()
+    # Dependências entre endpoints (aditivo — default preserva toda
+    # construção existente): variáveis que ESTE endpoint consome, produzidas
+    # por outro endpoint em runtime — nunca preenchido pelo
+    # EndpointTestGenerator em si (ele nunca descobre outros endpoints
+    # sozinho), sempre atribuído DEPOIS por quem orquestra a linkagem
+    # (GeneratePlaywrightTestSuiteUseCase, via endpoint_dependency_linking.py)
+    # com dataclasses.replace sobre o resultado já gerado. Consumido por
+    # DefaultPlaywrightTestSuiteBuilder tanto para decidir se a suíte ganha
+    # prefixo numérico de ordem (Etapa 7) quanto para a seção
+    # "variable_dependencies" do generation-manifest.json.
+    variable_usages: tuple[VariableUsage, ...] = ()

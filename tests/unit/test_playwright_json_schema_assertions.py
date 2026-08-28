@@ -69,11 +69,20 @@ def _build_validator(schema: dict):
     # gerador — nunca um stub que fingisse gravar.
     resolution = _resolve(schema)
     assert resolution.lines, "schema deveria gerar validação (sem $ref não suportado)"
+    # P2.2 (assertions independentes): resolution.lines agora acumula em
+    # _assertion_failures em vez de chamar pytest.fail() na hora — mesmo
+    # padrão de agregação final de _generate_positive_success_test
+    # reproduzido aqui, pra este wrapper continuar levantando
+    # pytest.fail.Exception exatamente como antes quando a validação falha
+    # (só que agora via o caminho adiado).
     source = (
         "import json\nimport os\nimport jsonschema\nimport pytest\n\n\n"
         + _RECORD_ASSERTION_RESULT_SOURCE
         + "\n\ndef _run(body):\n"
+        + "    _assertion_failures = []\n"
         + "".join(resolution.lines)
+        + "\n    if _assertion_failures:\n"
+        '        pytest.fail("Assertion(s) reprovada(s): " + "; ".join(_assertion_failures))\n'
     )
     namespace: dict = {}
     exec(source, namespace)  # noqa: S102 - texto do próprio gerador, não input externo

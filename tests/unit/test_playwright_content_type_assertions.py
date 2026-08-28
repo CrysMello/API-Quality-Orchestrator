@@ -353,7 +353,11 @@ def test_content_type_assertion_records_a_failed_result_and_still_raises(tmp_pat
     generated = PlaywrightEndpointTestGenerator().generate_endpoint(strategy, normalized_request)
     test_function = _load_generated_test_function(generated.content)
 
-    with pytest.raises(AssertionError):
+    # P2.2 (assertions independentes): a falha de Content-Type não
+    # interrompe mais o teste na hora (nunca mais um `raise` direto de
+    # AssertionError aqui) — é registrada e o teste só falha ao final,
+    # agregado com as demais assertions, via pytest.fail.Exception.
+    with pytest.raises(pytest.fail.Exception):
         test_function(_FakeApiContext(_FakeResponse(status=200, headers={"content-type": "text/html"})))
 
     lines = results_path.read_text(encoding="utf-8").strip().splitlines()

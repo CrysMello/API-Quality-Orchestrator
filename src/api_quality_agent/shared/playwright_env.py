@@ -35,3 +35,19 @@ TRACE_DIR_ENV_VAR = "PLAYWRIGHT_TRACE_DIR"
 # bloco): é este manifesto, lido pelo PlaywrightAdapter, que associa
 # definitivamente test_id -> trace.
 TRACE_ARTIFACTS_PATH_ENV_VAR = "PLAYWRIGHT_TRACE_ARTIFACTS_PATH"
+
+# Dependências entre endpoints (endpoint_dependency_linking.py): caminho de
+# um arquivo NDJSON onde um teste PRODUTOR grava um valor extraído da
+# resposta (ex.: customer_id) para um teste CONSUMIDOR ler depois, na MESMA
+# execução — nunca AQO_* (que é só para variável de ambiente/secret
+# resolvida ANTES da execução; um valor de runtime não existe até o
+# produtor rodar). Igual às outras variáveis deste módulo: o
+# PlaywrightAdapter só define o caminho (dentro da mesma pasta temporária
+# por execução, removida ao final); ele nunca lê nem interpreta este
+# arquivo — só o próprio conftest.py/helpers gerados (produtor escreve,
+# consumidor lê) usam o conteúdo. Cada linha é
+# {"producer_test_id":, "variable_name":, "value":} — a chave de
+# correlação é sempre o PAR (producer_test_id, variable_name), nunca só o
+# nome da variável, para dois produtores diferentes usando o mesmo nome
+# nunca colidirem (ver VariableUsage).
+SHARED_VARIABLES_PATH_ENV_VAR = "PLAYWRIGHT_SHARED_VARIABLES_PATH"

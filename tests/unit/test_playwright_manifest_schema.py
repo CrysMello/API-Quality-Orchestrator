@@ -13,7 +13,7 @@ fazendo seu trabalho.
 
 import json
 
-from api_quality_agent.domain.models import ExecutionContext, ExecutionMode
+from api_quality_agent.domain.models import ExecutionContext, ExecutionMode, VariableUsage
 from api_quality_agent.generators.playwright import (
     AssertionClassification,
     AssertionPrecision,
@@ -37,7 +37,10 @@ _TOP_LEVEL_KEYS = {
     "resolved_variables",
     "warnings",
     "assertion_classifications",
+    "variable_dependencies",
 }
+
+_VARIABLE_DEPENDENCY_ENTRY_KEYS = {"variable", "consumer", "producer_test_id", "location"}
 
 _ENDPOINT_ENTRY_KEYS = {"endpoint", "method", "path", "file", "rendered", "coverage"}
 
@@ -73,13 +76,12 @@ def _manifest_payload(endpoint_tests) -> dict:
     return json.loads(manifest_file.content)
 
 
-def test_schema_version_is_1_2():
-    # Bumpado conscientemente na Parte 24: warnings "de código" ganham
-    # method/location/metadata (deduplicados) e endpoints ganham "coverage"
-    # (nunca remove/renomeia uma chave existente).
+def test_schema_version_is_1_3():
+    # Bumpado conscientemente para dependências entre endpoints: acrescenta
+    # "variable_dependencies" (nunca remove/renomeia uma chave existente).
     payload = _manifest_payload([_endpoint_test("GET /pets")])
 
-    assert payload["schema_version"] == "1.2"
+    assert payload["schema_version"] == "1.3"
 
 
 def test_top_level_keys_match_exactly():
@@ -249,6 +251,93 @@ def test_empty_suite_produces_empty_but_well_shaped_manifest():
         "summary": {"exact": 0, "derived": 0, "broad": 0},
         "entries": [],
     }
+    assert payload["variable_dependencies"] == []
+
+
+# --- Dependências entre endpoints --------------------------------------------
+
+
+def test_variable_dependency_entry_shape():
+    usage = VariableUsage(
+        variable_name="customer_id",
+        producer_test_id="test_post_customers_success",
+        location="path",
+    )
+    endpoint_tests = [
+        _endpoint_test("POST /customers"),
+        _endpoint_test("GET /customers/{id}", variable_usages=(usage,)),
+    ]
+
+    payload = _manifest_payload(endpoint_tests)
+
+    assert len(payload["variable_dependencies"]) == 1
+    entry = payload["variable_dependencies"][0]
+    assert set(entry.keys()) == _VARIABLE_DEPENDENCY_ENTRY_KEYS
+    assert entry == {
+        "variable": "customer_id",
+        "consumer": "GET /customers/{id}",
+        "producer_test_id": "test_post_customers_success",
+        "location": "path",
+    }
+
+
+def test_variable_dependency_triggers_numeric_file_prefix_ordering():
+    # Etapa 7: prefixo numérico só aparece quando a suíte tem alguma
+    # dependência real — endpoint_tests já chega na ordem final (quem
+    # decide isso é o use case, nunca este builder).
+    usage = VariableUsage(
+        variable_name="customer_id",
+        producer_test_id="test_post_customers_success",
+        location="path",
+    )
+    endpoint_tests = [
+        _endpoint_test("POST /customers"),
+        _endpoint_test("GET /customers/{id}", variable_usages=(usage,)),
+    ]
+
+    payload = _manifest_payload(endpoint_tests)
+
+    files = [entry["file"] for entry in payload["endpoints"]]
+    assert files == [
+        "endpoints/01_test_post_customers.py",
+        "endpoints/02_test_get_customers_by_id.py",
+    ]
+
+
+def test_no_dependency_keeps_file_names_unprefixed():
+    endpoint_tests = [_endpoint_test("GET /pets"), _endpoint_test("POST /pets")]
+
+    payload = _manifest_payload(endpoint_tests)
+
+    files = [entry["file"] for entry in payload["endpoints"]]
+    assert files == ["endpoints/test_get_pets.py", "endpoints/test_post_pets.py"]
+
+
+def test_pytest_ini_is_only_emitted_when_the_suite_has_a_dependency():
+    # Prefixo numérico (01_test_...) não bate com o python_files padrão do
+    # pytest ("test_*.py"/"*_test.py") — sem um pytest.ini ampliando esse
+    # padrão, o arquivo simplesmente nunca seria coletado. Emitido só
+    # quando a numeração de fato acontece — nunca para a suíte comum, sem
+    # nenhuma mudança de comportamento.
+    usage = VariableUsage(
+        variable_name="customer_id",
+        producer_test_id="test_post_customers_success",
+        location="path",
+    )
+    with_dependency = DefaultPlaywrightTestSuiteBuilder().build(
+        [_endpoint_test("POST /customers"), _endpoint_test("GET /customers/{id}", variable_usages=(usage,))],
+        _context(),
+    )
+    without_dependency = DefaultPlaywrightTestSuiteBuilder().build(
+        [_endpoint_test("GET /pets")], _context()
+    )
+
+    assert any(f.relative_path == "pytest.ini" for f in with_dependency.files)
+    assert not any(f.relative_path == "pytest.ini" for f in without_dependency.files)
+
+    pytest_ini = next(f for f in with_dependency.files if f.relative_path == "pytest.ini")
+    assert "python_files" in pytest_ini.content
+    assert "[0-9][0-9]_test_*.py" in pytest_ini.content
 
 
 # --- Parte 23: classificação EXACT/DERIVED/BROAD -----------------------------

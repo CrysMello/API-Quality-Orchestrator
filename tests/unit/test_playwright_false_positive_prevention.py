@@ -158,7 +158,10 @@ def test_case1_error_status_never_passes_just_because_it_belongs_to_4xx():
     # dois "são 4xx".
     generated = _generate(_GET_USERS, (_status_assertion(422),))
 
-    with pytest.raises(AssertionError):
+    # P2.2 (assertions independentes): a falha de status não é mais um
+    # `raise` de AssertionError direto — é registrada e o teste falha ao
+    # final, agregado com as demais assertions, via pytest.fail.Exception.
+    with pytest.raises(pytest.fail.Exception):
         _run_generated_scenario(generated, _FakeResponse(status=401))
 
 
@@ -171,7 +174,7 @@ def test_case1_client_and_auth_error_codes_never_validate_each_other():
         for actual in codes:
             if actual == expected:
                 continue
-            with pytest.raises(AssertionError):
+            with pytest.raises(pytest.fail.Exception):
                 _run_generated_scenario(generated, _FakeResponse(status=actual))
 
 
@@ -196,9 +199,12 @@ def test_case2_valid_json_error_body_never_passes_a_positive_scenario():
 
     # Status e Content-Type batem (a falha nunca pode ser "só porque não é
     # JSON"): o corpo É um JSON válido, só que é um erro, não o recurso
-    # esperado. _assert_required_field_present usa `assert` puro (Parte
-    # 19) — AssertionError, não pytest.fail.Exception.
-    with pytest.raises(AssertionError) as excinfo:
+    # esperado. P2.2: _assert_required_field_present ainda usa `assert`
+    # puro (Parte 19) internamente, mas o call site agora captura essa
+    # falha e o teste só é marcado como reprovado ao final, agregado com
+    # as demais categorias (json_schema também falha aqui) — sempre
+    # pytest.fail.Exception, nunca mais um AssertionError propagado direto.
+    with pytest.raises(pytest.fail.Exception) as excinfo:
         _run_generated_scenario(
             generated,
             _FakeResponse(
@@ -246,7 +252,7 @@ def test_case4_wrong_content_type_fails_even_with_json_looking_body():
         _GET_USERS, (_status_assertion(200), _content_type_assertion("application/json"))
     )
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(pytest.fail.Exception):
         _run_generated_scenario(
             generated,
             _FakeResponse(
@@ -273,7 +279,7 @@ def test_case5_missing_required_field_fails_even_when_the_rest_of_the_schema_is_
 
     # "email" está presente e com o tipo certo (resto do schema válido);
     # só "id" falta.
-    with pytest.raises(AssertionError) as excinfo:
+    with pytest.raises(pytest.fail.Exception) as excinfo:
         _run_generated_scenario(
             generated,
             _FakeResponse(status=200, body_text=json.dumps({"email": "ana@exemplo.com"})),
@@ -293,7 +299,7 @@ def test_case6_wrong_type_fails_without_any_coercion():
 
     # "42" como STRING (aspas no JSON) — nunca convertido para int só
     # porque "parece" um número.
-    with pytest.raises(AssertionError) as excinfo:
+    with pytest.raises(pytest.fail.Exception) as excinfo:
         _run_generated_scenario(
             generated, _FakeResponse(status=200, body_text=json.dumps({"age": "42"}))
         )
@@ -319,7 +325,7 @@ def test_case7_broad_approximation_still_catches_the_one_thing_it_can():
     # uma checagem real, só limitada — nunca finge validar o status.
     generated = _generate(_GET_USERS, ())
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(pytest.fail.Exception):
         _run_generated_scenario(generated, response=None)
 
     _run_generated_scenario(generated, _FakeResponse(status=200))  # nunca levanta
@@ -502,7 +508,7 @@ def test_assertion_result_recording_never_swallows_or_weakens_a_real_failure(tmp
     generated = _generate(_GET_USERS, (_status_assertion(422),))
     assert_no_false_positive_smells(generated.content)  # conteúdo real, nunca um smell proibido
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(pytest.fail.Exception):
         _run_generated_scenario(generated, _FakeResponse(status=401))
 
     lines = results_path.read_text(encoding="utf-8").strip().splitlines()
@@ -543,7 +549,7 @@ def test_content_type_recording_never_weakens_the_case4_failure(tmp_path, monkey
     )
     assert_no_false_positive_smells(generated.content)
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(pytest.fail.Exception):
         _run_generated_scenario(
             generated,
             _FakeResponse(

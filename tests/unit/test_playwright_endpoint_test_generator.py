@@ -626,7 +626,14 @@ def test_sensitive_header_authorization_is_never_written_literally():
     assert generated.warnings[0].code == "SENSITIVE_HEADER_OMITTED"
 
 
-def test_sensitive_header_matching_environment_secret_is_omitted():
+def test_sensitive_header_matching_environment_secret_is_deferred_not_omitted():
+    # P2.4 (correção do bug comprovado por test_playwright_literal_secret_
+    # e2e.py): um header com um valor LITERAL que bate com uma
+    # EnvironmentVariable secreta não é mais omitido silenciosamente
+    # (isso quebraria a request — o header nunca seria enviado) — é
+    # deferido para runtime via AQO_<NOME>, mesmo mecanismo já usado para
+    # uma referência {{variable}}, sem gerar warning (resolvido com
+    # sucesso, mesmo critério de {{variable}}).
     from api_quality_agent.domain.models import EnvironmentVariable, PostmanEnvironment
 
     environment = PostmanEnvironment(
@@ -644,8 +651,9 @@ def test_sensitive_header_matching_environment_secret_is_omitted():
     )
 
     assert "valor-secreto-do-environment" not in generated.content
-    assert len(generated.warnings) == 1
-    assert generated.warnings[0].code == "SENSITIVE_HEADER_OMITTED"
+    assert generated.warnings == ()
+    assert "AQO_API_KEY" in generated.content
+    assert '"X-Api-Key": api_key,' in generated.content
 
 
 def test_content_type_header_is_reserved_and_omitted():

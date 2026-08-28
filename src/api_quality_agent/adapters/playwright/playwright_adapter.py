@@ -25,6 +25,7 @@ from api_quality_agent.ports.outbound.collection_runner import DEFAULT_RUN_TIMEO
 from api_quality_agent.shared import (
     ASSERTION_RESULTS_PATH_ENV_VAR,
     HTTP_TRANSACTIONS_PATH_ENV_VAR,
+    SHARED_VARIABLES_PATH_ENV_VAR,
     TRACE_ARTIFACTS_PATH_ENV_VAR,
     TRACE_DIR_ENV_VAR,
     mask_all_occurrences,
@@ -58,6 +59,14 @@ _ASSERTION_RESULTS_FILENAME = "assertion-results.ndjson"
 # nome do arquivo sozinho como mecanismo de correlação.
 _TRACE_RAW_DIR_NAME = "traces-raw"
 _TRACE_MANIFEST_FILENAME = "trace-manifest.ndjson"
+# Dependências entre endpoints: arquivo NDJSON (mesma pasta temporária,
+# mesmo raciocínio das demais) onde um teste produtor grava um valor
+# extraído para um teste consumidor ler na MESMA execução, via
+# SHARED_VARIABLES_PATH_ENV_VAR — este adapter só define o caminho e o
+# remove ao final; nunca lê nem interpreta o conteúdo (isso é feito pelos
+# próprios testes gerados, produtor escreve/consumidor lê, nunca depois da
+# execução como as outras evidências acima).
+_SHARED_VARIABLES_FILENAME = "shared-variables.ndjson"
 
 
 class _JunitReportNotGeneratedError(Exception):
@@ -134,6 +143,7 @@ class PlaywrightAdapter:
         trace_raw_dir = Path(report_dir) / _TRACE_RAW_DIR_NAME
         trace_raw_dir.mkdir(parents=True, exist_ok=True)
         trace_manifest_path = str(Path(report_dir) / _TRACE_MANIFEST_FILENAME)
+        shared_variables_path = str(Path(report_dir) / _SHARED_VARIABLES_FILENAME)
         try:
             return self._run_with_report_export(
                 tests_path=tests_path,
@@ -143,6 +153,7 @@ class PlaywrightAdapter:
                 assertion_results_path=assertion_results_path,
                 trace_dir=str(trace_raw_dir),
                 trace_manifest_path=trace_manifest_path,
+                shared_variables_path=shared_variables_path,
                 start=start,
                 known_secret_values=known_secret_values,
             )
@@ -159,6 +170,7 @@ class PlaywrightAdapter:
         assertion_results_path: str,
         trace_dir: str,
         trace_manifest_path: str,
+        shared_variables_path: str,
         start: float,
         known_secret_values: tuple[str, ...],
     ) -> ExecutionResult:
@@ -183,6 +195,7 @@ class PlaywrightAdapter:
             ASSERTION_RESULTS_PATH_ENV_VAR: assertion_results_path,
             TRACE_DIR_ENV_VAR: trace_dir,
             TRACE_ARTIFACTS_PATH_ENV_VAR: trace_manifest_path,
+            SHARED_VARIABLES_PATH_ENV_VAR: shared_variables_path,
         }
 
         try:

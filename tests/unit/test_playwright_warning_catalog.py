@@ -310,9 +310,19 @@ def test_sensitive_header_warning_never_leaks_the_secret_value():
         strategy, normalized_request, environment
     )
 
-    warning = next(w for w in generated.warnings if w.code == "SENSITIVE_HEADER_OMITTED")
-    assert "valor-secreto-do-environment" not in warning.message
-    assert all("valor-secreto-do-environment" not in value for _, value in warning.metadata)
+    # P2.4 (correção do bug comprovado por test_playwright_literal_secret_
+    # e2e.py): este caso (header literal cujo valor bate com uma
+    # EnvironmentVariable secreta) não gera mais SENSITIVE_HEADER_OMITTED
+    # — o valor é deferido para runtime com sucesso, mesmo critério de
+    # uma referência {{variable}}, sem warning nenhum. A propriedade
+    # essencial deste teste (o valor nunca aparece em nenhum warning nem
+    # no código gerado) continua garantida por construção: nenhum warning
+    # de header jamais carrega o VALOR do header (ver _header_warning),
+    # só o nome — verificado abaixo mesmo sem haver warning nesta rodada.
+    assert generated.warnings == ()
+    for warning in generated.warnings:
+        assert "valor-secreto-do-environment" not in warning.message
+        assert all("valor-secreto-do-environment" not in value for _, value in warning.metadata)
     assert "valor-secreto-do-environment" not in generated.content
 
 
