@@ -1,0 +1,11 @@
+{
+    "packageVersion":  "0.1.0",
+    "pythonTag":  "cp313-win_amd64",
+    "wheelFileNames":  [
+                           "api_quality_orchestrator-0.1.0-py3-none-any.whl",
+                           "et_xmlfile-2.0.0-py3-none-any.whl",
+                           "openpyxl-3.1.5-py2.py3-none-any.whl",
+                           "pyyaml-6.0.3-cp313-cp313-win_amd64.whl"
+                       ],
+    "generatedAt":  "2026-09-18T02:39:17.2535343Z"
+}

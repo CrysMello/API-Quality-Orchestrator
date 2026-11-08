@@ -1,0 +1,21 @@
+# O que NÃO entra no .vsix empacotado (npx @vscode/vsce package).
+# Regra geral: só `out/**` (JS compilado) e `resources/python-dist/**`
+# (wheels + manifest.json) precisam ir. Tudo que é fonte/dev fica de fora.
+
+.vscode/**
+.vscode-test/**
+src/**
+scripts/**
+tsconfig.json
+.vscodeignore
+**/.gitkeep
+**/*.map
+**/*.ts
+node_modules/**
+# Compilado de src/test/ — só usado por "npm test" em desenvolvimento,
+# nunca em runtime da extensão instalada.
+out/test/**
+
+# Confirmar sempre com `npx @vscode/vsce ls` antes de empacotar que
+# resources/python-dist/*.whl e manifest.json aparecem na listagem —
+# é fácil um glob genérico acima excluir isso por engano.

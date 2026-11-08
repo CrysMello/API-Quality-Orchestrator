@@ -34,8 +34,23 @@ backups/
 *_original_collection.json
 
 # Editors
-.vscode/
+# Escopado só pra raiz (/.vscode/) porque extension/.vscode/ guarda
+# launch.json/tasks.json versionados de propósito (config de debug da
+# extensão, não preferência pessoal de editor).
+/.vscode/
 .idea/
 
 # Arquivos locais de trabalho (não versionados)
 /local/
+
+# Extensão VSCode (extension/) — código TS é versionado, build/deps não.
+extension/node_modules/
+extension/out/
+extension/*.vsix
+# Binário de VSCode baixado pelo @vscode/test-electron para os testes de
+# integração (extension/src/test/) — grande, regenerável, nunca versionar.
+extension/.vscode-test/
+# Wheels são binários grandes e regeneráveis por extension/scripts/prepare-release.ps1
+# — nunca versionar. manifest.json (texto pequeno, documenta o que foi
+# empacotado na última release) é versionado normalmente, sem regra aqui.
+extension/resources/python-dist/*.whl

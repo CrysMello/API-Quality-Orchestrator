@@ -1,0 +1,59 @@
+{
+  "name": "api-quality-orchestrator",
+  "displayName": "API Quality Orchestrator",
+  "description": "Gera, executa e reporta testes de qualidade de API (Postman/Playwright) a partir do VSCode, usando o CLI api-quality-orchestrator.",
+  "version": "0.0.1",
+  "publisher": "crystiane-mello-local",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Testing",
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "apiQuality.doctor",
+        "title": "API Quality Orchestrator: Doctor (validar ambiente)"
+      },
+      {
+        "command": "apiQuality.version",
+        "title": "API Quality Orchestrator: Version"
+      },
+      {
+        "command": "apiQuality.configShow",
+        "title": "API Quality Orchestrator: Config Show"
+      },
+      {
+        "command": "apiQuality.generate",
+        "title": "API Quality Orchestrator: Gerar testes (Postman/Playwright)"
+      },
+      {
+        "command": "apiQuality.run",
+        "title": "API Quality Orchestrator: Executar testes"
+      },
+      {
+        "command": "apiQuality.report",
+        "title": "API Quality Orchestrator: Abrir relatório"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package --allow-missing-repository",
+    "test": "tsc -p . && node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "4.0.0",
+    "typescript": "^5.4.0"
+  }
+}
